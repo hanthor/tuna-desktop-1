@@ -2352,9 +2352,7 @@ impl WindowManager {
                                 self.windows
                                     .get(id)
                                     .and_then(|w| w.surface.x11_surface())
-                                    .is_some_and(|s| {
-                                        !s.is_decorated() && !s.is_override_redirect()
-                                    })
+                                    .is_some_and(|s| !s.is_decorated() && !s.is_override_redirect())
                             })
                         });
                     let surface = target.and_then(|id| self.surface_of(id));
