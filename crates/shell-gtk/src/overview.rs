@@ -353,6 +353,8 @@ pub struct OverviewUi {
     first_remote_hit: Rc<RefCell<Option<(providers::Remote, String)>>>,
     dash: gtk::ApplicationWindow,
     dash_row: gtk::Box,
+    /// Holds the dash's width to its tiles' (`fit_dash`).
+    dash_scroll: gtk::ScrolledWindow,
     dash_signature: Vec<(u64, Option<String>, Option<String>)>,
     /// The dash's items in row order, with any still animating out.
     dash_items: Rc<RefCell<Vec<DashSlot>>>,
@@ -556,16 +558,15 @@ impl OverviewUi {
             );
         }
 
-        // Dash: bottom center. The strip spans the full output width and
-        // the tiles scroll inside it, so every redraw commits the same
-        // buffer size: GDK reuses same-size SHM pools but never destroys
-        // them, so a content-sized dash leaks one server-side pool (fd
-        // plus mapping) per window change while the overview is open
-        // (S-GROWTH).
+        // Dash: bottom center, as wide as its tiles (GNOME's dash is as
+        // wide as its icons); past the monitor's width they scroll. A
+        // full-width strip would have the compositor blend its
+        // transparent sides every overview frame (#503). Resizing on
+        // window changes leaks no pool: the compositor releases shm
+        // buffers once uploaded (#1084), so GDK never forgets one it
+        // still holds (S-GROWTH, #307).
         let dash = layer_window(app, "tuna-shell-dash", "tuna-overview-dash");
         dash.set_anchor(Edge::Bottom, true);
-        dash.set_anchor(Edge::Left, true);
-        dash.set_anchor(Edge::Right, true);
         dash.set_margin(Edge::Bottom, 12);
         dash.set_keyboard_mode(KeyboardMode::None);
         dash.set_title(Some("Dash"));
@@ -574,6 +575,7 @@ impl OverviewUi {
         dash_row.set_halign(gtk::Align::Center);
         let dash_scroll = gtk::ScrolledWindow::new();
         dash_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+        dash_scroll.set_propagate_natural_width(true);
         dash_scroll.set_child(Some(&dash_row));
         dash.set_child(Some(&dash_scroll));
 
@@ -605,6 +607,7 @@ impl OverviewUi {
             first_remote_hit: Rc::new(RefCell::new(None)),
             dash,
             dash_row,
+            dash_scroll,
             dash_signature: Vec::new(),
             dash_items: Rc::default(),
             dash_separator: {
@@ -1097,7 +1100,11 @@ impl OverviewUi {
                 for id in ids {
                     geometries.push(tuna_shell_control::WindowIconGeometry {
                         window: *id,
-                        x: monitor.x() + bounds.x().round() as i32,
+                        // The dash is centered on the monitor (layer-shell
+                        // placement of a bottom-anchored surface).
+                        x: monitor.x()
+                            + (monitor.width() - dash.width()) / 2
+                            + bounds.x().round() as i32,
                         y: monitor.y() + monitor.height() - dash.height() - 12
                             + bounds.y().round() as i32,
                         width: bounds.width().round() as i32,
@@ -1292,6 +1299,7 @@ impl OverviewUi {
         }
         me.dash_icons = icons;
         drop(slots);
+        me.fit_dash();
         drop(me);
         // Ease once nothing is borrowed: an unanimated ease lands at once.
         let weak = Rc::downgrade(ui);
@@ -1402,6 +1410,26 @@ impl OverviewUi {
         item.ease(true, false, |_| {});
         me.show_apps = Some((show_apps, toggled));
         item
+    }
+
+    /// Size the dash's surface to its tiles, up to the monitor's width.
+    /// Both bounds: a layer surface is sized to its minimum, and a
+    /// scroller's own minimum is nothing.
+    fn fit_dash(&self) {
+        let monitor_width = gtk::gdk::Display::default()
+            .and_then(|d| d.monitors().item(0))
+            .and_downcast::<gtk::gdk::Monitor>()
+            .map_or(1280, |m| m.geometry().width());
+        let (_, natural, _, _) = self.dash_row.measure(gtk::Orientation::Horizontal, -1);
+        let width = natural.min(monitor_width);
+        if self.dash_scroll.max_content_width() != width
+            || self.dash_scroll.min_content_width() != width
+        {
+            // Keep min <= max on the way.
+            self.dash_scroll.set_min_content_width(-1);
+            self.dash_scroll.set_max_content_width(width);
+            self.dash_scroll.set_min_content_width(width);
+        }
     }
 
     /// Rebuild the grid's tiles if it has any: after a change to the
