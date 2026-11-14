@@ -142,8 +142,8 @@ impl Occlusion {
 }
 
 /// Draw one planned pass bottom to top. Each element gets only its
-/// visible damage. With `opaque`, what an element drawn pixel for pixel
-/// declares opaque is drawn without blending, as Mutter draws opaque
+/// visible damage. With `opaque`, what an element declares opaque is
+/// drawn without blending ([`unblended_regions`]), as Mutter draws opaque
 /// regions: on llvmpipe a blended pixel also reads the one beneath it
 /// (#503).
 pub(crate) fn draw_planned<R, E>(
@@ -171,21 +171,70 @@ where
             })
             .collect();
         // Only on a target without a transform: on the nested (flipped)
-        // target GLES left the opaque regions in the wrong place. And only
-        // for an element drawn pixel for pixel from its buffer: a scaled
-        // one (an overview preview, a window opening) rounds its opaque
-        // region out over edge pixels it covers only in part.
-        let src = element.src().size;
-        let one_to_one = (src.w - f64::from(geometry.size.w)).abs() < 0.5
-            && (src.h - f64::from(geometry.size.h)).abs() < 0.5;
-        let opaque_regions = if opaque && one_to_one {
-            element.opaque_regions(scale.into())
+        // target GLES left the opaque regions in the wrong place.
+        let opaque_regions = if opaque {
+            unblended_regions(element, scale, geometry)
         } else {
             Default::default()
         };
         element.draw(frame, element.src(), geometry, &damage, &opaque_regions)?;
     }
     Ok(())
+}
+
+/// What of `element`, drawn into `geometry`, may skip blending: what it
+/// declares opaque, as Mutter draws a shaped texture's opaque region
+/// unblended, scaled clones included (meta-shaped-texture.c). An element
+/// drawn pixel for pixel from its buffer names it as is. A scaled one
+/// (an overview preview, a window opening, a workspace card) filters: a
+/// pixel near a region's edge mixes in texels outside it (a client's
+/// shadow, a rounded corner), and the region was rounded to whole pixels
+/// when it was scaled. There each region is inset until every texel a
+/// pixel's bilinear sample reads lies inside it: opaque texels give the
+/// same pixel blended or not, and only the blend's read of the pixel
+/// beneath is saved.
+pub(crate) fn unblended_regions<E: Element>(
+    element: &E,
+    scale: f64,
+    geometry: PhysicalRect,
+) -> smithay::backend::renderer::utils::OpaqueRegions<i32, Physical> {
+    let regions = element.opaque_regions(scale.into());
+    let src = element.src().size;
+    let one_to_one = (src.w - f64::from(geometry.size.w)).abs() < 0.5
+        && (src.h - f64::from(geometry.size.h)).abs() < 0.5;
+    if one_to_one || regions.is_empty() {
+        return regions;
+    }
+    if element.alpha() < 1.0 {
+        return Default::default();
+    }
+    let src = element.transform().transform_size(src);
+    let (dx, dy) = (
+        scaled_inset(geometry.size.w, src.w),
+        scaled_inset(geometry.size.h, src.h),
+    );
+    regions
+        .into_iter()
+        .filter_map(|r| {
+            let size = (r.size.w - 2 * dx, r.size.h - 2 * dy);
+            (size.0 > 0 && size.1 > 0)
+                .then(|| Rectangle::new((r.loc.x + dx, r.loc.y + dy).into(), size.into()))
+        })
+        .collect()
+}
+
+/// How far inside a scaled opaque region, in frame pixels along one axis,
+/// a pixel's bilinear sample reads only texels of the region. The sample
+/// of a pixel reaches half a texel, `dst / src / 2` pixels, beyond its
+/// centre, and the region may be rounded out by up to two pixels at
+/// either end (a rescaled surface rounds its origin and its size; a
+/// memory buffer rounds out): a texel's reach plus three pixels covers
+/// both with room to spare.
+fn scaled_inset(dst: i32, src: f64) -> i32 {
+    if src <= 0.0 {
+        return i32::MAX / 4;
+    }
+    (f64::from(dst) / src / 2.0).floor() as i32 + 3
 }
 
 /// What one drawn frame did: elements repainted and culled, and for each
@@ -538,5 +587,149 @@ mod tests {
         assert!(!occlusion
             .visit(rect(0, 0, 601, 300), std::iter::empty())
             .is_empty());
+    }
+
+    #[test]
+    fn scaled_insets_cover_a_texels_reach_and_the_rounding() {
+        // Shrunk, as overview previews are: three pixels inside.
+        assert_eq!(scaled_inset(363, 880.0), 3);
+        assert_eq!(scaled_inset(880, 880.0), 3);
+        // Grown: a texel reaches further.
+        assert_eq!(scaled_inset(1760, 880.0), 4);
+        assert_eq!(scaled_inset(3, 1.0), 4);
+        // Nothing to sample: nothing skips blending.
+        assert!(scaled_inset(10, 0.0) > 10_000);
+    }
+
+    /// Headless GL harness: surfaceless EGL, or `None` when this machine
+    /// has no EGL (the test skips instead of failing).
+    #[cfg(feature = "drm")]
+    fn headless_renderer() -> Option<smithay::backend::renderer::gles::GlesRenderer> {
+        use smithay::backend::egl::native::EGLSurfacelessDisplay;
+        use smithay::backend::egl::{EGLContext, EGLDisplay};
+        let display = unsafe { EGLDisplay::new(EGLSurfacelessDisplay) }.ok()?;
+        let context = EGLContext::new(&display).ok()?;
+        unsafe { smithay::backend::renderer::gles::GlesRenderer::new(context) }.ok()
+    }
+
+    /// A window drawn scaled over a busy background gives the same
+    /// pixels with its opaque interior unblended as all blended, at
+    /// shrinking and growing scales from fractional origins: no pixel
+    /// that skips blending samples the shadow around the interior (#503).
+    #[cfg(feature = "drm")]
+    #[test]
+    fn scaled_opaque_interiors_draw_the_same_pixels_unblended() {
+        use smithay::backend::allocator::Fourcc;
+        use smithay::backend::renderer::element::memory::{
+            MemoryRenderBuffer, MemoryRenderBufferRenderElement,
+        };
+        use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
+        use smithay::backend::renderer::{Bind, ExportMem, Frame, Offscreen};
+        use smithay::utils::Transform;
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("occlusion GL test skipped: no surfaceless EGL");
+            return;
+        };
+        // 64x48: an 8 px shadow ramp (premultiplied black) around an
+        // opaque checkerboard, which any filtering across it shows.
+        let (w, h, m) = (64, 48, 8);
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let edge = x.min(w - 1 - x).min(y).min(h - 1 - y);
+                if edge < m {
+                    pixels.extend([0, 0, 0, (edge * 30) as u8]);
+                } else {
+                    let v: u8 = if (x + y) % 2 == 0 { 230 } else { 20 };
+                    pixels.extend([v, 255 - v, v / 2, 255]);
+                }
+            }
+        }
+        let interior = Rectangle::new((m, m).into(), (w - 2 * m, h - 2 * m).into());
+        let buffer = MemoryRenderBuffer::from_slice(
+            &pixels,
+            Fourcc::Argb8888,
+            (w, h),
+            1,
+            Transform::Normal,
+            Some(vec![interior]),
+        );
+        let size = (160, 120);
+        let draw =
+            |renderer: &mut GlesRenderer,
+             element: &RescaleRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>,
+             opaque: bool| {
+                let mut out: GlesTexture = renderer
+                    .create_buffer(Fourcc::Abgr8888, size.into())
+                    .expect("output texture");
+                let mut target = renderer.bind(&mut out).expect("bind output");
+                {
+                    let mut frame = renderer
+                        .render(&mut target, size.into(), Transform::Normal)
+                        .expect("frame");
+                    // Busy background: one-pixel columns of three colours.
+                    for (k, color) in [
+                        Color32F::new(1.0, 0.0, 0.0, 1.0),
+                        Color32F::new(0.0, 1.0, 0.0, 1.0),
+                        Color32F::new(0.0, 0.0, 1.0, 1.0),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let columns: Vec<PhysicalRect> = (k as i32..size.0)
+                            .step_by(3)
+                            .map(|x| rect(x, 0, 1, size.1))
+                            .collect();
+                        frame.clear(color, &columns).expect("background");
+                    }
+                    let geometry = element.geometry(1.0.into());
+                    draw_planned::<GlesRenderer, _>(
+                        &mut frame,
+                        1.0,
+                        std::slice::from_ref(element),
+                        &[vec![geometry]],
+                        opaque,
+                    )
+                    .expect("draw");
+                    let _ = frame.finish().expect("finish");
+                }
+                let mapping = renderer
+                    .copy_framebuffer(&target, Rectangle::from_size(size.into()), Fourcc::Abgr8888)
+                    .expect("read back");
+                renderer.map_texture(&mapping).expect("map").to_vec()
+            };
+        for (scale, origin) in [
+            (0.37, (5, 7)),
+            (0.5, (11, 3)),
+            (0.73, (2, 9)),
+            (0.913, (13, 13)),
+            (1.37, (1, 2)),
+            (1.9, (3, 1)),
+        ] {
+            let element = MemoryRenderBufferRenderElement::from_buffer(
+                &mut renderer,
+                (f64::from(origin.0), f64::from(origin.1)),
+                &buffer,
+                None,
+                None,
+                None,
+                Kind::Unspecified,
+            )
+            .expect("element");
+            let element = RescaleRenderElement::from_element(element, origin.into(), scale);
+            let geometry = element.geometry(1.0.into());
+            assert!(
+                !unblended_regions(&element, 1.0, geometry).is_empty(),
+                "at {scale} some of the interior skips blending"
+            );
+            let unblended = draw(&mut renderer, &element, true);
+            let blended = draw(&mut renderer, &element, false);
+            let differing = unblended
+                .chunks_exact(4)
+                .zip(blended.chunks_exact(4))
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(differing, 0, "at {scale}: pixels differ");
+        }
     }
 }
