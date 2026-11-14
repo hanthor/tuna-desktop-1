@@ -725,8 +725,10 @@ mod tests {
             let unblended = draw(&mut renderer, &element, true);
             let blended = draw(&mut renderer, &element, false);
             let differing = unblended
-                .chunks_exact(4)
-                .zip(blended.chunks_exact(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(blended.as_chunks::<4>().0)
                 .filter(|(a, b)| a != b)
                 .count();
             assert_eq!(differing, 0, "at {scale}: pixels differ");
