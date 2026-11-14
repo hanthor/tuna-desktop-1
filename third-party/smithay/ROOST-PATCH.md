@@ -372,3 +372,19 @@ surfaceless llvmpipe micro-benchmark). GL tests in instanced_rect_tests
 the unit square sharing the diagonal) and that translucent instanced
 rectangles cover each pixel exactly once. The isolated diff is retained
 in INSTANCED-TRIANGLES-PATCH.diff; the pinned version stays 0.7.0.
+
+Issue #503 also changes src/backend/allocator/gbm.rs: the additive
+GbmAllocator::keep_mapped(bool) builder makes every buffer create_buffer
+returns hold a read mapping (gbm_bo_map with GBM_BO_TRANSFER_READ of the
+whole buffer) until it is destroyed; GbmBuffer releases it with
+gbm_bo_unmap before the buffer object itself (field order). Mesa's
+kms_swrast winsys (kms_dri_sw_winsys.c) maps a render target's dumb
+buffer for every llvmpipe scene and unmaps it when its map count returns
+to zero, so each frame faulted in again every page it drew. With a
+mapping held for the buffer's life the renderer's own mapping persists.
+Hardware drivers may copy (detile) a buffer to map it, so the builder is
+off by default and Roost enables it only when GL_RENDERER is a Mesa
+software rasterizer (crates/compositor/src/drm.rs). Buffers from
+create_buffer_with_flags, from_bo and import_to are unchanged. The
+isolated diff is retained in GBM-KEEP-MAPPED-PATCH.diff; the pinned
+version stays 0.7.0.
