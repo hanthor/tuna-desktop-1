@@ -3655,21 +3655,31 @@ mod instanced_rect_tests {
         ];
         {
             let mut framebuffer = renderer.bind(&mut target).unwrap();
-            let mut frame = renderer.render(&mut framebuffer, size, Transform::Normal).unwrap();
+            let mut frame = renderer
+                .render(&mut framebuffer, size, Transform::Normal)
+                .unwrap();
             frame
                 .clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[Rectangle::from_size(size)])
                 .unwrap();
             // One instanced draw per rectangle, the first under the others.
             for rect in rects {
                 frame
-                    .draw_solid(rect, &[Rectangle::from_size(rect.size)], Color32F::new(0.5, 0.0, 0.0, 0.5))
+                    .draw_solid(
+                        rect,
+                        &[Rectangle::from_size(rect.size)],
+                        Color32F::new(0.5, 0.0, 0.0, 0.5),
+                    )
                     .unwrap();
             }
             frame.finish().unwrap().wait().unwrap();
         }
         let framebuffer = renderer.bind(&mut target).expect("bind");
         let mapping = renderer
-            .copy_framebuffer(&framebuffer, Rectangle::from_size((size.w, size.h).into()), Fourcc::Abgr8888)
+            .copy_framebuffer(
+                &framebuffer,
+                Rectangle::from_size((size.w, size.h).into()),
+                Fourcc::Abgr8888,
+            )
             .expect("read back");
         let pixels = renderer.map_texture(&mapping).expect("map");
         let mut expected = vec![0.0f32; (size.w * size.h) as usize];
