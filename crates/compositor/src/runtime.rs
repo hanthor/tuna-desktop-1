@@ -1898,6 +1898,9 @@ impl Runtime {
         // swipeTracker.js `_updateTouchpadGesture`/`_endTouchpadGesture`).
         self.interrupt_shell_swipe(crate::state::system_millis() as u32);
         self.control.set_overview(false);
+        // GNOME's lock closes the open menus and their grabs: a shell
+        // menu left open behind the lock kept the lock screen's keys.
+        self.state.dismiss_popup_grab_for_lock();
         // The shield covers GNOME's switcher popup and its window clones;
         // no window image may draw over the lock.
         self.switcher_thumbnails.clear();
@@ -2074,8 +2077,7 @@ impl Runtime {
         self.state.set_shortcut_inhibition_locked(false);
         self.overlay.hide();
         // The lock held the keyboard (`hold_lock_focus`); hand it back,
-        // as GNOME's unlock returns focus to the focused window: to a
-        // popup grab that outlived the lock first.
+        // as GNOME's unlock returns focus to the focused window.
         self.manager.refocus_after_lock(&mut self.state);
     }
 

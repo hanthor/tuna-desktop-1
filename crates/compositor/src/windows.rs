@@ -4315,9 +4315,9 @@ impl WindowManager {
     }
 
     /// The lock lifted: give the keyboard back to what had it, as GNOME
-    /// Shell's `popModal` does (screenShield.js locks with a modal stage
-    /// grab, which revokes Mutter's Wayland popup grab without dismissing
-    /// it): the topmost popup of a grab that outlived the lock, else the
+    /// Shell's `popModal` does. The lock dismissed every popup grab
+    /// ([`crate::State::dismiss_popup_grab_for_lock`]), so only a grab taken
+    /// while locked is returned to (its topmost popup); otherwise the
     /// owner a popup grab hands back to (the parked overview, an
     /// Exclusive layer, the focused window). Without this the keyboard
     /// stayed on the destroyed lock surface until the next click.

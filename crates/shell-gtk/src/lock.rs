@@ -587,6 +587,11 @@ impl LockUi {
         }
         window.add_css_class("tuna-lock");
         window.set_title(Some("Lock Screen"));
+        // Its own window group: GTK sends a group's key and button
+        // events to the group's grab widget, and an open panel menu
+        // (autohide popover) holds that grab in the default group, so
+        // the lock screen would never hear a key until the menu closed.
+        gtk::WindowGroup::new().add_window(&window);
 
         // The clock page (unlock-dialog-clock).
         let clock = gtk::Label::new(None);
