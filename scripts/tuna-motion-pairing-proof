@@ -466,6 +466,9 @@ try:
         reduce(name, dialog_measure(buffer, True, screenshot(f"{name}-settled")))
         action("close")
         client.wait(timeout=10)
+        # The client's exit can reach the compositor after the clock moves;
+        # its close then starts at the new frozen time and never ends.
+        wait(lambda d: not d["windows"], f"{prefix}dim-client-closing")
         move(now + 500)
         wait(lambda d: not d["windows"] and not d["window_lifecycle"]["destroying"], f"{prefix}dim-client-gone")
 
