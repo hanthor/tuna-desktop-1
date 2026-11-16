@@ -426,6 +426,9 @@ pub struct WindowManager {
     /// Window-menu requests `(window, x, y)` in global logical pixels,
     /// drained by the runtime for the shell.
     menu_requests: Vec<(u64, i32, i32)>,
+    /// The wallpaper's right click and long press (GNOME's background
+    /// menu); the runtime drains what they recognized for the shell.
+    background: crate::background_menu::Gestures,
     /// The active workspace at the last reconcile.
     last_active_workspace: Option<u32>,
     /// The modifiers of the chord that opened the switcher, Shift
@@ -725,6 +728,7 @@ impl WindowManager {
             lock_swipe: false,
             tablet: tablet_input::TabletFocus::default(),
             menu_requests: Vec::new(),
+            background: crate::background_menu::Gestures::default(),
             last_active_workspace: None,
             switcher_opener: 0,
             switcher_keys: None,
@@ -3759,6 +3763,7 @@ impl WindowManager {
         };
         let travelled = (pos.x - self.pointer_pos.x).hypot(pos.y - self.pointer_pos.y);
         self.pointer_pos = pos;
+        self.background.motion(pos);
         // An interactive move/resize owns the pointer until release.
         if self.grab_motion(state, pos) {
             return;
@@ -4094,6 +4099,13 @@ impl WindowManager {
     /// IBus's candidate window does) so panel menus take keys; the
     /// button itself follows pointer focus from the last motion.
     pub fn pointer_button(&mut self, state: &mut State, button: u32, pressed: bool, time: u32) {
+        if pressed {
+            // A new press first ends any long press in progress; one that
+            // lands on the bare wallpaper begins its own below.
+            self.background.cancel();
+        } else {
+            self.background.release(button);
+        }
         let trace = std::env::var_os("TUNA_POINTER_TRACE").is_some();
         if trace {
             // Everything that decides where a press lands, before it acts:
@@ -4295,6 +4307,10 @@ impl WindowManager {
                     // every raise-on-click press raises, focused or not.
                     self.raise_family(id);
                 }
+            } else if !self.lock_input_active {
+                // Nothing under the pointer: the bare wallpaper.
+                self.background
+                    .press(button, pos, std::time::Instant::now());
             }
         }
         // Mapping, closing or restacking a surface can change what lies
@@ -5029,6 +5045,50 @@ impl WindowManager {
     /// Window-menu requests since the last call: `(window, x, y)`.
     pub fn take_menu_requests(&mut self) -> Vec<(u64, i32, i32)> {
         std::mem::take(&mut self.menu_requests)
+    }
+
+    /// When an armed long press on the wallpaper is due.
+    pub fn background_menu_deadline(&self) -> Option<std::time::Instant> {
+        self.background.deadline()
+    }
+
+    /// The shell's `BackgroundMenu` messages for the right clicks and long
+    /// presses on the bare wallpaper recognized by `now`: where each
+    /// opens, local to the output it is on. Nothing opens over the lock
+    /// screen.
+    pub fn take_background_menus(
+        &mut self,
+        state: &State,
+        now: std::time::Instant,
+        locked: bool,
+    ) -> Vec<tuna_shell_control::Message> {
+        if locked || self.lock_input_active {
+            self.background.cancel();
+            self.background.take();
+            return Vec::new();
+        }
+        self.background.tick(now);
+        let slices = state.output_slices();
+        self.background
+            .take()
+            .into_iter()
+            .map(|at| {
+                let (x, y) = (at.x.floor() as i32, at.y.floor() as i32);
+                let slice = slices
+                    .iter()
+                    .find(|(_, area)| area.contains((x, y)))
+                    .or_else(|| slices.first());
+                let (connector, origin) = match slice {
+                    Some((name, area)) => (Some(name.clone()), area.loc),
+                    None => (None, (0, 0).into()),
+                };
+                tuna_shell_control::Message::BackgroundMenu {
+                    connector,
+                    x: x - origin.x,
+                    y: y - origin.y,
+                }
+            })
+            .collect()
     }
 
     /// Replace the accelerator grabs (org.gnome.Shell GrabAccelerators).

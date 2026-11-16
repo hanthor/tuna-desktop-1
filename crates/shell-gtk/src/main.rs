@@ -101,6 +101,7 @@ mod anim_clock;
 mod app_integration;
 mod audio_selection;
 mod audio_state;
+mod background_menu;
 mod background_settings;
 mod brightness;
 mod brightness_service;
@@ -249,6 +250,9 @@ struct Drained {
     /// Grabbed accelerator presses and releases `(action, time, mode, released)`.
     accelerators: Vec<(u32, u32, u32, bool)>,
     menus: Vec<tuna_shell_host::control::WindowMenuRequest>,
+    /// Right clicks and long presses on the wallpaper (GNOME's background
+    /// menu), in order.
+    background_menus: Vec<tuna_shell_host::control::BackgroundMenuRequest>,
     consent: Option<Option<(u64, String)>>,
     /// The latest display-change confirmation countdown, in seconds.
     display_change: Option<u32>,
@@ -356,6 +360,7 @@ fn drain(
                 let _ = control.request_snapshot();
             }
             Handled::WindowMenu(request) => out.menus.push(request),
+            Handled::BackgroundMenu(request) => out.background_menus.push(request),
             Handled::ShortcutConsent(request) => out.consent = Some(request),
             Handled::ConfirmDisplayChange(secs) => out.display_change = Some(secs),
             Handled::ShowCloseDialog(request) => {
@@ -4078,6 +4083,7 @@ fn build(app: &adw::Application) {
                     auth_events,
                     accelerators,
                     menus,
+                    background_menus,
                     consent,
                     display_change,
                     close_dialogs: close_dialog_updates,
@@ -4229,6 +4235,16 @@ fn build(app: &adw::Application) {
                 }
                 for request in menus {
                     window_menu.open(&request);
+                }
+                // The wallpaper's menu is no business of the lock screen.
+                if !locked {
+                    for request in &background_menus {
+                        background_menu::show(
+                            &window_menu,
+                            request,
+                            Rc::new(background_menu::open_panel),
+                        );
+                    }
                 }
                 for (index, count) in popups {
                     workspace_popup.display(index, count);

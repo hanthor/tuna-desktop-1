@@ -149,6 +149,9 @@ pub enum Handled {
     /// Hide this window's close dialog (it answered, went away or left
     /// the screen, or the session locked).
     HideCloseDialog(u64),
+    /// A right click or long press on the bare wallpaper: show GNOME's
+    /// background menu at the pointer (0.54).
+    BackgroundMenu(BackgroundMenuRequest),
     /// The keyboard switched Sticky or Slow Keys: save and confirm.
     KeyboardAidToggled {
         aid: tuna_shell_control::KeyboardAid,
@@ -1265,6 +1268,13 @@ impl ControlClient {
                 height,
             })),
             Message::HideCloseDialog { window } => Ok(Handled::HideCloseDialog(window)),
+            Message::BackgroundMenu { connector, x, y } => {
+                Ok(Handled::BackgroundMenu(BackgroundMenuRequest {
+                    connector,
+                    x,
+                    y,
+                }))
+            }
             Message::KeyboardAidToggled { aid, enabled } => {
                 Ok(Handled::KeyboardAidToggled { aid, enabled })
             }
@@ -1550,6 +1560,16 @@ pub struct CloseDialogRequest {
     pub height: i32,
 }
 
+/// Where to show gnome-shell's background menu: the pointer's place on the
+/// bare wallpaper, in logical pixels local to the output `connector`
+/// (`None`: the primary output).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundMenuRequest {
+    pub connector: Option<String>,
+    pub x: i32,
+    pub y: i32,
+}
+
 /// Short label for unexpected-message diagnostics.
 fn message_label(msg: &Message) -> &'static str {
     match msg {
@@ -1588,6 +1608,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::OverviewSwipe { .. } => "OverviewSwipe",
         Message::ShowCloseDialog { .. } => "ShowCloseDialog",
         Message::HideCloseDialog { .. } => "HideCloseDialog",
+        Message::BackgroundMenu { .. } => "BackgroundMenu",
     }
 }
 
@@ -2214,6 +2235,27 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn background_menu_messages_decode() {
+        let (mut client, mut peer) = handshook();
+        server_write(
+            &mut peer,
+            &Message::BackgroundMenu {
+                connector: Some("DP-1".into()),
+                x: 300,
+                y: 200,
+            },
+        );
+        assert_eq!(
+            client.poll().expect("menu"),
+            Handled::BackgroundMenu(BackgroundMenuRequest {
+                connector: Some("DP-1".into()),
+                x: 300,
+                y: 200,
+            })
+        );
     }
 
     #[test]

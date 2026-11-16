@@ -51,6 +51,12 @@ before decoding.
   lock). The shell answers `CommandKind::RespondCloseDialog { window,
   response }` with `CloseDialogResponse::ForceClose` or `Wait`. Texts are
   bounded by `MAX_TITLE_LEN`, sides by `MAX_CLOSE_DIALOG_SIDE`.
+- Background menu (0.54): `Message::BackgroundMenu { connector, x, y }`
+  (peers >=54 only) asks for gnome-shell's background menu ("Change
+  Background…", "Display Settings", "Settings") at the pointer after a
+  right click, or a press held 500 ms, on the bare wallpaper; `x`/`y` are
+  logical pixels local to the output `connector` (`None`: the primary
+  output). Never sent while locked.
 - Messages: `Message`, `StateOp`, `CommandKind`, `CommandStatus`,
   `ErrorKind`.
 - State types: `WindowInfo`, `WorkspaceInfo`, `OutputInfo`, `PreviewInfo`,

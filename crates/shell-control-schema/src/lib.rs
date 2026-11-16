@@ -227,9 +227,14 @@ impl ProtocolVersion {
     /// `HideCloseDialog`, and the shell-to-compositor `RespondCloseDialog`
     /// (gnome-shell's Force Quit / Wait). Positional postcard peers must
     /// ship together.
+    /// `0.51`-`0.53` belong to other branches (pidfd identity, mutter
+    /// gaps, remote access); this branch skips to `0.54`, which appends
+    /// the compositor-to-shell `BackgroundMenu` (a right click or long
+    /// press on the bare wallpaper opens gnome-shell's background menu,
+    /// #1184). Positional postcard peers must ship together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 50,
+        minor: 54,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -1191,6 +1196,18 @@ pub enum Message {
     /// (`meta_window_set_alive (TRUE)`), went away, left the screen, or
     /// the session locked. Sent only to peers advertising minor >= 50.
     HideCloseDialog { window: WindowId },
+    /// Since 0.54: a right click, or a press held 500 ms within 36 px, on
+    /// the bare wallpaper (no window, layer surface or popup under the
+    /// pointer): open gnome-shell 51's background menu (`backgroundMenu.js`,
+    /// "Change Background…", "Display Settings", "Settings") at the
+    /// pointer. `x`/`y` are logical pixels local to the output
+    /// `connector` (`None`: the primary output). Sent only to peers
+    /// advertising minor >= 54, never while locked.
+    BackgroundMenu {
+        connector: Option<String>,
+        x: i32,
+        y: i32,
+    },
 }
 
 /// [`Message::WorkspaceProgress`] positions are workspace indices times
@@ -2429,6 +2446,11 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
             }
         }
         Message::HideCloseDialog { .. } => {}
+        Message::BackgroundMenu { connector, .. } => {
+            if let Some(connector) = connector {
+                check_title(connector)?;
+            }
+        }
     }
     Ok(())
 }
@@ -2647,11 +2669,11 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_50() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 50));
-        // A 0.49 shell still negotiates; a newer minor does not.
-        assert!(ProtocolVersion::new(0, 49).is_compatible_with(&CURRENT_VERSION));
-        assert!(!ProtocolVersion::new(0, 51).is_compatible_with(&CURRENT_VERSION));
+    fn current_version_is_0_54() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 54));
+        // A 0.50 shell still negotiates; a newer minor does not.
+        assert!(ProtocolVersion::new(0, 50).is_compatible_with(&CURRENT_VERSION));
+        assert!(!ProtocolVersion::new(0, 55).is_compatible_with(&CURRENT_VERSION));
     }
 
     #[test]
@@ -4214,5 +4236,50 @@ mod close_dialog_wire_tests {
             let command = Message::Command { id: 11, kind };
             assert_eq!(decode_frame(&encode_frame(&command)).unwrap(), command);
         }
+    }
+}
+
+#[cfg(test)]
+mod background_menu_wire_tests {
+    use super::*;
+
+    #[test]
+    fn background_menu_follows_hide_close_dialog_and_roundtrips() {
+        let tag = |bytes: &[u8]| bytes[0];
+        let mut buffer = [0_u8; 256];
+        let hide =
+            tag(postcard::to_slice(&Message::HideCloseDialog { window: 1 }, &mut buffer).unwrap());
+        let menu = Message::BackgroundMenu {
+            connector: Some("DP-1".into()),
+            x: 640,
+            y: 360,
+        };
+        assert_eq!(
+            tag(postcard::to_slice(&menu, &mut buffer).unwrap()),
+            hide + 1
+        );
+        for message in [
+            menu,
+            Message::BackgroundMenu {
+                connector: None,
+                x: 0,
+                y: 0,
+            },
+        ] {
+            assert_eq!(decode_frame(&encode_frame(&message)).unwrap(), message);
+        }
+    }
+
+    #[test]
+    fn background_menu_connector_is_bounded() {
+        let long = Message::BackgroundMenu {
+            connector: Some("a".repeat(MAX_TITLE_LEN + 1)),
+            x: 0,
+            y: 0,
+        };
+        assert!(matches!(
+            decode_frame(&encode_frame(&long)),
+            Err(DecodeError::TitleTooLong { .. })
+        ));
     }
 }

@@ -26,6 +26,8 @@
 #   bound of its warm state, #1088) and G-SHELL-STABLE only.
 #   --lock-menu-only runs panel readiness, G-LOCK-WITH-MENU-OPEN and
 #   G-SHELL-STABLE only (needs pam_wrapper).
+#   --shell-gaps-only runs panel readiness, the GNOME 51 shell-gap gates
+#   (G-BACKGROUND-MENU) and G-SHELL-STABLE only.
 #   --grid-cancel-only --grid-cancel-admission FILE is an exact CI comparison slice.
 #   --expect-grid-cancel-old-negative is permitted only in that admitted slice.
 #
@@ -528,6 +530,7 @@ DATEMENU_ONLY=0
 SEARCH_LEAK_ONLY=0
 WINDOW_LEAK_ONLY=0
 LOCK_MENU_ONLY=0
+SHELL_GAPS_ONLY=0
 GRID_CANCEL_ONLY=0
 GRID_CANCEL_OLD_NEGATIVE=0
 GRID_CANCEL_ADMISSION=""
@@ -548,9 +551,10 @@ while [ $# -gt 0 ]; do
         --search-leak-only) SEARCH_LEAK_ONLY=1; shift ;;
         --window-leak-only) WINDOW_LEAK_ONLY=1; shift ;;
         --lock-menu-only) LOCK_MENU_ONLY=1; shift ;;
+        --shell-gaps-only) SHELL_GAPS_ONLY=1; shift ;;
         --display) DISPLAY_ARG="$2"; shift 2 ;;
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
-        --help|-h) sed -n '2,33p' "$0"; exit 0 ;;
+        --help|-h) sed -n '2,35p' "$0"; exit 0 ;;
         *) echo "tuna-gtk-shell-proof: unknown argument $1" >&2; exit 1 ;;
     esac
 done
@@ -1477,7 +1481,7 @@ MEDIA_SOURCE=0
 if [ "$INSTALLED_PACKAGE" = 0 ] && [ "$SCREENSHOT_KEYS_ONLY" = 0 ] &&
    [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$KEYBOARD_ROUTES_ONLY" = 0 ] &&
    [ "$GRID_CANCEL_ONLY" = 0 ] && [ "$DATEMENU_ONLY" = 0 ] &&
-   [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ "$LOCK_MENU_ONLY" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ] &&
+   [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ "$LOCK_MENU_ONLY" = 0 ] && [ "$SHELL_GAPS_ONLY" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ] &&
    [ -z "${TUNA_PROOF_SHELL_BIN:-}" ] && [ -z "${TUNA_SHELL_BIN:-}" ] &&
    [ -n "${GITHUB_RUN_ID:-}" ] && [ -n "${GITHUB_RUN_ATTEMPT:-}" ] &&
    [ -n "${GITHUB_SHA:-}" ]; then
@@ -1486,7 +1490,7 @@ if [ "$INSTALLED_PACKAGE" = 0 ] && [ "$SCREENSHOT_KEYS_ONLY" = 0 ] &&
 fi
 if [ "$INSTALLED_PACKAGE" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ]; then
     cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor -p tuna-wallpaper-svg -p tuna-shell-gtk -p tuna-shell-host
-    if [ "$SCREENSHOT_KEYS_ONLY" = 0 ] && [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$GRID_HOVER_ONLY" = 0 ] && [ "$DATEMENU_ONLY" = 0 ] && [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ "$LOCK_MENU_ONLY" = 0 ]; then
+    if [ "$SCREENSHOT_KEYS_ONLY" = 0 ] && [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$GRID_HOVER_ONLY" = 0 ] && [ "$DATEMENU_ONLY" = 0 ] && [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ "$LOCK_MENU_ONLY" = 0 ] && [ "$SHELL_GAPS_ONLY" = 0 ]; then
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example icon-probe
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example shortcut-inhibit-client
     fi
@@ -1890,6 +1894,99 @@ if [ "$WINDOW_LEAK_ONLY" = 1 ]; then
     # Let the startup cover settle before the first window.
     sleep 3
     window_leak_proof
+    grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
+    shell_stable_gate
+    exit 0
+fi
+# GNOME 51 backgroundMenu.js: a right click, or a primary press held 500 ms,
+# on the bare wallpaper opens "Change Background…", "Display Settings" and
+# "Settings"; each opens its Settings panel (gnome-control-center is a
+# stand-in recording its arguments), Escape closes, a short click opens
+# nothing.
+background_menu_proof() {
+    cc_calls="$ARTIFACTS/control-center-calls"
+    : >"$cc_calls"
+    cat >"$ARTIFACTS/bin/gnome-control-center" <<CONTROL_CENTER
+#!/bin/sh
+printf '%s\\n' "\$*" >>"$cc_calls"
+CONTROL_CENTER
+    chmod +x "$ARTIFACTS/bin/gnome-control-center"
+    bg_x=$((WIDTH / 2))
+    bg_y=$((HEIGHT / 2))
+    bg_dump() {
+        "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-background-menu-$1.json" 20 ${2:+--press "$2"} ||
+            fail G-BACKGROUND-MENU "accessibility dump failed ($1)"
+    }
+    bg_calls() {
+        end=$(($(date +%s) + 10))
+        while [ "$(date +%s)" -le "$end" ]; do
+            [ "$(wc -l <"$cc_calls")" -ge "$1" ] && return 0
+            sleep 0.3
+        done
+        return 1
+    }
+    # A short click opens nothing.
+    xdotool mousemove --window "$WID" $bg_x $bg_y click 1
+    sleep 1.2
+    bg_dump short
+    hidden "$ARTIFACTS/a11y-background-menu-short.json" "Change Background…" ||
+        fail G-BACKGROUND-MENU "a short primary click opened the background menu"
+    # The secondary button recognizes on press.
+    xdotool mousemove --window "$WID" $bg_x $bg_y click 3
+    sleep 1.5
+    bg_dump right
+    for bg_row in "Change Background…" "Display Settings" "Settings"; do
+        showing "$ARTIFACTS/a11y-background-menu-right.json" "$bg_row" ||
+            fail G-BACKGROUND-MENU "the right click on the wallpaper did not show \"$bg_row\""
+    done
+    scrot "$ARTIFACTS/background-menu.png" >/dev/null
+    bg_dump display "Display Settings"
+    bg_calls 1 || fail G-BACKGROUND-MENU "Display Settings did not open Settings"
+    [ "$(sed -n 1p "$cc_calls")" = "display" ] ||
+        fail G-BACKGROUND-MENU "Display Settings ran gnome-control-center $(sed -n 1p "$cc_calls"), not display"
+    sleep 1
+    bg_dump closed
+    hidden "$ARTIFACTS/a11y-background-menu-closed.json" "Display Settings" ||
+        fail G-BACKGROUND-MENU "choosing a row left the menu open"
+    # A primary press held past 500 ms is GNOME's long press.
+    xdotool mousemove --window "$WID" $bg_x $bg_y mousedown 1
+    sleep 1
+    xdotool mouseup 1
+    sleep 1.5
+    bg_dump long
+    showing "$ARTIFACTS/a11y-background-menu-long.json" "Change Background…" ||
+        fail G-BACKGROUND-MENU "a held primary press did not open the background menu"
+    bg_dump change "Change Background…"
+    bg_calls 2 || fail G-BACKGROUND-MENU "Change Background… did not open Settings"
+    [ "$(sed -n 2p "$cc_calls")" = "background" ] ||
+        fail G-BACKGROUND-MENU "Change Background… ran gnome-control-center $(sed -n 2p "$cc_calls"), not background"
+    sleep 1
+    xdotool mousemove --window "$WID" $bg_x $bg_y click 3
+    sleep 1.5
+    bg_dump settings "Settings"
+    bg_calls 3 || fail G-BACKGROUND-MENU "Settings did not open Settings"
+    [ -z "$(sed -n 3p "$cc_calls")" ] ||
+        fail G-BACKGROUND-MENU "Settings ran gnome-control-center $(sed -n 3p "$cc_calls"), not the app itself"
+    sleep 1
+    # Escape closes the menu.
+    xdotool mousemove --window "$WID" $bg_x $bg_y click 3
+    sleep 1.5
+    bg_dump again
+    showing "$ARTIFACTS/a11y-background-menu-again.json" "Display Settings" ||
+        fail G-BACKGROUND-MENU "the menu did not open a second time"
+    xdotool key Escape
+    sleep 1
+    bg_dump escaped
+    hidden "$ARTIFACTS/a11y-background-menu-escaped.json" "Display Settings" ||
+        fail G-BACKGROUND-MENU "Escape left the background menu open"
+    pass G-BACKGROUND-MENU "a right click or held press on the wallpaper opens GNOME's menu; its rows open Settings' Background, Display and main pages; Escape closes it; a short click opens nothing"
+}
+if [ "$SHELL_GAPS_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "shell gaps desktop ready" ||
+        fail G-BACKGROUND-MENU "desktop never became ready"
+    # Let the startup cover settle before the first click.
+    sleep 3
+    background_menu_proof
     grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
     shell_stable_gate
     exit 0

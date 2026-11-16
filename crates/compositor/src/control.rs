@@ -616,7 +616,8 @@ impl<'a> Session<'a> {
     /// Peers older than 0.42 cannot decode `ConfirmDisplayChange`, nor
     /// older than 0.45 the tablet OSD messages, nor older than 0.48
     /// `WorkspaceProgress`, nor older than 0.49 `OverviewSwipe`, nor older
-    /// than 0.50 the close-dialog messages, and receive nothing.
+    /// than 0.50 the close-dialog messages, nor older than 0.54
+    /// `BackgroundMenu`, and receive nothing.
     pub fn send_window_menu(&mut self, menu: &Message) -> Result<(), ControlError> {
         if matches!(menu, Message::ConfirmDisplayChange { .. }) && self.peer_minor < 42 {
             return Ok(());
@@ -632,6 +633,9 @@ impl<'a> Session<'a> {
             Message::ShowCloseDialog { .. } | Message::HideCloseDialog { .. }
         ) && self.peer_minor < 50
         {
+            return Ok(());
+        }
+        if matches!(menu, Message::BackgroundMenu { .. }) && self.peer_minor < 54 {
             return Ok(());
         }
         let tablet = matches!(
@@ -1344,6 +1348,7 @@ impl<'a> Session<'a> {
             | Message::OverviewSwipe { .. }
             | Message::ShowCloseDialog { .. }
             | Message::HideCloseDialog { .. }
+            | Message::BackgroundMenu { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
                     kind: ErrorKind::UnknownCommand,
@@ -1407,6 +1412,7 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::OverviewSwipe { .. } => "OverviewSwipe",
         Message::ShowCloseDialog { .. } => "ShowCloseDialog",
         Message::HideCloseDialog { .. } => "HideCloseDialog",
+        Message::BackgroundMenu { .. } => "BackgroundMenu",
     }
 }
 
