@@ -233,9 +233,14 @@ impl ProtocolVersion {
     /// the compositor-to-shell `BackgroundMenu` (a right click or long
     /// press on the bare wallpaper opens gnome-shell's background menu,
     /// #1184). Positional postcard peers must ship together.
+    /// `0.55` appends the compositor-to-shell `WindowDemandsAttention`
+    /// (a window that asked for focus without the right to, or opened
+    /// behind the focused one, gets gnome-shell's "is ready" notification,
+    /// #1185); it goes after `BackgroundMenu`, so the variants other
+    /// branches add at 0.51-0.53 must be placed before both.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 54,
+        minor: 55,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -1209,6 +1214,15 @@ pub enum Message {
         x: i32,
         y: i32,
     },
+    /// Since 0.55: `window` demands attention (`meta_window_set_demands_attention`):
+    /// it asked for focus without the right to take it (an xdg-activation
+    /// token that is refused or stale, `meta-wayland-activation.c`), or it
+    /// mapped behind the focused window (`window.c` `meta_window_show`).
+    /// The shell posts gnome-shell's "“Title” is ready" notification
+    /// (`windowAttentionHandler.js`) and withdraws it once the window is
+    /// focused or gone. Sent once per demand, only to peers advertising
+    /// minor >= 55, never for the focused window.
+    WindowDemandsAttention { window: WindowId },
 }
 
 /// [`Message::WorkspaceProgress`] positions are workspace indices times
@@ -2452,6 +2466,7 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
                 check_title(connector)?;
             }
         }
+        Message::WindowDemandsAttention { .. } => {}
     }
     Ok(())
 }
@@ -2670,11 +2685,11 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_54() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 54));
+    fn current_version_is_0_55() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 55));
         // A 0.50 shell still negotiates; a newer minor does not.
         assert!(ProtocolVersion::new(0, 50).is_compatible_with(&CURRENT_VERSION));
-        assert!(!ProtocolVersion::new(0, 55).is_compatible_with(&CURRENT_VERSION));
+        assert!(!ProtocolVersion::new(0, 56).is_compatible_with(&CURRENT_VERSION));
     }
 
     #[test]
@@ -4282,5 +4297,32 @@ mod background_menu_wire_tests {
             decode_frame(&encode_frame(&long)),
             Err(DecodeError::TitleTooLong { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod window_attention_wire_tests {
+    use super::*;
+
+    #[test]
+    fn window_demands_attention_follows_background_menu_and_roundtrips() {
+        let tag = |bytes: &[u8]| bytes[0];
+        let mut buffer = [0_u8; 256];
+        let menu = tag(postcard::to_slice(
+            &Message::BackgroundMenu {
+                connector: None,
+                x: 0,
+                y: 0,
+            },
+            &mut buffer,
+        )
+        .unwrap());
+        let attention = Message::WindowDemandsAttention { window: 7 };
+        assert_eq!(
+            tag(postcard::to_slice(&attention, &mut buffer).unwrap()),
+            menu + 1,
+            "variant tags are positional: new messages go last"
+        );
+        assert_eq!(decode_frame(&encode_frame(&attention)).unwrap(), attention);
     }
 }

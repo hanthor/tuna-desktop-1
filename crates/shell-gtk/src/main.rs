@@ -187,6 +187,7 @@ mod weather;
 mod weather_section;
 mod wellbeing;
 mod wifi;
+mod window_attention;
 mod window_menu;
 mod wired;
 mod world_clocks;
@@ -254,6 +255,9 @@ struct Drained {
     /// Right clicks and long presses on the wallpaper (GNOME's background
     /// menu), in order.
     background_menus: Vec<tuna_shell_host::control::BackgroundMenuRequest>,
+    /// Windows that demand attention (GNOME's "is ready" notification),
+    /// in order.
+    window_attention: Vec<u64>,
     consent: Option<Option<(u64, String)>>,
     /// The latest display-change confirmation countdown, in seconds.
     display_change: Option<u32>,
@@ -362,6 +366,7 @@ fn drain(
             }
             Handled::WindowMenu(request) => out.menus.push(request),
             Handled::BackgroundMenu(request) => out.background_menus.push(request),
+            Handled::WindowDemandsAttention(window) => out.window_attention.push(window),
             Handled::ShortcutConsent(request) => out.consent = Some(request),
             Handled::ConfirmDisplayChange(secs) => out.display_change = Some(secs),
             Handled::ShowCloseDialog(request) => {
@@ -4056,6 +4061,13 @@ fn build(app: &adw::Application) {
             chrome
         };
         let chrome_apps = apps.clone();
+        let window_attention = {
+            let actions = ShellActions(shell.clone());
+            window_attention::WindowAttention::new(
+                notify.clone(),
+                Rc::new(move |id| overview::OverviewActions::activate_window(&actions, id)),
+            )
+        };
         let shell_rc = shell.clone();
         let activities_button = activities.clone();
         let last_frames: RefCell<Vec<tuna_shell_control::SwitcherThumbnail>> = RefCell::default();
@@ -4088,6 +4100,7 @@ fn build(app: &adw::Application) {
                 (osd_ui.clone(), pad_osd_ui.clone(), pad_osd_service.clone());
             let resync_after = resync_after.clone();
             let gnome_shell = gnome_shell.clone();
+            let window_attention = window_attention.clone();
             Rc::new(move |drained: Drained| {
                 let Drained {
                     results,
@@ -4095,6 +4108,7 @@ fn build(app: &adw::Application) {
                     accelerators,
                     menus,
                     background_menus,
+                    window_attention: attention_demands,
                     consent,
                     display_change,
                     close_dialogs: close_dialog_updates,
@@ -4159,8 +4173,41 @@ fn build(app: &adw::Application) {
                             .map(|w| input_sources::Holder::Window(w.id))
                     })
                 };
+                let attention_windows: Vec<window_attention::WindowView> = shell
+                    .control
+                    .as_ref()
+                    .map(|c| {
+                        c.model()
+                            .windows()
+                            .iter()
+                            .map(|w| window_attention::WindowView {
+                                id: w.id,
+                                title: w.title.clone(),
+                                app_id: w.app_id.clone(),
+                                focused: w.active,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 drop(shell);
                 input_sources.focus(holder);
+                // GNOME's "“Title” is ready" for the windows that demand
+                // attention, withdrawn once they have focus.
+                for window in attention_demands {
+                    window_attention.demand(window);
+                }
+                {
+                    let apps = chrome_apps.get();
+                    window_attention.sync(&attention_windows, &|app_id| {
+                        let entry = app_id.and_then(|id| providers::provider_app(&apps, id));
+                        (
+                            close_dialog::app_name(entry.map(|entry| entry.name.as_str()), app_id),
+                            entry
+                                .and_then(|entry| entry.icon.clone())
+                                .unwrap_or_else(|| "application-x-executable".to_owned()),
+                        )
+                    });
+                }
                 // No banners while locked (GNOME's lock screen session
                 // mode); the lock screen lists what arrives instead.
                 notify.set_locked(locked);

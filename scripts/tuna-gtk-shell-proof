@@ -27,7 +27,8 @@
 #   --lock-menu-only runs panel readiness, G-LOCK-WITH-MENU-OPEN and
 #   G-SHELL-STABLE only (needs pam_wrapper).
 #   --shell-gaps-only runs panel readiness, the GNOME 51 shell-gap gates
-#   (G-BACKGROUND-MENU, G-MONITOR-LABELS) and G-SHELL-STABLE only.
+#   (G-BACKGROUND-MENU, G-MONITOR-LABELS, G-WINDOW-ATTENTION) and
+#   G-SHELL-STABLE only.
 #   --grid-cancel-only --grid-cancel-admission FILE is an exact CI comparison slice.
 #   --expect-grid-cancel-old-negative is permitted only in that admitted slice.
 #
@@ -2039,6 +2040,133 @@ monitor_labels_proof() {
     ml_labels 0 || fail G-MONITOR-LABELS "the labels stayed after Settings left the bus"
     pass G-MONITOR-LABELS "ShowMonitorLabels from Settings puts a numbered label at the corner of every monitor's work area; HideMonitorLabels or Settings leaving the bus removes them; a caller outside the allowlist is refused"
 }
+# GNOME 51 windowAttentionHandler.js with mutter's activation: a client
+# that is not focused asks for focus with a token the compositor will not
+# honor (a real xdg-activation client, tuna-activation-client), and the
+# shell posts "“Title” is ready"; clicking it focuses the window, it is
+# withdrawn once the window has focus without a click, and a window that
+# maps behind the focused one after such a request announces itself too.
+window_attention_proof() {
+    wa_client="${TUNA_PROOF_BIN_DIR:-$ROOT/target/debug}/examples/tuna-activation-client"
+    [ -x "$wa_client" ] ||
+        fail G-WINDOW-ATTENTION "$wa_client is not built (cargo build -p tuna-compositor --example tuna-activation-client)"
+    wa_list="$ARTIFACTS/a11y-attention-list.json"
+    wa_start() {
+        : >"$ARTIFACTS/attention-$1.cmd"
+        WAYLAND_DISPLAY="$SOCKET_NAME" "$wa_client" "$ARTIFACTS/attention-$1.cmd" "tuna-attn-$1" \
+            >"$ARTIFACTS/attention-$1.log" 2>&1 &
+        eval "WA_PID_$1=$!"
+        wa_wait "$1" '^ready' || fail G-WINDOW-ATTENTION "client $1 never connected"
+    }
+    # wa_wait CLIENT PATTERN: the client's log shows PATTERN.
+    wa_wait() {
+        end=$(($(date +%s) + 15))
+        while [ "$(date +%s)" -le "$end" ]; do
+            grep -q "$2" "$ARTIFACTS/attention-$1.log" && return 0
+            sleep 0.3
+        done
+        return 1
+    }
+    # wa_do CLIENT COMMAND LOG-PATTERN
+    wa_do() {
+        echo "$2" >>"$ARTIFACTS/attention-$1.cmd"
+        wa_wait "$1" "$3" || fail G-WINDOW-ATTENTION "client $1 never answered \"$2\" ($(tail -3 "$ARTIFACTS/attention-$1.log" | tr '\n' ' '))"
+    }
+    wa_focus() {
+        cstate ".focused_app_id == \"tuna-attn-$1\"" "focus on $1" 10
+    }
+    wa_dump() {
+        "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-attention-$1.json" 20 ||
+            fail G-WINDOW-ATTENTION "accessibility dump failed ($1)"
+    }
+    # The calendar lists the notifications; Escape closes it.
+    wa_listed() {
+        xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
+        sleep 2
+        wa_dump "list-$1"
+        showing "$ARTIFACTS/a11y-attention-list-$1.json" "$2"
+        wa_listed_status=$?
+        xdotool key Escape
+        sleep 1
+        return $wa_listed_status
+    }
+    # wa_click_banner TEXT DUMP: click the banner showing TEXT in DUMP.
+    wa_click_banner() {
+        wcb_at="$(jq -r --arg n "$1" '[.[] | select(.name == $n and .showing and .bounds != null)][0] | "\(.bounds[0] + .bounds[2] / 2 | floor) \(.bounds[1] + .bounds[3] / 2 | floor)"' "$2")"
+        wcb_layer="$(jq -r '.layers[] | select(.namespace == "tuna-shell-banners") | "\(.rect[0]) \(.rect[1])"' "$CSTATE")"
+        # shellcheck disable=SC2086
+        set -- $wcb_at $wcb_layer
+        [ "$#" = 4 ] || fail G-WINDOW-ATTENTION "the banner has no place on screen ($wcb_at / $wcb_layer)"
+        xdotool mousemove --window "$WID" $(($1 + $3)) $(($2 + $4)) click 1
+    }
+    wa_start a
+    wa_start b
+    wa_do a "open Alpha" '^opened Alpha'
+    wa_focus a || fail G-WINDOW-ATTENTION "Alpha did not take focus on map"
+    wa_do b "open Bravo" '^opened Bravo'
+    wa_focus b || fail G-WINDOW-ATTENTION "Bravo did not take focus on map"
+    # A refused token: Alpha's client is not the one holding the keyboard.
+    xdotool mousemove --window "$WID" $((WIDTH / 3)) $((HEIGHT / 2))
+    wa_do a "refuse Alpha" '^activated Alpha'
+    sleep 0.5
+    wa_dump refused
+    showing "$ARTIFACTS/a11y-attention-refused.json" "“Alpha” is ready" ||
+        fail G-WINDOW-ATTENTION "no \"“Alpha” is ready\" banner after the refused activation"
+    showing "$ARTIFACTS/a11y-attention-refused.json" "tuna-attn-a" ||
+        fail G-WINDOW-ATTENTION "the banner is not under the app's name"
+    wa_focus b || fail G-WINDOW-ATTENTION "a refused activation moved focus to Alpha"
+    scrot "$ARTIFACTS/window-attention.png" >/dev/null
+    # Clicking it activates the window, and the notification goes.
+    wa_click_banner "“Alpha” is ready" "$ARTIFACTS/a11y-attention-refused.json"
+    wa_focus a || fail G-WINDOW-ATTENTION "clicking the notification did not focus Alpha"
+    sleep 1
+    if wa_listed click "“Alpha” is ready"; then
+        fail G-WINDOW-ATTENTION "the notification is still listed after Alpha was focused by its click"
+    fi
+    # Withdrawn on focus without a click: Alpha demands again behind
+    # Bravo's second window, then Bravo's windows close and Alpha is
+    # what is left to focus.
+    wa_do b "open Bravo again" '^opened Bravo again'
+    wa_focus b || fail G-WINDOW-ATTENTION "Bravo again did not take focus on map"
+    xdotool mousemove --window "$WID" $((WIDTH / 3 + 40)) $((HEIGHT / 2))
+    wa_do a "refuse Alpha" '^activated Alpha'
+    sleep 1
+    wa_dump again
+    showing "$ARTIFACTS/a11y-attention-again.json" "“Alpha” is ready" ||
+        fail G-WINDOW-ATTENTION "Alpha did not demand attention a second time after it had been focused"
+    wa_listed second "“Alpha” is ready" ||
+        fail G-WINDOW-ATTENTION "the calendar does not list Alpha's notification"
+    wa_do b quit 'ready'
+    wait "$WA_PID_b" 2>/dev/null || true
+    wa_focus a || fail G-WINDOW-ATTENTION "Alpha did not get focus back when Bravo's windows closed"
+    sleep 1
+    if wa_listed third "“Alpha” is ready"; then
+        fail G-WINDOW-ATTENTION "the notification stayed in the list after Alpha got focus"
+    fi
+    # A window that maps behind the focused one after a refused request.
+    wa_start c
+    wa_do c "open Charlie" '^opened Charlie'
+    wa_focus c || fail G-WINDOW-ATTENTION "Charlie did not take focus on map"
+    xdotool mousemove --window "$WID" $((WIDTH / 3)) $((HEIGHT / 2 + 40))
+    wa_do a "open-refused Gamma" '^opened Gamma'
+    sleep 1
+    wa_focus c || fail G-WINDOW-ATTENTION "a window opened with a refused token took focus from Charlie"
+    wa_dump gamma
+    showing "$ARTIFACTS/a11y-attention-gamma.json" "“Gamma” is ready" ||
+        fail G-WINDOW-ATTENTION "no \"“Gamma” is ready\" banner for the window opened behind Charlie"
+    cstate '[.windows[] | select(.app_id == "tuna-attn-a")] | length == 2' "Gamma mapped" 5 ||
+        fail G-WINDOW-ATTENTION "Gamma never mapped"
+    # Its client leaving takes its windows and their notifications.
+    wa_do a quit 'ready'
+    wait "$WA_PID_a" 2>/dev/null || true
+    sleep 1
+    if wa_listed gone "“Gamma” is ready"; then
+        fail G-WINDOW-ATTENTION "Gamma's notification stayed after the window closed"
+    fi
+    wa_do c quit 'ready'
+    wait "$WA_PID_c" 2>/dev/null || true
+    pass G-WINDOW-ATTENTION "a refused xdg-activation token, or a window mapped behind the focused one after one, posts \"“Title” is ready\" under the app's name without moving focus; clicking it focuses the window; it is withdrawn once the window has focus or closes"
+}
 if [ "$SHELL_GAPS_ONLY" = 1 ]; then
     cstate '.active_workspace != null and .locked == false' "shell gaps desktop ready" ||
         fail G-BACKGROUND-MENU "desktop never became ready"
@@ -2046,6 +2174,7 @@ if [ "$SHELL_GAPS_ONLY" = 1 ]; then
     sleep 3
     background_menu_proof
     monitor_labels_proof
+    window_attention_proof
     grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
     shell_stable_gate
     exit 0

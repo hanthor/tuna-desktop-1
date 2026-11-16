@@ -1060,7 +1060,9 @@ jobs:
         timeout-minutes: 15
         env:
           TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
-        run: scripts/tuna-gtk-shell-proof --shell-gaps-only --artifacts gtk-shell-artifacts/shell-gaps
+        run: |
+          cargo build --locked -p tuna-compositor --example tuna-activation-client
+          scripts/tuna-gtk-shell-proof --shell-gaps-only --artifacts gtk-shell-artifacts/shell-gaps
       # Initial DnD target focus must not wait for another physical motion.
       # Run the unchanged shared hover/reorder assertions independently of
       # unrelated full-suite assertions, using this job's just-built binaries.

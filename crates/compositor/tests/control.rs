@@ -973,6 +973,37 @@ fn background_menu_reaches_current_peers_and_is_gated_at_minor54() {
     assert_eq!(client_read(&mut old), Message::Overview { open: true });
 }
 
+/// A window demanding attention (#1185) reaches live shells of minor 55
+/// and is never sent to an older peer, which could not decode it.
+#[test]
+fn window_attention_reaches_current_peers_and_is_gated_at_minor55() {
+    let attention = Message::WindowDemandsAttention { window: 3 };
+    let dir = private_tempdir();
+    let path = dir.path().join("control.sock");
+    let mut hub =
+        ControlHub::bind(path.clone(), std::rc::Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
+    let mut model = StateModel::new();
+    let mut client = hub_client(&path);
+    hub_handshake(&mut hub, &mut model, &mut client);
+    hub.queue_message(attention.clone());
+    hub.poll(&mut model);
+    assert_eq!(client_read(&mut client), attention);
+
+    let (conn, mut old) = pair();
+    client_write(
+        &mut old,
+        &Message::Hello {
+            version: ProtocolVersion::new(CURRENT_VERSION.major, 54),
+        },
+    );
+    let mut session = Session::handshake(conn, &StateModel::new()).unwrap();
+    assert!(matches!(client_read(&mut old), Message::Hello { .. }));
+    assert!(matches!(client_read(&mut old), Message::Snapshot { .. }));
+    session.send_window_menu(&attention).unwrap();
+    session.send_overview(true).unwrap();
+    assert_eq!(client_read(&mut old), Message::Overview { open: true });
+}
+
 /// Force Quit and Wait reach the window manager for a known window only.
 #[test]
 fn close_dialog_answers_reach_the_hub_outcome_for_known_windows() {

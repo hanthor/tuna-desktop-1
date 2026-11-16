@@ -57,6 +57,12 @@ before decoding.
   right click, or a press held 500 ms, on the bare wallpaper; `x`/`y` are
   logical pixels local to the output `connector` (`None`: the primary
   output). Never sent while locked.
+- Window attention (0.55): `Message::WindowDemandsAttention { window }`
+  (peers >=55 only) says `window` demands attention: it asked for focus
+  with a refused or stale xdg-activation token, or mapped behind the
+  focused window. The shell posts gnome-shell's "“Title” is ready"
+  notification and withdraws it once the window is focused or gone. Sent
+  once per demand, never for the focused window or while locked.
 - Messages: `Message`, `StateOp`, `CommandKind`, `CommandStatus`,
   `ErrorKind`.
 - State types: `WindowInfo`, `WorkspaceInfo`, `OutputInfo`, `PreviewInfo`,

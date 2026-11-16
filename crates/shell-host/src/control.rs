@@ -152,6 +152,9 @@ pub enum Handled {
     /// A right click or long press on the bare wallpaper: show GNOME's
     /// background menu at the pointer (0.54).
     BackgroundMenu(BackgroundMenuRequest),
+    /// A window asked for focus without the right to, or opened behind
+    /// the focused one: post GNOME's "is ready" notification (0.55).
+    WindowDemandsAttention(u64),
     /// The keyboard switched Sticky or Slow Keys: save and confirm.
     KeyboardAidToggled {
         aid: tuna_shell_control::KeyboardAid,
@@ -1275,6 +1278,9 @@ impl ControlClient {
                     y,
                 }))
             }
+            Message::WindowDemandsAttention { window } => {
+                Ok(Handled::WindowDemandsAttention(window))
+            }
             Message::KeyboardAidToggled { aid, enabled } => {
                 Ok(Handled::KeyboardAidToggled { aid, enabled })
             }
@@ -1609,6 +1615,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::ShowCloseDialog { .. } => "ShowCloseDialog",
         Message::HideCloseDialog { .. } => "HideCloseDialog",
         Message::BackgroundMenu { .. } => "BackgroundMenu",
+        Message::WindowDemandsAttention { .. } => "WindowDemandsAttention",
     }
 }
 
@@ -2255,6 +2262,16 @@ mod tests {
                 x: 300,
                 y: 200,
             })
+        );
+    }
+
+    #[test]
+    fn window_attention_messages_decode() {
+        let (mut client, mut peer) = handshook();
+        server_write(&mut peer, &Message::WindowDemandsAttention { window: 9 });
+        assert_eq!(
+            client.poll().expect("attention"),
+            Handled::WindowDemandsAttention(9)
         );
     }
 

@@ -5478,6 +5478,11 @@ impl Runtime {
         {
             self.control.queue_message(message);
         }
+        // Windows that asked for focus without the right to, or mapped
+        // behind the focused one: gnome-shell's "is ready" notification.
+        for message in self.manager.take_attention(locked) {
+            self.control.queue_message(message);
+        }
         if !self.control.overview_open() {
             self.overview_search = false;
             self.overview_app_grid = false;
