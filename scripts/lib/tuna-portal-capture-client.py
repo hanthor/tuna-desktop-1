@@ -48,10 +48,32 @@ if mode in ("cancel", "locked"):
     sys.exit(0)
 if code != 0: raise RuntimeError("Start failed " + str(code))
 node = result["streams"][0][0]
+size = result["streams"][0][1].get("size")
 reply, fds = bus.call_with_unix_fd_list_sync("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast", "OpenPipeWireRemote", GLib.Variant("(oa{sv})", (session, {})), None, Gio.DBusCallFlags.NONE, 30000, None, None)
 fd = fds.get(reply.unpack()[0])
+source = ["gst-launch-1.0", "-q", "pipewiresrc", "fd=" + str(fd), "path=" + str(node), "num-buffers=1", "!", "videoconvert"]
 try:
-    subprocess.run(["gst-launch-1.0", "-q", "pipewiresrc", "fd=" + str(fd), "path=" + str(node), "num-buffers=1", "!", "videoconvert", "!", "pngenc", "!", "filesink", "location=" + str(out)], pass_fds=(fd,), check=True, timeout=30)
+    if subprocess.run(["gst-inspect-1.0", "--exists", "pngenc"]).returncode == 0:
+        subprocess.run(source + ["!", "pngenc", "!", "filesink", "location=" + str(out)], pass_fds=(fd,), check=True, timeout=30)
+    else:
+        # Gentoo ships pngenc in an optional plugin package; encode the same
+        # single raw frame with GdkPixbuf instead of requiring it.
+        if not size:
+            raise RuntimeError("no pngenc and the stream reports no size for a raw frame")
+        width, height = size
+        raw = out.with_suffix(".rgb")
+        caps = "video/x-raw,format=RGB,width=%d,height=%d" % (width, height)
+        subprocess.run(source + ["!", caps, "!", "filesink", "location=" + str(raw)], pass_fds=(fd,), check=True, timeout=30)
+        import gi
+        gi.require_version("GdkPixbuf", "2.0")
+        from gi.repository import GdkPixbuf
+        stride = (width * 3 + 3) & ~3  # GstVideo row alignment for RGB
+        data = raw.read_bytes()
+        if len(data) != stride * height:
+            raise RuntimeError("raw frame is %d bytes, not %dx%d RGB" % (len(data), width, height))
+        GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(data), GdkPixbuf.Colorspace.RGB, False, 8,
+                                        width, height, stride).savev(str(out), "png", [], [])
+        raw.unlink()
 finally:
     os.close(fd)
 # An unrelated client cannot close the granted frontend session.
