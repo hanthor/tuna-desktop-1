@@ -50,7 +50,19 @@ POINTS = {
     'dialog-log-out': (731, 457),       # end-session dialog "Log Out"
     'gdm-user': (640, 349),             # GDM user list, the only row
 }
-CROSSCHECK = {'greeter-user-list', 'session-is-tuna', 'lock'}
+# desktop and portal-screencast: the overview-exit frame (06) that noVNC shows
+# frozen mid-transition; both VNC views and the guest scanout are compared.
+CROSSCHECK = {'greeter-user-list', 'session-is-tuna', 'desktop', 'portal-screencast', 'lock'}
+# The guest's own scanout, read from KMS as root: the primary plane of each
+# card, XRGB8888 (bgr0) or ARGB8888 (bgra), printed base64 after "@@ok CARD FMT".
+SCANOUT = (
+    'command -v ffmpeg >/dev/null || { echo "@@skip ffmpeg is not on the image"; exit 0; }; '
+    'for card in /dev/dri/card*; do for fmt in bgra bgr0; do '
+    'if ffmpeg -hide_banner -loglevel error -device "$card" -f kmsgrab -i - -frames:v 1 '
+    '-vf "hwdownload,format=$fmt" -f image2 -c:v png -y /run/tuna-scanout.png 2>/run/tuna-scanout.err; then '
+    'echo "@@ok $card $fmt"; base64 -w0 /run/tuna-scanout.png; echo; rm -f /run/tuna-scanout.png /run/tuna-scanout.err; exit 0; fi; '
+    'echo "@@try $card $fmt $(tail -c 300 /run/tuna-scanout.err | tr "\\n" " ")"; done; done; '
+    'rm -f /run/tuna-scanout.png /run/tuna-scanout.err; exit 3')
 QUALIFICATION_CORE = {
     'greeter-user-list', 'greeter-password', 'session-is-tuna', 'portal-availability', 'portal-screenshot',
     'portal-screencast',
@@ -81,6 +93,35 @@ def corral_json(argv, timeout=120, check=True, input=None):
     """Run `corral --json ARGV` and parse what it prints on stdout."""
     r = run(['corral', '--json', *argv], timeout=timeout, check=check, input=input)
     return json.loads(r.stdout) if r.stdout.strip() else None
+
+
+def compare_frames(frame, other):
+    """Pixel comparison of two captures: identical, or the bounding box and
+    share of pixels that differ in any channel."""
+    a, b = Image.open(frame).convert('RGB'), Image.open(other).convert('RGB')
+    if a.size != b.size:
+        return {'identical': False, 'sizes': [list(a.size), list(b.size)]}
+    diff = ImageChops.difference(a, b)
+    box = diff.getbbox()
+    if box is None:
+        return {'identical': True}
+    red, green, blue = diff.split()
+    changed = a.width * a.height - ImageChops.lighter(ImageChops.lighter(red, green), blue).histogram()[0]
+    return {'identical': False, 'diff_bbox': box, 'diff_fraction': round(changed / (a.width * a.height), 5)}
+
+
+def qemu_version(identity, vm):
+    """The QEMU in the VM's virt-launcher pod, which serves its VNC."""
+    kubectl = ['kubectl', '--context', identity.scope['kubernetes_context'], '-n', identity.scope['namespace']]
+    pods = run(kubectl + ['get', 'pods', '-l', f'vm.kubevirt.io/name={vm}', '-o', 'name'], check=False)
+    pod = pods.stdout.split()[0] if pods.stdout.split() else None
+    if pod is None:
+        return {'pod': None, 'exit': pods.returncode, 'stderr': pods.stderr.strip()}
+    r = run(kubectl + ['exec', pod, '-c', 'compute', '--', 'sh', '-c',
+                       'for q in /usr/libexec/qemu-kvm /usr/bin/qemu-system-x86_64; do '
+                       '[ -x "$q" ] && exec "$q" --version; done; exit 3'], check=False)
+    return {'pod': pod, 'exit': r.returncode,
+            'version': r.stdout.strip().splitlines()[0] if r.stdout.strip() else None, 'stderr': r.stderr.strip()}
 
 
 def ini_values(text, section, key):
@@ -392,6 +433,7 @@ def provision(args, guest, receipt, identity):
         raise RuntimeError(f'post-wait VM identity/placement mismatch: {json.dumps(info)}')
     receipt['vm'].update({k: info.get(k) for k in ('node', 'cpu', 'memory', 'firmware', 'inputs', 'disks',
                                                    'tagValues', 'image')})
+    receipt['vm']['qemu'] = qemu_version(identity, args.vm)
     if not any(i.get('type') == 'tablet' for i in info.get('inputs') or []):
         raise RuntimeError(f"no absolute pointer on the VM (inputs: {info.get('inputs')})")
     booted = json.loads(guest.out('bootc status --format json'))['status']['booted']['image']
@@ -470,9 +512,11 @@ class Journey:
         (self.out / 'manifest.json').write_text(json.dumps(self.receipt, indent=2) + '\n')
 
     def crosscheck(self, frame):
-        """Same frame through `corral screenshot`, independent of noVNC.
+        """Same frame through `corral screenshot` (a fresh VNC session,
+        independent of noVNC), then the guest's own KMS scanout.
 
-        The capture is kept only when its pixels differ from the frame."""
+        The corral capture is kept only when its pixels differ from the frame;
+        the scanout is always kept."""
         other = self.out / 'crosscheck' / f'{frame.stem}-corral.png'
         other.parent.mkdir(exist_ok=True)
         argv = ['corral', 'screenshot', self.guest.vm, '-o', str(other)]
@@ -480,15 +524,35 @@ class Journey:
         # KubeVirt keeps one VNC session; the screenshot's session ends the
         # page's, and the page reconnects by itself.
         self.console.connected()
+        scanout = self.scanout(frame)
         if r.returncode:
             return {'identical': False, 'argv': argv, 'exit': r.returncode,
-                    'stdout': r.stdout, 'stderr': r.stderr, 'observed': r.stderr.strip()}
+                    'stdout': r.stdout, 'stderr': r.stderr, 'observed': r.stderr.strip(), 'scanout': scanout}
         digest = hashlib.sha256(other.read_bytes()).hexdigest()
-        box = ImageChops.difference(Image.open(frame).convert('RGB'), Image.open(other).convert('RGB')).getbbox()
-        if box is None:
+        result = compare_frames(frame, other)
+        if result['identical']:
             other.unlink()
-            return {'identical': True, 'corral_png_sha256': digest}
-        return {'identical': False, 'diff_bbox': box, 'file': f'crosscheck/{other.name}'}
+            return {**result, 'corral_png_sha256': digest, 'scanout': scanout}
+        return {**result, 'file': f'crosscheck/{other.name}', 'scanout': scanout}
+
+    def scanout(self, frame):
+        """The guest's KMS scanout read as root with ffmpeg kmsgrab, past
+        QEMU's VNC, compared with the noVNC frame."""
+        code, out, err = self.guest.sh(SCANOUT, timeout=120)
+        lines = out.splitlines()
+        tries = [line[6:] for line in lines if line.startswith('@@try ')]
+        skip = next((line[7:] for line in lines if line.startswith('@@skip ')), None)
+        if skip:
+            return {'captured': False, 'skipped': skip}
+        ok = next((i for i, line in enumerate(lines) if line.startswith('@@ok ')), None)
+        if code or ok is None or ok + 1 >= len(lines):
+            return {'captured': False, 'exit': code, 'tries': tries, 'stderr': err[-400:]}
+        _, card, fmt = lines[ok].split()
+        path = self.out / 'crosscheck' / f'{frame.stem}-scanout.png'
+        path.write_bytes(base64.b64decode(lines[ok + 1]))
+        return {'captured': True, 'card': card, 'pix_fmt': fmt, 'tries': tries,
+                'file': f'crosscheck/{path.name}', 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                **compare_frames(frame, path)}
 
     def gsetting(self, schema, key):
         return self.guest.out(f'gsettings get {schema} {key}', user=True)
