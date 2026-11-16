@@ -1860,7 +1860,13 @@ impl Runtime {
         let clones_shown = self.overview_motion.progress() > 0.0
             || !self.switcher_thumbnails.is_empty()
             || !self.casts.is_empty();
-        let hidden = hidden_surfaces(&self.manager, &self.frame_costs, clones_shown);
+        let shown_ids = shown_ids(
+            &self.manager,
+            &self.frame_costs,
+            clones_shown,
+            self.is_locked(),
+        );
+        let hidden = hidden_surfaces(&self.manager, &shown_ids);
         let mut shown =
             crate::frame_timing::drawn_roots(&self.state, &self.manager, self.is_locked());
         shown.retain(|(surface, _)| !hidden.contains(surface));
