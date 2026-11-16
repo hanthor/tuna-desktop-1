@@ -81,6 +81,8 @@ const DEFAULT_WIDTH: i32 = 800;
 const DEFAULT_HEIGHT: i32 = 600;
 /// Cascade offset for each newly mapped window.
 const CASCADE_STEP: i32 = 50;
+/// The xdg_toplevel version that knows the `suspended` state.
+const XDG_TOPLEVEL_STATE_SUSPENDED_SINCE: u32 = 6;
 
 /// One managed window: live surface plus compositor-side geometry.
 /// The surface is the toolkit's unified window handle, so native and
@@ -540,6 +542,8 @@ pub struct WindowManager {
     grab_raise: Option<GrabRaise>,
     /// Mutter's alive checks and the close dialog (#1035).
     alive: alive::AliveState,
+    /// Mutter's suspend state of the native windows (#503).
+    suspension: crate::suspend::Suspension,
 }
 
 impl WindowManager {
@@ -780,6 +784,7 @@ impl WindowManager {
             auto_raise: None,
             grab_raise: None,
             alive: alive::AliveState::new(state),
+            suspension: Default::default(),
         }
     }
 
@@ -1366,6 +1371,81 @@ impl WindowManager {
         self.workspace_tracker.next_deadline()
     }
 
+    /// Mutter's suspend state (#503). `shown` lists the windows something
+    /// on screen shows this frame (the scene, window clones, casts); the
+    /// runtime calls this before a frame is drawn and after. A native
+    /// window not shown for Mutter's 3 s is suspended; a shown one
+    /// resumes at once, so it is told before the frame that draws it.
+    /// Each change is one configure with or without `suspended`; clients
+    /// older than xdg-shell v6 are never told.
+    pub fn update_suspended(&mut self, shown: &[u64], now: std::time::Instant) {
+        let windows = self
+            .windows
+            .iter()
+            .filter(|(_, window)| {
+                matches!(
+                    window.surface.underlying_surface(),
+                    WindowSurface::Wayland(_)
+                )
+            })
+            .map(|(id, _)| (*id, shown.contains(id)));
+        for (id, suspended) in self.suspension.update(windows, now) {
+            let Some(WindowSurface::Wayland(toplevel)) = self
+                .windows
+                .get(&id)
+                .map(|window| window.surface.underlying_surface())
+            else {
+                continue;
+            };
+            if toplevel.version() < XDG_TOPLEVEL_STATE_SUSPENDED_SINCE {
+                continue;
+            }
+            toplevel.with_pending_state(|pending| {
+                if suspended {
+                    pending.states.set(xdg_toplevel::State::Suspended);
+                } else {
+                    pending.states.unset(xdg_toplevel::State::Suspended);
+                }
+            });
+            toplevel.send_pending_configure();
+        }
+    }
+
+    /// When the next hidden window is due to be suspended.
+    pub fn suspend_deadline(&self) -> Option<std::time::Instant> {
+        self.suspension.deadline()
+    }
+
+    /// Whether window `id` is suspended (Mutter's `SUSPENDED`).
+    pub fn is_suspended(&self, id: u64) -> bool {
+        self.suspension.is_suspended(id)
+    }
+
+    /// Every suspended window, in id order.
+    pub fn suspended_windows(&self) -> Vec<u64> {
+        self.suspension.suspended()
+    }
+
+    /// Root surfaces of the suspended windows whose clients were told
+    /// (xdg-shell v6 and later). Mutter sends hidden surfaces no frame
+    /// callbacks; these get none until they resume.
+    pub fn told_suspended_surfaces(&self) -> Vec<WlSurface> {
+        self.suspension
+            .suspended()
+            .into_iter()
+            .filter_map(
+                |id| match self.windows.get(&id)?.surface.underlying_surface() {
+                    WindowSurface::Wayland(toplevel)
+                        if toplevel.version() >= XDG_TOPLEVEL_STATE_SUSPENDED_SINCE =>
+                    {
+                        Some(toplevel.wl_surface().clone())
+                    }
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
     /// The workspace switch motion (stepped by the runtime).
     pub fn workspace_slide(&self) -> &crate::workspace_slide::WorkspaceSlide {
         &self.workspace_slide
@@ -1749,7 +1829,7 @@ impl WindowManager {
         self.pre_overview_focus = None;
         if let Some(old) = self.overview_activated.take() {
             if Some(old) != restore {
-                self.configure(old, false);
+                self.deactivate(old);
             }
         }
         self.apply_focus(state, restore);
@@ -2636,7 +2716,7 @@ impl WindowManager {
         }
         if self.overview_activated != id {
             if let Some(old) = self.overview_activated {
-                self.configure(old, false);
+                self.deactivate(old);
             }
             if let Some(id) = id {
                 self.configure(id, true);
@@ -2701,7 +2781,7 @@ impl WindowManager {
         let serial = SERIAL_COUNTER.next_serial();
         for old in [previous, self.activated.take()].into_iter().flatten() {
             if Some(old) != id {
-                self.configure(old, false);
+                self.deactivate(old);
             }
         }
         if let Some(id) = id {
@@ -2772,6 +2852,19 @@ impl WindowManager {
     /// flag, and presentation state. X11 windows take the toolkit's
     /// X11 configure path with the same geometry and activation.
     fn configure(&self, id: u64, activated: bool) {
+        self.configure_with(id, activated, false);
+    }
+
+    /// Tell `id` it is no longer activated. Like Mutter, which configures
+    /// on a change of the window's state, a native window already told
+    /// gets no second, identical configure: one focus change deactivates
+    /// the previously focused and the previously activated window, often
+    /// the same one (#503).
+    fn deactivate(&self, id: u64) {
+        self.configure_with(id, false, true);
+    }
+
+    fn configure_with(&self, id: u64, activated: bool, only_changes: bool) {
         self.pointer_scene_dirty.set(true);
         let Some(window) = self.windows.get(&id) else {
             return;
@@ -2783,10 +2876,16 @@ impl WindowManager {
                 // picks its own.
                 let size = (!(window.unplaced && layout == WindowLayout::Floating))
                     .then_some(window.geometry.size);
-                Self::configure_wayland(toplevel, &layout, size, activated);
+                Self::configure_wayland(toplevel, &layout, size, activated, only_changes);
             }
             #[cfg(feature = "xwayland")]
             WindowSurface::X11(surface) => {
+                if only_changes
+                    && surface.is_activated() == activated
+                    && surface.geometry() == window.geometry
+                {
+                    return;
+                }
                 if surface.set_activated(activated).is_err()
                     || surface.configure(Some(window.geometry)).is_err()
                 {
@@ -2797,12 +2896,14 @@ impl WindowManager {
     }
 
     /// Advertise geometry, activation, and presentation state to one
-    /// native client.
+    /// native client; with `only_changes`, only if they differ from what
+    /// it was last told.
     fn configure_wayland(
         surface: &ToplevelSurface,
         layout: &WindowLayout,
         size: Option<Size<i32, Logical>>,
         activated: bool,
+        only_changes: bool,
     ) {
         surface.with_pending_state(|pending| {
             pending.size = size;
@@ -2853,7 +2954,11 @@ impl WindowManager {
                 }
             }
         });
-        surface.send_configure();
+        if only_changes {
+            surface.send_pending_configure();
+        } else {
+            surface.send_configure();
+        }
     }
 
     fn strip_grab_owner(grab: PointerGrab) -> Option<StripPointer> {
@@ -4341,8 +4446,8 @@ impl WindowManager {
     /// focused window. Handing an Exclusive hold back to a window (or
     /// nothing) strands the panel inactive with GTK focus intact but no
     /// keyboard (G-PANEL-FOCUS). Unlock walks the same owners through
-    /// [`Self::unlock_input`], which also honours a surviving popup grab
-    /// and never raises.
+    /// [`Self::unlock_input`], which also honours a popup grab taken
+    /// while locked and never raises.
     pub fn restore_keyboard_owner(&mut self, state: &mut State) {
         if let Some(held) = self.overview_held.clone() {
             let serial = SERIAL_COUNTER.next_serial();
@@ -4367,10 +4472,11 @@ impl WindowManager {
     /// physical/XKB state until real keyup. Trusted AT runs before this filter.
     ///
     /// The keyboard goes back to what had it, as GNOME Shell's `popModal`
-    /// does (screenShield.js locks with a modal stage grab, which revokes
-    /// Mutter's Wayland popup grab without dismissing it): the topmost popup
-    /// of a grab that outlived the lock, else the owner a popup grab hands
-    /// back to (the parked overview, an Exclusive layer, the focused window).
+    /// does. The lock dismissed every popup grab
+    /// ([`crate::State::dismiss_popup_grab_for_lock`]), so only a grab taken
+    /// while locked is returned to (its topmost popup); otherwise the owner
+    /// a popup grab hands back to (the parked overview, an Exclusive layer,
+    /// the focused window).
     pub fn unlock_input(&mut self, state: &mut State) {
         if let Some(keyboard) = &self.keyboard {
             self.unlock_quarantined.extend(keyboard.pressed_keys());
