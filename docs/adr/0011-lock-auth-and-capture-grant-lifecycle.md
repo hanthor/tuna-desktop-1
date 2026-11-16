@@ -87,8 +87,8 @@ which includes `login`) for `getpwuid(getuid())`.
 - Every attempt is bound to its origin (control connection and request),
   attempt serial and lock epoch (`crates/compositor/src/runtime/auth.rs`;
   `crates/compositor/src/auth_owner.rs`, `Slot`). The origin stays live only
-  while the control session belongs to the current shell PID and
-  generation.
+  while the control session belongs to the current shell child, pinned by
+  `SO_PEERPIDFD`, and its supervisor generation.
 - One attempt runs at a time (`Slot::begin_method`). A password check has a
   10 s deadline (`crates/compositor/src/pam.rs`, `DEADLINE`;
   `crates/compositor/src/pam_helper.rs`, `MAX_BUDGET`). A conversation has a
@@ -162,8 +162,8 @@ locks again on wake before the DRM resume (`Runtime::on_sleep_update`).
 Only logind's bus-name owner is believed (`sleep.rs`,
 `only_the_bus_name_owner_can_prepare_and_wake_and_monitor_releases_worker`).
 Evidence: VM gates `V-SUSPEND`, `V-SLEEP-AUTH-FAIL-CLOSED`,
-`V-SLEEP-FRESH-AUTH`. The compositor takes no logind sleep delay inhibitor;
-see risk L2.
+`V-SLEEP-FRESH-AUTH`. On `main` the compositor takes no logind sleep delay
+inhibitor; #1170 adds one (risk L2).
 
 **Fail-closed VM gates.** Defined in `scripts/tuna-vm-lane`
 (`run_lifecycle`), run by the `marlin-vm` lane with the lifecycle profile,
@@ -224,7 +224,8 @@ active grant today; one is being built (F2, risk L13).
 - While any grant exists, a scan on the D-Bus thread runs every 100 ms
   (`mutter.rs`, `SCAN_PERIOD`). It revokes a grant when
   `Authority::owner_alive` fails: the session is locked, the owner's unique
-  name is gone, the shell PID changed, the portal name changed hands or its
+  name is gone, the shell no longer declares that name over its pinned
+  control session (ADR 0010), the portal name changed hands or its
   executable changed, or grd lost its name. An owner check that does not
   answer within 5 s counts as gone (`owners_alive`, `OWNER_CHECK_TIMEOUT`).
   Evidence: `mutter.rs` (`owner_checks_are_bounded_and_fail_closed_on_a_wedged_bus`).
@@ -290,8 +291,8 @@ microphone privacy is enforced in the shell
 
 [ADR 0010](0010-same-uid-trusted-identity.md#review-findings-and-dispositions)
 maps every finding of the #1162 security review, and every gap found while
-writing these ADRs, to a disposition. "In progress" means a fix is being
-built and is not on `main`.
+writing these ADRs, to a disposition. "Fixed in #N" names the pull request
+that closes a risk below; "in progress" means a fix is still being built.
 
 - **L1. Unlock without a password (F9, G5; accepted, GNOME parity).** Any
   same-UID process can run
@@ -299,7 +300,7 @@ built and is not on `main`.
   polkit, and the compositor unlocks (`Runtime::unlock_for_logind`). VM gate
   `V-LOCKED-HINT` exercises this path. GNOME 51 behaves the same way
   (`screenShield.js` `deactivate`).
-- **L2. No sleep delay inhibitor (F6, G3; gap, in progress).** `sleep.rs` subscribes to
+- **L2. No sleep delay inhibitor (F6, G3; fixed in #1170).** `sleep.rs` subscribes to
   `PrepareForSleep` but holds no logind `delay` inhibitor, so logind does
   not wait for a locked frame before suspending. [INFERENCE] The last
   scanned-out frame can be the unlocked desktop and may show on resume
@@ -308,8 +309,8 @@ built and is not on `main`.
   delay inhibitor (`loginManager.js`, `screenShield.js` `_syncInhibitor`).
 - **L3. Stuck lock.** If the shell's restart budget runs out while locked,
   no lock surface returns and input is discarded. A quarantined PAM attempt
-  keeps the slot busy. A flood of foreign lock requests can also leave the
-  lock without a prompt (F3, in progress; ADR 0010 R5). All fail closed;
+  keeps the slot busy. Before #1171 a flood of foreign lock requests could
+  also leave the lock without a prompt (F3; ADR 0010 R5). All fail closed;
   logind `Unlock` or ending the session is the way out.
 - **L4. No compositor rate limit.** The compositor allows one attempt at a
   time and nothing more. Throttling is whatever `login` includes. The helper
@@ -323,10 +324,10 @@ built and is not on `main`.
   named `tuna-screen-cast` (`crates/compositor/src/screencast.rs`). Any
   unsandboxed same-UID PipeWire client can link to an active node.
   [INFERENCE.] Mutter's nodes are equally open to unsandboxed clients.
-- **L7. Untested EIS revocation (G9; in progress).** No test checks that a delivered EIS
+- **L7. Untested EIS revocation (G9; fixed in #1169).** No test checks that a delivered EIS
   client sees a disconnect after lock or owner loss. The code closes the
   compositor's end.
-- **L8. Portal reach beyond need (G6; in progress).** `org.tuna.Screenshot.ScreenshotWindows`
+- **L8. Portal reach beyond need (G6; fixed in #1169).** `org.tuna.Screenshot.ScreenshotWindows`
   uses `Authority::admit` (`screenshot.rs`, `WindowsService::screenshot_windows`),
   so the authenticated portal, not only the shell, can save every window to
   any absolute directory. `disable-save-to-disk` does not cover it.
@@ -340,14 +341,14 @@ built and is not on `main`.
   nightly (G7; accepted). The P-LK-01 ledger row cites
   `crates/compositor/tests/unlock.rs` (`correct_password_dismisses_lock_intact`),
   which drives `unlock::unlock_session`, a path the runtime does not use;
-  production unlock is `Runtime::apply_verified_unlock` (G8; in progress).
-- **L11. A drag icon above the lock (F7; in progress).** `engage_lock` does
+  production unlock is `Runtime::apply_verified_unlock` (G8; fixed in #1169).
+- **L11. A drag icon above the lock (F7; fixed in #1170).** `engage_lock` does
   not cancel a client drag, and the drag icon is drawn on top of the scene
   without a lock check (`runtime.rs`, `dnd_icon_elements`). An application
   that starts a drag and then locks the session can cover the lock screen
   with its icon until the button is released. Keys still reach the lock
   surface.
-- **L12. An unmapped idle inhibitor stops the idle lock (F8; in progress).**
+- **L12. An unmapped idle inhibitor stops the idle lock (F8; fixed in #1170).**
   `State::idle_inhibited` (`protocols.rs`) counts any live surface with an
   inhibitor, mapped or not, and the idle-inhibit global is open to
   sandboxed clients. A background client can keep the session from ever

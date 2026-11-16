@@ -319,13 +319,13 @@ UI classification remain required for both legs.
 
 ## Known limitations
 
-- **Same-UID boundary.** PID-based shell identity and executable-identity
+- **Same-UID boundary.** Shell identity and executable-identity
   checks stop processes that only claim an identity. They do not stop a
   native same-user process, and it needs no `ptrace`: `LD_PRELOAD` into the
-  genuine portal or grd binary is enough. Mitigations are being built: a
-  GNOME-style screen-sharing and remote-access indicator with Stop,
+  genuine portal or grd binary is enough. Mitigations: a GNOME-style
+  screen-sharing and remote-access indicator with Stop and
   gnome-remote-desktop sessions only while Remote Desktop is enabled in
-  gsettings, and pidfd-pinned shell identity
+  gsettings are being built; pidfd-pinned shell identity is #1171
   ([ADR 0010](adr/0010-same-uid-trusted-identity.md#review-findings-and-dispositions)).
 - **Name-based allowlists.** The `org.gnome.Shell` allowlist trusts
   whoever owns an allowlisted well-known name, as GNOME does. A same-user

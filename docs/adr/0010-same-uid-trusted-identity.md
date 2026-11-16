@@ -34,8 +34,11 @@ environment, has a debugger attached or has loaded injected code.
 [ADR 0005](0005-control-socket-peer-authentication.md) decided the control
 socket only. The [ADR register](README.md#decision-register) kept the rest of
 the same-UID threat model, and the identity of the lock and portal clients,
-open as a 1.0 release blocker. This ADR records what the code on `main`
-does for every trusted identity, and proposes it as the 1.0 boundary.
+open as a 1.0 release blocker. This ADR records what the code does for
+every trusted identity, and proposes it as the 1.0 boundary. It describes
+`main` with the pidfd identity fix (#1171) merged; the earlier fixes it
+names (#1169, #1170) are listed under
+[Review findings and dispositions](#review-findings-and-dispositions).
 
 ## Decision (proposed)
 
@@ -56,14 +59,16 @@ an app ID, a socket connection, a copied binary), and so raise the cost of
 an attack. GNOME 51 makes the same out-of-scope choice with weaker checks
 (see [Comparison with GNOME 51](#comparison-with-gnome-51)).
 
-Mitigations being built for the native same-UID case (not on `main`):
+Mitigations for the native same-UID case:
 
 - a GNOME-style screen-sharing and remote-access indicator with a Stop
-  control, so that no capture, remote input or input capture is silent (F2);
+  control, so that no capture, remote input or input capture is silent (F2;
+  in progress);
 - gnome-remote-desktop sessions admitted only while Remote Desktop is
-  enabled in gsettings, since that path has no portal dialog (F1, item 3);
-- pidfd-pinned identity for the shell's session-lock request and D-Bus
-  calls (F4).
+  enabled in gsettings, since that path has no portal dialog (F1, item 3;
+  in progress);
+- pidfd-pinned shell identity on Wayland and the control socket, and
+  declared unique bus names on D-Bus (F4; done in #1171, below).
 
 The compositor recognises the identities below. Any other client is an
 ordinary client with authority only over its own surfaces. Paths are
@@ -82,12 +87,13 @@ relative to the repository root.
   `session_argv`). The binary's owner, mode and path are not checked.
 - **Wayland connection.** On accept, `ClientState::native_connection` reads
   `SO_PEERCRED` and `SO_PEERPIDFD` (`crates/compositor/src/capture_security.rs`,
-  `socket_credentials`). `ClientState::admit_supervised_shell`
+  `socket_credentials`, `socket_pidfd`). `ClientState::admit_supervised_shell`
   (`crates/compositor/src/lib.rs`) marks the connection as the shell's only
-  when the pidfd-pinned PID (`pinned_process_id`) equals the held child's
-  PID (`crates/compositor/src/layer.rs`, `is_shell_peer`). Without a pidfd it
-  falls back to the numeric `SO_PEERCRED` PID. The flag is set once, at
-  accept.
+  when the pidfd-pinned PID (`pinned_process_id`, live per `pidfd_live`)
+  equals the held child's PID (`crates/compositor/src/layer.rs`,
+  `is_shell_peer`). Without `SO_PEERPIDFD` the connection has no identity
+  and stays ordinary, which fails closed; every v1 variant kernel is 6.5 or
+  later. The flag is set once, at accept.
   - May bind `zwlr_layer_shell_v1` and `ext_foreign_toplevel_list_v1`. Both
     globals are filtered by `ClientState::privileged(.., supervised_shell)`
     (`lib.rs` layer-shell state; `crates/compositor/src/protocols.rs`
@@ -98,23 +104,47 @@ relative to the repository root.
     `layer.rs` (`only_the_held_shell_child_is_a_shell_peer`);
     `capture_security.rs`
     (`native_socket_identity_pins_the_connecting_process_and_expires_on_exit`,
-    `process_identity_requires_a_pin_and_does_not_survive_peer_exit`). CI:
-    `check` job.
-- **Control socket.** As ADR 0005. Each tick the runtime sets
-  `PeerGate::Pid(child)` or `PeerGate::Closed` and binds the auth owner to
-  the child's PID and supervisor generation (`runtime.rs`, `Runtime::tick`;
-  `crates/compositor/src/control.rs`, `PeerGate::admits`,
-  `ControlHub::set_auth_owner`). A narrowed gate evicts live sessions and
-  rechecks pending handshakes (`ControlHub::poll`, `advance_pending`).
-  Evidence: `crates/compositor/tests/peer_auth.rs`.
-- **Session bus.** `Authority::authenticate_sender` treats a sender as the
-  shell when the bus's `GetConnectionUnixProcessID` equals the published
-  child PID (`capture_security.rs`; published by `Authority::publish` from
-  `Runtime::tick` and `Runtime::engage_lock`). This admits ScreenCast,
-  Screenshot, RemoteDesktop and Introspect calls (`Authority::admit`,
-  `admit_remote`), and relaying `org.gnome.Shell.Introspect` for another
-  caller (`admit_forwarded`). It does not admit InputCapture
-  (`admit_portal`).
+    `process_identity_requires_a_pin_and_does_not_survive_peer_exit`,
+    `only_a_live_pinned_shell_child_is_the_wayland_shell`);
+    `crates/compositor/tests/session_lock_runtime.rs`, which drives the
+    runtime's real accept path. CI: `check` job.
+- **Control socket.** As ADR 0005, amended by #1171. Each tick the runtime
+  sets `PeerGate::Pid(child)` or `PeerGate::Closed` and binds the auth owner
+  to the child's PID and supervisor generation (`runtime.rs`,
+  `Runtime::tick`; `crates/compositor/src/control.rs`, `PeerGate::admits`,
+  `ControlHub::set_auth_owner`). `PeerGate::Pid` admits a peer only through
+  its live `SO_PEERPIDFD` pin (`PeerCred::pinned_pid`); a numeric
+  `SO_PEERCRED` PID alone, or the pin of an exited process, is refused. A
+  narrowed gate evicts live sessions and rechecks pending handshakes
+  (`ControlHub::poll`, `advance_pending`). Evidence:
+  `crates/compositor/tests/peer_auth.rs` (`the_shell_gate_requires_a_pin`,
+  `a_recycled_shell_pid_is_refused` and the earlier gate tests).
+- **Session bus.** The shell is the set of unique bus names it declared
+  over its pinned control session (`DeclareBusName`, control protocol 0.51;
+  `crates/shell-control-schema`). Only a session bound to the current
+  shell child's auth owner may declare, the name must be a unique name, and
+  a declaration counts only while that session and its pinned peer are live
+  (`ControlHub::shell_bus_names`). The bus never reuses a unique name, so
+  PID reuse cannot pass this identity to another process.
+  `Authority::publish` receives those names from `Runtime::tick` and
+  `Runtime::engage_lock`; `Authority::authenticate_sender` treats a sender
+  as the shell only when its unique name is one of them
+  (`capture_security.rs`, `Authority::is_shell`). No PID is compared. This
+  admits ScreenCast, Screenshot, RemoteDesktop and Introspect calls
+  (`Authority::admit`, `admit_remote`), and relaying
+  `org.gnome.Shell.Introspect` for another caller (`admit_forwarded`). It
+  does not admit InputCapture (`admit_portal`). A capture session the shell
+  created stays alive only while its owner is still a declared shell name
+  and the bus still has that name (`Authority::owner_alive`,
+  `NameHasOwner`). The GTK shell and the
+  legacy shell host declare their name on every control connection,
+  including after a redial. Evidence: `capture_security.rs`
+  (`the_shell_is_only_the_unique_names_it_declared`); `peer_auth.rs`
+  (`only_the_supervised_shell_declares_its_bus_name`);
+  `crates/compositor/tests/introspect_shell_name.rs`
+  (`a_caller_with_the_shell_pid_but_an_undeclared_name_is_denied`);
+  `crates/shell-host/src/control.rs`
+  (`the_bus_name_is_declared_and_declared_again_after_a_redial`).
 
 ### Lock client
 
@@ -122,13 +152,17 @@ The lock client is the supervised shell. `ext_session_lock_manager_v1` is
 visible to every client outside a security context
 (`crates/compositor/src/session_lock.rs`, `LockProtocol::new`).
 
-- A lock is granted only when `lock_request_verdict` matches the
-  requester's `SO_PEERCRED` PID, read through
-  `Client::get_credentials` when the lock is requested, with the held shell
-  PID, and the disable-lock-screen lockdown allows it (`session_lock.rs`,
-  `SessionLockHandler::lock`, `lock_request_verdict`; `runtime.rs`, the
-  `take_lock_request` branch of `Runtime::tick`). This check uses the
-  numeric PID, not the pidfd-pinned flag; see risk R2.
+- A lock request is considered only from the shell's pinned Wayland
+  connection (`ClientState::pinned_shell_pid`). Any other client's request
+  is refused on arrival, so it can neither replace nor cancel the shell's
+  pending request or the approved owner (`SessionLockHandler::lock`).
+- The runtime approves the shell's request only when its live pinned PID
+  still equals the held shell child and the disable-lock-screen lockdown
+  allows it (`lock_request_verdict`; `runtime.rs`, the `take_lock_request`
+  branch of `Runtime::tick`).
+- On `finished` the GTK shell asks again with a bounded backoff while the
+  compositor still reports locked (`crates/shell-gtk/src/lock.rs`,
+  `retry_lock`, `lock_retry_delay`).
 - Only the approved client's surfaces are drawn or take input
   (`State::approved_lock_surface`, `lock_surface_for`). A release from an
   unapproved lock object is a protocol error (`Dispatch<ExtSessionLockV1>`).
@@ -136,10 +170,14 @@ visible to every client outside a security context
 - Evidence: `session_lock.rs` unit tests (`only_the_supervised_shell_pid_may_lock`,
   `an_unknown_pid_is_never_the_shell`,
   `lockdown_policy_refuses_even_the_shell_and_reports_why`);
-  `crates/compositor/tests/session_lock_protocol.rs`;
-  `crates/compositor/tests/session_lock_runtime.rs`
+  `crates/compositor/tests/session_lock_protocol.rs`
+  (`a_foreign_lock_with_the_shells_pid_is_refused_on_arrival`,
+  `a_hostile_client_spamming_lock_cannot_cancel_the_shells_lock` and the
+  earlier protocol tests); `crates/compositor/tests/session_lock_runtime.rs`
   (`actual_runtime_grants_only_the_shell_lock_and_input_reaches_only_its_curtain`,
-  CI `check` step "Session lock runtime proof").
+  CI `check` step "Session lock runtime proof"), which also spams foreign
+  lock requests while the shell locks; `crates/shell-gtk/src/lock.rs`
+  (`refused_locks_are_retried_with_a_bounded_backoff`).
 
 ### Portal backend (`xdg-desktop-portal-gnome`)
 
@@ -159,8 +197,16 @@ Two separate checks:
   `org.freedesktop.impl.portal.desktop.gnome` *and* pass the executable check
   (`Authority::authenticate_sender`). Owning the name alone is not enough,
   and a copied binary fails the root-owner check.
+- **How the executable is read.** Where the bus supplies a `ProcessFD` in
+  `GetConnectionCredentials`, the check goes through it: the pidfd's
+  `/proc/self/fdinfo` `Pid:` must equal the reported PID, and the pinned
+  process must be alive both before and after `/proc/<pid>/exe` is read, so
+  the read cannot reach a process that took over a recycled PID
+  (`installed_executable`, `pidfd_pid`, `pidfd_live`). A bus without
+  `ProcessFD` (dbus-daemon before 1.15.8) leaves the numeric PID, as before.
 - Evidence: `capture_security.rs` (`arbitrary_process_cannot_be_the_installed_portal`,
-  `typed_service_roles_do_not_accept_an_arbitrary_process`);
+  `typed_service_roles_do_not_accept_an_arbitrary_process`,
+  `a_recycled_pid_does_not_inherit_the_installed_executable`);
   `crates/compositor/src/mutter/service_channel_tests.rs`
   (`x11_interop_registry_requires_typed_admission_not_service_liveness`);
   CI `portal-security` (`scripts/tuna-portal-security`,
@@ -175,7 +221,8 @@ same-UID caller whose executable is the root-owned
 `/usr/libexec/gnome-remote-desktop-daemon` or
 `/usr/lib/gnome-remote-desktop-daemon` and which currently owns
 `org.gnome.RemoteDesktop.User`, `.Handover` or `.Headless`
-(`capture_security.rs`, `remote_desktop_daemon`). The daemon's configured
+(`capture_security.rs`, `remote_desktop_daemon`), read the same way as the
+portal's. The daemon's configured
 credentials are the consent, as in GNOME. Evidence: `capture_security.rs`
 (`remote_desktop_daemon_identity_is_the_root_owned_installed_binary`);
 `crates/compositor/src/mutter/remote_bus_tests.rs`
@@ -238,7 +285,7 @@ D-Bus API. None of it ships today, and this ADR decides nothing about it.
 
 | Identity | Recognised by | May bind or call |
 |---|---|---|
-| Supervised shell | Held child PID; pidfd-pinned at Wayland accept; numeric PID on the control socket, session lock and bus | Layer-shell, foreign toplevel list, session lock, control socket, ScreenCast/Screenshot/RemoteDesktop/Introspect creation |
+| Supervised shell | Held child PID; pidfd-pinned (Wayland, control); declared unique bus name (D-Bus) | Layer-shell, foreign toplevel list, session lock, control socket, ScreenCast/Screenshot/RemoteDesktop/Introspect creation |
 | Portal backend | Root-owned installed executable, plus current owner of the GNOME portal name for capture | Typed display connection with `mutter_x11_interop`; ScreenCast, Screenshot, RemoteDesktop, InputCapture, Introspect |
 | gnome-remote-desktop | Root-owned installed executable plus current owner of a grd name | RemoteDesktop and its linked ScreenCast only |
 | PAM helper | Spawned from the compositor's own held image over private pipes | Nothing; it only answers the compositor |
@@ -251,10 +298,11 @@ D-Bus API. None of it ships today, and this ADR decides nothing about it.
   so that no path, PID or name identifies it. This is the strongest option
   and removes PID comparison. Deferred, as in ADR 0005: it changes the
   reconnect model and every test harness.
-- **pidfd identity everywhere.** The Wayland layer-shell check already pins
-  the peer. The session-lock check and the D-Bus shell check could use the
-  same pin (`Client` credentials captured at accept, and the bus's
-  `ProcessFD` credential). This is the smallest fix for risk R2.
+- **pidfd identity everywhere.** Done in #1171. The Wayland shell flag, the
+  session-lock request and the control socket use the `SO_PEERPIDFD` pin;
+  the executable check uses the bus's `ProcessFD` where it exists. On D-Bus
+  the shell is identified by the unique names it declares over its pinned
+  control session, which needs no `ProcessFD` support from the bus.
 - **An allowlisted, root-owned shell binary** checked like the portal. It
   would stop `TUNA_SHELL_BIN` and `PATH` from choosing the shell. It does not
   stop `LD_PRELOAD` or a debugger, so it narrows R3 only.
@@ -275,9 +323,11 @@ D-Bus API. None of it ships today, and this ADR decides nothing about it.
 - A process that only *claims* an identity is refused: an owned portal name
   without the installed binary, a copied binary, a forged app ID, a second
   connection to the Wayland or control socket, a sandboxed client.
-- Every trusted identity except the PAM helper and the IBus bridge depends
-  on a PID. The shell's own PID is safe because the compositor holds it.
-  The peer's PID is safe only where a pidfd pins it.
+- The shell's identity no longer depends on a PID number. On Wayland and
+  the control socket it is the `SO_PEERPIDFD` pin of the held child; on
+  D-Bus it is the unique name that pinned child declared. The portal and
+  grd are still recognised through their executable, read through the
+  bus's `ProcessFD` where the bus has one.
 - The identity of the shell, the IBus bridge and the PAM service comes from
   the session's environment. Packaging sets none of the overrides.
 - Security review of this ADR, and of [ADR 0011](0011-lock-auth-and-capture-grant-lifecycle.md),
@@ -286,9 +336,9 @@ D-Bus API. None of it ships today, and this ADR decides nothing about it.
 
 ## Residual risks
 
-These remain on `main`. The native same-UID cases are outside the boundary
-above; none of them is a regression against GNOME 51. R2 and R5 are gaps
-against this ADR's own checks.
+The native same-UID cases are outside the boundary above; none of them is
+a regression against GNOME 51. R2 and R5 were gaps against this ADR's own
+checks and are closed by #1171.
 
 - **R1. Become a trusted process (F1).** A native same-UID process can kill
   the portal or grd and start the genuine binary itself with `LD_PRELOAD`.
@@ -298,18 +348,14 @@ against this ADR's own checks.
   capture and keystroke injection with no dialog. This needs no `ptrace`,
   and Yama `ptrace_scope` does not stop it. Where `ptrace_scope` is 0 (the
   default on Fedora up to 44 and on CentOS Stream 10), the process can also
-  attach to the running shell, portal or grd. The check also reads the PID
-  first and `/proc/<pid>/exe` second, without a pidfd.
-- **R2. PID reuse (F4; gap).** The session-lock approval (`session_lock.rs`,
-  `SessionLockHandler::lock`) and the D-Bus shell check
-  (`capture_security.rs`, `authenticate_sender`, `owner_alive`) compare a
-  numeric PID recorded when the peer connected. `pinned_process_id` exists
-  and is not used there. An attacker that connects, hands its socket to a
-  child, exits, and steers the next shell restart onto its old PID passes
-  as the shell. On the bus that gives capture and RemoteDesktop input with
-  no consent. On Wayland an approved lock replaces the lock owner even while
-  locked (`State::resolve_lock_request`), so the attacker's lock surface
-  would receive the password. [INFERENCE: not exploited in a test.]
+  attach to the running shell, portal or grd. On a bus without `ProcessFD`
+  the executable check also reads the PID first and `/proc/<pid>/exe`
+  second, without a pin.
+- **R2. PID reuse (F4, G1, G2; closed by #1171).** Before #1171 the
+  session-lock approval and the D-Bus shell check compared a numeric PID
+  recorded when the peer connected, so a connection whose PID had been
+  recycled onto a restarted shell could pass as the shell. Both now use the
+  pinned identity described above.
 - **R3. Choose the next session's trusted code (F9).** `TUNA_SHELL_BIN`,
   `PATH`, `TUNA_IBUS_BRIDGE_BIN` (`ime.rs`) and `TUNA_PAM_SERVICE` are read
   from the inherited environment, as are `TUNA_INTROSPECT_UNRESTRICTED`,
@@ -323,18 +369,16 @@ against this ADR's own checks.
   accelerator-grab methods trust the owner of `org.gnome.Settings`,
   `org.gnome.SettingsDaemon.MediaKeys` or the portal name
   (`crates/shell-gtk/src/shell_dbus.rs`), as GNOME's `DBusSenderChecker` does.
-- **R5. A stuck lock with no prompt (F3; gap).** Any unsandboxed Wayland
-  client can send `ext_session_lock_v1` requests. A newer request replaces a
-  pending one before the runtime decides (`SessionLockHandler::lock`), so a
-  flood can make the shell's request fail. The GTK lock UI does not ask
-  again while locked (`crates/shell-gtk/src/lock.rs`). The session stays
-  locked with no unlock prompt until `loginctl unlock-session` or a reboot.
-  It fails closed; GNOME 51 has no equivalent, because its lock is
-  in-process.
-- **R6. Untested paths.** No test drives the runtime's real Wayland accept
-  path for the shell flag; protocol tests set it through
-  `TestCompositor::add_shell_client`. The fallback without `SO_PEERPIDFD`
-  (kernels before 6.5) has no test.
+- **R5. A stuck lock with no prompt (F3; closed by #1171).** Before #1171 a
+  flood of foreign `ext_session_lock_v1` requests could replace the shell's
+  pending request, and the GTK lock UI did not ask again, leaving a locked
+  session with no prompt. Foreign requests are now refused on arrival and
+  the shell retries with backoff.
+- **R6. Untested paths (G9; covered).** The runtime's real Wayland accept
+  path is driven by `crates/compositor/tests/session_lock_runtime.rs`, and
+  the no-pin cases by `the_shell_gate_requires_a_pin` (`peer_auth.rs`) and
+  `only_a_live_pinned_shell_child_is_the_wayland_shell`
+  (`capture_security.rs`), all in #1171.
 - **Out of scope by design:** native same-UID processes (above), root, the
   kernel, and the platform services named in the
   [security model](../security-model.md#out-of-scope).
@@ -343,23 +387,24 @@ against this ADR's own checks.
 
 The specialist review for #1162 found no critical issue, one high (F1),
 medium F2–F6 and low F7–F9. The G numbers are the gaps found while writing
-these ADRs. "In progress" means a fix is being built and is not on `main`.
+these ADRs. "Fixed in #N" names the pull request that closes it; "in
+progress" means a fix is still being built.
 
 | Finding | Gap | Summary | Recorded in | Disposition |
 |---|---|---|---|---|
-| F1 (high) | — | `LD_PRELOAD` into the genuine portal or grd gives capture and EIS input with no consent | R1 | Accepted residual risk for native same-UID processes (GNOME parity); mitigations F2, grd gsettings gate and F4 in progress |
+| F1 (high) | — | `LD_PRELOAD` into the genuine portal or grd gives capture and EIS input with no consent | R1 | Accepted residual risk for native same-UID processes (GNOME parity). Mitigations: F2 and the grd gsettings gate in progress; F4 fixed in #1171 |
 | F2 | — | No indicator or Stop for active ScreenCast, RemoteDesktop or InputCapture | ADR 0011 L13 | In progress |
-| F3 | — | Foreign lock requests leave a locked session with no prompt | R5 | In progress |
-| F4 | G1, G2 | Session-lock and D-Bus shell identity are unpinned PIDs | R2 | In progress |
+| F3 | — | Foreign lock requests leave a locked session with no prompt | R5 | Fixed in #1171 |
+| F4 | G1, G2 | Session-lock and D-Bus shell identity are unpinned PIDs | R2 | Fixed in #1171 |
 | F5 | — | Fingerprint unlock bypasses PAM | ADR 0011 lock lifecycle, L14 | In progress: fingerprint will run through PAM |
-| F6 | G3 | No logind sleep delay inhibitor | ADR 0011 L2 | In progress |
-| F7 | — | A drag icon is drawn above the lock surface | ADR 0011 L11 | In progress |
-| F8 | — | An unmapped idle inhibitor stops the idle lock | ADR 0011 L12 | In progress |
+| F6 | G3 | No logind sleep delay inhibitor | ADR 0011 L2 | Fixed in #1170 |
+| F7 | — | A drag icon is drawn above the lock surface | ADR 0011 L11 | Fixed in #1170 |
+| F8 | — | An unmapped idle inhibitor stops the idle lock | ADR 0011 L12 | Fixed in #1170 |
 | F9 | G4, G5 | Environment overrides; `loginctl unlock-session`; Orca customization | R3, ADR 0011 L1 | Accepted residual risk (GNOME parity) |
-| — | G6 | The portal can call `org.tuna.Screenshot.ScreenshotWindows` | ADR 0011 L8 | In progress |
+| — | G6 | The portal can call `org.tuna.Screenshot.ScreenshotWindows` | ADR 0011 L8 | Fixed in #1169 |
 | — | G7 | Security lanes are not required per pull request | ADR 0011 L10 | Accepted residual risk; they run on `main` and nightly |
-| — | G8 | P-LK-01 cites a test of a non-production unlock path | ADR 0011 L10 | In progress |
-| — | G9 | Untested: delivered EIS revocation, the real accept path, the no-pidfd fallback | R6, ADR 0011 L7 | In progress |
+| — | G8 | P-LK-01 cites a test of a non-production unlock path | ADR 0011 L10 | Fixed in #1169 |
+| — | G9 | Untested: delivered EIS revocation, the real accept path, the no-pidfd fallback | R6, ADR 0011 L7 | Fixed in #1169 (EIS) and #1171 (accept path, no pin) |
 
 The F9 note that `docs/security-model.md` called input-method v2 open to
 any client is fixed there.
@@ -373,10 +418,10 @@ and GNOME Shell 51.1 at
 
 | Concern | GNOME 51 | Tuna Desktop today |
 |---|---|---|
-| Who may create ScreenCast and RemoteDesktop sessions | Any session-bus caller; Mutter records the caller and checks nothing else ([`meta-dbus-session-manager.c`](https://github.com/GNOME/mutter/blob/9134e3a5869ce232bf95b77519005865747ba603/src/backends/meta-dbus-session-manager.c)). Maintainers state same-user bus access is the boundary ([GNOME Discourse 35009](https://discourse.gnome.org/t/security-for-mutter-screencast/35009)). | Shell PID, or portal name plus installed executable, or grd name plus installed executable |
+| Who may create ScreenCast and RemoteDesktop sessions | Any session-bus caller; Mutter records the caller and checks nothing else ([`meta-dbus-session-manager.c`](https://github.com/GNOME/mutter/blob/9134e3a5869ce232bf95b77519005865747ba603/src/backends/meta-dbus-session-manager.c)). Maintainers state same-user bus access is the boundary ([GNOME Discourse 35009](https://discourse.gnome.org/t/security-for-mutter-screencast/35009)). | The shell's declared unique name, or portal name plus installed executable, or grd name plus installed executable |
 | Portal backend's display connection | `ServiceChannel` accepts any caller by PID and replaces the previous client of that type ([`meta-service-channel.c`](https://github.com/GNOME/mutter/blob/9134e3a5869ce232bf95b77519005865747ba603/src/core/meta-service-channel.c)) | Installed root-owned executable for the requested type |
-| Screenshot and Introspect | Name allowlist (`DBusSenderChecker`, [`util.js`](https://github.com/GNOME/gnome-shell/blob/33da06854e229c256afd5872fedd83c28cbfa176/js/misc/util.js)), skipped in unsafe mode | Shell PID or authenticated portal |
-| Shell and lock identity | In-process with the compositor; no IPC identity needed | Separate child; PID identity (R2) |
+| Screenshot and Introspect | Name allowlist (`DBusSenderChecker`, [`util.js`](https://github.com/GNOME/gnome-shell/blob/33da06854e229c256afd5872fedd83c28cbfa176/js/misc/util.js)), skipped in unsafe mode | The shell's declared unique name or authenticated portal |
+| Shell and lock identity | In-process with the compositor; no IPC identity needed | Separate child; pidfd-pinned connection and declared unique bus name |
 | Privileged Wayland globals | No layer-shell, session lock, virtual keyboard or foreign toplevel list at all | Offered, filtered to the shell or IBus bridge |
 | `ptrace`, `LD_PRELOAD`, login environment | Defeat it (R1, R3) | Defeat it (R1, R3) |
 | Lock authentication | GDM's root session worker, `gdm-password` | User-run private helper, `tuna-lock` (ADR 0011) |
