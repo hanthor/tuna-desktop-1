@@ -193,27 +193,99 @@ pub async fn connect(address: &str) -> Result<gio::DBusConnection, glib::Error> 
     .await
 }
 
+/// A subscription to the session object's signals; dropping it
+/// unsubscribes.
+pub struct Subscription {
+    connection: gio::DBusConnection,
+    id: std::ffi::c_uint,
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        use glib::translate::ToGlibPtr;
+        // SAFETY: `id` came from `g_dbus_connection_signal_subscribe` on
+        // this connection and is unsubscribed only here, once.
+        unsafe {
+            gio::ffi::g_dbus_connection_signal_unsubscribe(
+                self.connection.to_glib_none().0,
+                self.id,
+            );
+        }
+    }
+}
+
+type Handler = Box<dyn Fn(Signal)>;
+
 /// Every signal of the session object, parsed, until the returned
-/// subscription is dropped.
+/// subscription is dropped. The handler runs in the calling thread's
+/// default main context.
+///
+/// Not gio's `subscribe_to_signal`: gio-rs 0.22 reads the sender as a
+/// non-null string, but signals on a peer-to-peer connection have no
+/// sender (GDBus passes NULL), so its trampoline panics across the FFI
+/// boundary and the process aborts on GDM's first signal.
 pub fn subscribe(
     connection: &gio::DBusConnection,
     handler: impl Fn(Signal) + 'static,
-) -> gio::SignalSubscription {
-    connection.subscribe_to_signal(
-        None,
-        None,
-        None,
-        Some(SESSION_PATH),
-        None,
-        gio::DBusSignalFlags::NONE,
-        move |signal| {
-            if let Some(parsed) =
-                parse_signal(signal.interface_name, signal.signal_name, signal.parameters)
-            {
-                handler(parsed);
-            }
-        },
-    )
+) -> Subscription {
+    use glib::translate::{from_glib_none, ToGlibPtr};
+    use std::ffi::{c_char, CStr};
+
+    unsafe extern "C" fn trampoline(
+        _connection: *mut gio::ffi::GDBusConnection,
+        _sender: *const c_char,
+        _object_path: *const c_char,
+        interface: *const c_char,
+        member: *const c_char,
+        parameters: *mut glib::ffi::GVariant,
+        data: glib::ffi::gpointer,
+    ) {
+        // SAFETY: GDBus passes a signal's interface and member as
+        // non-null strings and its parameters as a non-null tuple, valid
+        // for the call; `data` is the `Handler` boxed below, freed only by
+        // `free` after the last call.
+        let (interface, member, parameters, handler) = unsafe {
+            (
+                CStr::from_ptr(interface),
+                CStr::from_ptr(member),
+                from_glib_none::<_, glib::Variant>(parameters),
+                &*(data as *const Handler),
+            )
+        };
+        let (Ok(interface), Ok(member)) = (interface.to_str(), member.to_str()) else {
+            return;
+        };
+        if let Some(signal) = parse_signal(interface, member, &parameters) {
+            handler(signal);
+        }
+    }
+    unsafe extern "C" fn free(data: glib::ffi::gpointer) {
+        // SAFETY: `data` is the box leaked below; GDBus frees it once.
+        drop(unsafe { Box::from_raw(data as *mut Handler) });
+    }
+
+    let data: Box<Handler> = Box::new(Box::new(handler));
+    let path = std::ffi::CString::new(SESSION_PATH).expect("no NUL in the session path");
+    // SAFETY: every pointer is valid for the call (the path is copied),
+    // and `trampoline`/`free` match GDBusSignalCallback/GDestroyNotify.
+    let id = unsafe {
+        gio::ffi::g_dbus_connection_signal_subscribe(
+            connection.to_glib_none().0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            path.as_ptr(),
+            std::ptr::null(),
+            gio::ffi::G_DBUS_SIGNAL_FLAGS_NONE,
+            Some(trampoline),
+            Box::into_raw(data) as glib::ffi::gpointer,
+            Some(free),
+        )
+    };
+    Subscription {
+        connection: connection.clone(),
+        id,
+    }
 }
 
 /// GNOME Shell's `registerSessionWithGDM` and `registerDisplayWithGDM`
@@ -413,5 +485,76 @@ mod tests {
         assert_eq!(start.wire().1, "StartSessionWhenReady");
         assert_eq!(start.wire().2.type_().as_str(), "(sb)");
         assert!(start.wire().2.get::<(String, bool)>().unwrap().1);
+    }
+
+    /// GDM's channel is peer to peer: its signals carry no sender. They
+    /// reach the handler (gio-rs's own subscription aborts on them).
+    #[test]
+    fn peer_signals_without_a_sender_reach_the_handler() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let dir = tempfile::tempdir().unwrap();
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let server = gio::DBusServer::new_sync(
+                    &format!("unix:dir={}", dir.path().display()),
+                    gio::DBusServerFlags::NONE,
+                    &gio::dbus_generate_guid(),
+                    None,
+                    None::<&gio::Cancellable>,
+                )
+                .unwrap();
+                let gdm_side: Rc<RefCell<Option<gio::DBusConnection>>> = Rc::default();
+                let keep = gdm_side.clone();
+                server.connect_new_connection(move |_, connection| {
+                    *keep.borrow_mut() = Some(connection.clone());
+                    true
+                });
+                server.start();
+                // The server authenticates in this context: connect without
+                // blocking it.
+                let greeter_side = context
+                    .block_on(gio::DBusConnection::for_address_future(
+                        &server.client_address(),
+                        gio::DBusConnectionFlags::AUTHENTICATION_CLIENT,
+                        None,
+                    ))
+                    .unwrap();
+                let seen: Rc<RefCell<Vec<Signal>>> = Rc::default();
+                let record = seen.clone();
+                let subscription = subscribe(&greeter_side, move |signal| {
+                    record.borrow_mut().push(signal)
+                });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let mut sent = false;
+                while seen.borrow().is_empty() {
+                    assert!(std::time::Instant::now() < deadline, "no signal arrived");
+                    if !sent {
+                        if let Some(gdm) = gdm_side.borrow().as_ref() {
+                            gdm.emit_signal(
+                                None,
+                                SESSION_PATH,
+                                USER_VERIFIER,
+                                "SecretInfoQuery",
+                                Some(&("gdm-password", "Password: ").to_variant()),
+                            )
+                            .unwrap();
+                            sent = true;
+                        }
+                    }
+                    context.iteration(false);
+                }
+                assert_eq!(
+                    seen.borrow()[0],
+                    Signal::SecretInfoQuery {
+                        service: "gdm-password".into(),
+                        query: "Password: ".into()
+                    }
+                );
+                drop(subscription);
+                server.stop();
+            })
+            .unwrap();
     }
 }

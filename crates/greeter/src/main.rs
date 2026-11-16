@@ -107,7 +107,7 @@ struct Greeter {
     policy: Policy,
     system: RefCell<Option<gio::DBusConnection>>,
     connection: RefCell<Option<gio::DBusConnection>>,
-    signals: RefCell<Option<gio::SignalSubscription>>,
+    signals: RefCell<Option<gdm::Subscription>>,
     accounts_watch: RefCell<Option<gio::SignalSubscription>>,
     users: RefCell<Vec<accounts::User>>,
     /// "Not listed?": the prompt asks for a username, not GDM.
@@ -447,6 +447,19 @@ impl Greeter {
                 greeter.register();
             }
         });
+        // GNOME's menus give the key focus back to where it was when they
+        // close (grabHelper.js `ungrab`): after Login Options, typing goes
+        // to the prompt again, not to the menu button.
+        if let Some(popover) = self.options.popover() {
+            let weak = Rc::downgrade(self);
+            popover.connect_closed(move |_| {
+                if let Some(greeter) = weak.upgrade() {
+                    if greeter.on_prompt() && greeter.entry.current().is_sensitive() {
+                        greeter.entry.focus();
+                    }
+                }
+            });
+        }
     }
 
     fn on_prompt(&self) -> bool {
