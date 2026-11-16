@@ -4307,8 +4307,8 @@ impl WindowManager {
     /// focused window. Handing an Exclusive hold back to a window (or
     /// nothing) strands the panel inactive with GTK focus intact but no
     /// keyboard (G-PANEL-FOCUS). Unlock walks the same owners through
-    /// [`Self::unlock_input`], which also honours a surviving popup grab
-    /// and never raises.
+    /// [`Self::unlock_input`], which also honours a popup grab taken
+    /// while locked and never raises.
     pub fn restore_keyboard_owner(&mut self, state: &mut State) {
         if let Some(held) = self.overview_held.clone() {
             let serial = SERIAL_COUNTER.next_serial();
@@ -4333,10 +4333,11 @@ impl WindowManager {
     /// physical/XKB state until real keyup. Trusted AT runs before this filter.
     ///
     /// The keyboard goes back to what had it, as GNOME Shell's `popModal`
-    /// does (screenShield.js locks with a modal stage grab, which revokes
-    /// Mutter's Wayland popup grab without dismissing it): the topmost popup
-    /// of a grab that outlived the lock, else the owner a popup grab hands
-    /// back to (the parked overview, an Exclusive layer, the focused window).
+    /// does. The lock dismissed every popup grab
+    /// ([`crate::State::dismiss_popup_grab_for_lock`]), so only a grab taken
+    /// while locked is returned to (its topmost popup); otherwise the owner
+    /// a popup grab hands back to (the parked overview, an Exclusive layer,
+    /// the focused window).
     pub fn unlock_input(&mut self, state: &mut State) {
         if let Some(keyboard) = &self.keyboard {
             self.unlock_quarantined.extend(keyboard.pressed_keys());
