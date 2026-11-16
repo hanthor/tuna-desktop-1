@@ -53,10 +53,13 @@ added stingray as a fifteenth variant, recorded unsupported until the factory
 has an `ubuntu-rolling` target.
 
 The native package inventory is [tunaos-packages
-`c0998b94bd7b4fbc67360c239e439de6debf539b`](https://github.com/tuna-os/tunaos-packages/tree/c0998b94bd7b4fbc67360c239e439de6debf539b).
-Its Tuna recipe/spec target **beta.2 release 2**, source desktop tag
-`v1.0.0-beta.2`, commit `1e6ce28f4d5dfd7918ac7340bd93454a9fcc211c`.
-That is not current desktop main. Recipe and vendor archive digests, actual
+`f853bc21d8316cb20bcfef42f4cc6d60ef7ec7d6`](https://github.com/tuna-os/tunaos-packages/tree/f853bc21d8316cb20bcfef42f4cc6d60ef7ec7d6)
+(tunaos-packages#1009, 2026-11-14). Its Tuna recipe/spec target **beta.3
+release 1**, source desktop tag `v1.0.0-beta.3`, commit
+`721c55033dd5d2a1127f24473542e16646cb34e5`. The beta.2 release 2 recipe
+(tunaos-packages `c0998b94`, tag `v1.0.0-beta.2`, commit `1e6ce28f`) is what the
+2026-10-31 rows below were measured on. That is not current desktop main.
+Recipe and vendor archive digests, actual
 Gentoo payload evidence, and publication attempts are recorded in
 [package-evidence.json](variants/2026-10-31/package-evidence.json).
 
