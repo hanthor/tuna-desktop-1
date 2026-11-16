@@ -59,6 +59,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -75,6 +76,11 @@ _guest_spec = importlib.util.spec_from_loader("vm_guest_agent", _guest_loader)
 guest_agent = importlib.util.module_from_spec(_guest_spec)
 _guest_loader.exec_module(guest_agent)
 import soak_report  # noqa: E402  (scripts/lib, on sys.path above)
+_app_loader = importlib.machinery.SourceFileLoader("vm_app_integration",
+                                                   os.path.join(HERE, "lib", "vm_app_integration.py"))
+_app_spec = importlib.util.spec_from_loader("vm_app_integration", _app_loader)
+app_integration = importlib.util.module_from_spec(_app_spec)
+_app_loader.exec_module(app_integration)
 import fresh_accounts  # noqa: E402  (scripts/lib, on sys.path above)
 import core_apps_legs  # noqa: E402  (scripts/lib, on sys.path above)
 from tour_media import (TOUR_PUBLIC_CONTROLS, desktop_shown, grey_share,
@@ -1747,6 +1753,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record, strip_image=None, reconn
                     else:
                         held.discard(name)
 
+                restore_input()
                 before_hold = agent.run("orca-read")
                 try:
                     physical("insert", True)
@@ -1759,32 +1766,75 @@ def run_lifecycle(qmp, agent, out, serial_path, record, strip_image=None, reconn
                     # above. This follows primary source, not a GNOME VM comparison.
                     agent.run("lock")
                     await_state(lambda state: state["state"]["locked"])
-                    locked = await_keyboard("locked-reset-delivered", lambda keyboard:
-                        keyboard["locked"] and keyboard["reset_events"] > disclosed["keyboard"]["reset_events"])
-                    # Baseline follows the successful serialized reset. Subsequent
-                    # private input is measured only by anonymous delivery counts.
+                    locked = await_keyboard("locked-at-still-ready", lambda keyboard:
+                        keyboard["locked"])
                     baseline_count = locked["keyboard"]["normal_events"]
+                    client_before = agent.run("input-key-events")
+                    # Like Mutter, locking neither clears a11y grabs nor
+                    # fabricates a modifier release. Hold an AT-grabbed
+                    # F4 across unlock; its release must still be
+                    # consumed before ordinary SESSION surface routing.
+                    if locked["keyboard"]["reset_events"] != disclosed["keyboard"]["reset_events"]:
+                        raise RuntimeError("lock fabricated an accessibility modifier reset")
                     physical("f4", True)
-                    # F4 already lifts the lock curtain. Another initial Return
-                    # would submit an empty password and disable the entry while
-                    # authentication runs; retain real typing/submission below.
-                    pam_unlock(wake=False)
-                    resumed = await_keyboard("authenticated-ready", lambda keyboard:
-                        not keyboard["locked"] and keyboard["resume_state"] == "ready")
-                    if resumed["keyboard"]["normal_events"] != baseline_count or resumed["frames"] <= locked["frames"]:
-                        raise RuntimeError("private lock/PAM keys reached Orca or native frames stopped")
+                    await_keyboard("locked-custom-chord", lambda keyboard:
+                        keyboard["normal_events"] == baseline_count + 1)
                     physical("insert", False)
+                    before_password = await_keyboard("locked-custom-release", lambda keyboard:
+                        keyboard["normal_events"] == baseline_count + 2)
+                    # F4 was AT-grabbed, so it did not lift the curtain.
+                    # Release Insert before real wake/password input.
+                    pam_unlock()
+                    resumed = await_keyboard("authenticated-ready", lambda keyboard:
+                        not keyboard["locked"] and keyboard["resume_state"] == "ready"
+                        and keyboard["normal_events"] >= before_password["keyboard"]["normal_events"] + 16)
+                    # Wake Enter (2), Ctrl+A (4), four characters (8),
+                    # submit Enter (2), separate from Insert/F4 above.
+                    if resumed["keyboard"]["normal_events"] != before_password["keyboard"]["normal_events"] + 16:
+                        raise RuntimeError("wake/PAM typing did not forward exactly sixteen AT events")
+                    if resumed["frames"] <= locked["frames"]:
+                        raise RuntimeError("active-reader PAM cycle stopped native frames")
+                    if agent.run("input-key-events") != client_before:
+                        raise RuntimeError("lock/PAM keys reached the ordinary session client")
                     physical("f4", False)
-                    time.sleep(0.3)
-                    released = await_keyboard("protected-held-releases", lambda keyboard:
-                        keyboard["resume_state"] == "ready")
-                    if released["keyboard"]["normal_events"] != baseline_count:
-                        raise RuntimeError("protected held-key release reached Orca after unlock")
-                    fresh = native_command("orca-postunlock-command", "V-ORCA-POSTUNLOCK-COMMAND", baseline_count)
+                    released = await_keyboard("postunlock-grabbed-release", lambda keyboard:
+                        keyboard["normal_events"] == resumed["keyboard"]["normal_events"] + 1)
+                    # Positive FIFO receipt from the same client:
+                    # acknowledge fresh F9 press/release after F4 up.
+                    # Retain the original baseline and reject overshoot,
+                    # including any delayed leak during the settle window.
+                    qmp.keys("f9")
+                    target = {"pid": client_before["pid"],
+                              "count": client_before["count"] + 1,
+                              "key_releases": client_before["key_releases"] + 1}
+                    deadline = time.monotonic() + 15
+                    stable_since = None
+                    while time.monotonic() < deadline:
+                        client_after = agent.run("input-key-events")
+                        if (client_after["pid"] != target["pid"]
+                                or client_after["count"] > target["count"]
+                                or client_after["key_releases"] > target["key_releases"]):
+                            raise RuntimeError("lock-origin held-key event reached the session client")
+                        if client_after == target:
+                            stable_since = stable_since or time.monotonic()
+                            if time.monotonic() - stable_since >= 1:
+                                break
+                        else:
+                            stable_since = None
+                        time.sleep(0.1)
+                    else:
+                        raise RuntimeError("original session client did not acknowledge fresh F9 press/release")
+                    if agent.run("inventory")["state"]["focused"] != input_window:
+                        raise RuntimeError("postunlock input receipt changed the original focused client")
+                    fresh = native_command("orca-postunlock-command", "V-ORCA-POSTUNLOCK-COMMAND",
+                                           released["keyboard"]["normal_events"])
                     privacy.append({"stage": "fresh-command", "identity": original,
-                                    "keyboard": fresh["keyboard"], "frames": fresh["frames"]})
+                                    "keyboard": fresh["keyboard"], "frames": fresh["frames"],
+                                    "session_client_before": client_before,
+                                    "session_client_after_public_f9_sync": client_after,
+                                    "public_sync_expected": target})
                     record("V-ORCA-LOCK-PRIVACY", True,
-                           "same genuine reader survives real PAM unlock; disclosed custom reset succeeds, private held keys/releases cause no normal delivery, fresh spoken command works")
+                           "same genuine trusted AT hears lock/PAM keys and held release as in Mutter; ordinary session client receives neither; fresh spoken command works")
                 finally:
                     with open(os.path.join(evidence, "orca-lock-privacy.json"), "w") as stream:
                         json.dump({"observations": privacy, "comparative_gnome_vm": False,
@@ -3796,7 +3846,7 @@ def run_soak(qmp, vm, agent_path, out, record, seconds, warmup, interval, revisi
 
 
 def boot(disk, out, scratch, timeout, require_kvm=False, *, guest_agent=False, native_relative_mouse=False,
-         observer_records=None, credentials=(), core_nonce=None):
+         observer_records=None, display_bus=None, credentials=(), core_nonce=None):
     ovmf = next((p for p in OVMF if os.path.exists(p)), None)
     if not ovmf:
         sys.exit("tuna-vm-lane: OVMF firmware not found (install ovmf)")
@@ -3811,7 +3861,7 @@ def boot(disk, out, scratch, timeout, require_kvm=False, *, guest_agent=False, n
     qemu = ["qemu-system-x86_64", "-machine", "q35", "-m", "6144", "-smp", "4",
             "-bios", ovmf, "-snapshot",
             "-drive", f"file={disk},format=raw,if=virtio,cache=unsafe",
-            *baseline.gpu_devices(),
+            *baseline.gpu_devices(outputs=2 if display_bus else 1),
             "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
             # The virtio keyboard carries multimedia evdev codes; USB's
             # boot-protocol keyboard has no consumer-control usages.
@@ -3819,7 +3869,11 @@ def boot(disk, out, scratch, timeout, require_kvm=False, *, guest_agent=False, n
             "-audiodev", "none,id=tuna-audio",
             "-device", "ich9-intel-hda",
             "-device", "hda-duplex,audiodev=tuna-audio",
-            "-display", "none", "-serial", f"file:{serial}",
+            # The app-integration boot exposes QEMU's D-Bus display on a
+            # private bus: its Console.SetUIInfo connects/disconnects the
+            # second virtio-gpu scanout (real guest DRM hotplug).
+            "-display", f"dbus,addr={display_bus},gl=off" if display_bus else "none",
+            "-serial", f"file:{serial}",
             "-qmp", f"unix:{qmp_path},server=on,wait=off",
             "-nic", "user,model=virtio-net-pci"]
     if native_relative_mouse:
@@ -4129,6 +4183,8 @@ def main():
     ap.add_argument("--soak-interval", type=int, default=60, metavar="SECONDS")
     ap.add_argument("--soak-revision", metavar="COMMIT",
                     help="the shipped payload's exact 40-digit source commit (deployment record)")
+    ap.add_argument("--app-integration", action="store_true",
+                    help="two-head boot running V-PICKER and V-INTROSPECT instead of the tour")
     ap.add_argument("--fresh-accounts", action="store_true",
                     help="tunaOS#4092: run only the record-free standard/admin account GDM journey "
                          "(first login, logout, login, reboot, login), not the tuna-test lane")
@@ -4156,12 +4212,12 @@ def main():
         if not a.reference_base_evidence:
             ap.error("the paired consumer requires --reference-base-evidence")
         if (not a.require_kvm or a.tour or a.boots != 1 or a.soak or a.fresh_accounts
-                or a.published or a.strip_image or a.strip_edge):
+                or a.app_integration or a.published or a.strip_image or a.strip_edge):
             ap.error("paired reference profiles require KVM and their own single pristine boot")
         native_reference_lane(a)
         return
     if a.fresh_accounts:
-        if a.tour or a.boots != 1 or a.soak or a.strip_image or a.published:
+        if a.tour or a.boots != 1 or a.soak or a.strip_image or a.published or a.app_integration:
             ap.error("--fresh-accounts is its own single current-build boot")
         fresh_accounts_lane(a)
         return
@@ -4172,6 +4228,8 @@ def main():
             ap.error("--soak must exceed a nonnegative warmup, at most 86400, with a positive interval")
         if not re.fullmatch("[0-9a-f]{40}", a.soak_revision or ""):
             ap.error("--soak needs --soak-revision, the exact 40-digit source commit")
+    if a.app_integration and (a.tour or a.boots > 1 or a.strip_image or a.soak or a.published):
+        ap.error("--app-integration is its own single current-build boot")
     strip_image = None
     if a.strip_edge and not a.strip_image:
         ap.error("--strip-edge requires exact installed image admission")
@@ -4208,11 +4266,24 @@ def main():
         results[test_id] = (ok, desc)
         log(f"{test_id} {'pass' if ok else 'FAIL'}: {desc}")
 
+    display_bus = display_daemon = display_dir = None
+    if a.app_integration:
+        # sun_path holds 108 bytes; the runner's scratch path can exceed it.
+        display_dir = tempfile.mkdtemp(prefix="tuna-qd-")
+        display_socket = os.path.join(display_dir, "bus")
+        display_bus = f"unix:path={display_socket}"
+        display_daemon = subprocess.Popen(["dbus-daemon", "--session", "--nofork", f"--address={display_bus}"])
+        for _ in range(50):
+            if os.path.exists(display_socket):
+                break
+            time.sleep(0.1)
+        else:
+            sys.exit(f"tuna-vm-lane: the QEMU display bus never appeared at {display_socket}")
     core_nonce = secrets.token_hex(16) if a.profile == "core-apps" else None
     core_desktop = None
     vm, qmp_path, serial_path, kvm, agent_path = boot(
         os.path.abspath(a.disk), out, scratch, a.timeout, a.require_kvm,
-        guest_agent=True, native_relative_mouse=True, core_nonce=core_nonce)
+        guest_agent=True, native_relative_mouse=True, display_bus=display_bus, core_nonce=core_nonce)
     start = time.time()
     drm = shell = None
     elapsed = 0.0
@@ -4366,6 +4437,13 @@ def main():
                             diagnostic_agent.close()
                     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                         log(f"bounded lifecycle failure diagnostics unavailable: {error}")
+            if a.app_integration:
+                try:
+                    app_integration.run(qmp, lambda: guest_agent.GuestAgent(agent_path), out, record, display_bus)
+                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                    for gate in ("V-PICKER", "V-INTROSPECT-SCREEN", "V-INTROSPECT-SANDBOX"):
+                        results.setdefault(gate, (False, f"app-integration failed: {error}"))
+                        log(f"{gate} FAIL: app-integration failed: {error}")
         # Give activation probes a bounded chance to report before shutdown.
         deadline = time.time() + 180
         while drm and shell and time.time() < deadline:
@@ -4379,7 +4457,14 @@ def main():
             vm.wait(timeout=30)
         except subprocess.TimeoutExpired:
             vm.kill()
+        if display_daemon is not None:
+            display_daemon.kill()
+            display_daemon.wait()
+            shutil.rmtree(display_dir, ignore_errors=True)
 
+    if a.app_integration:
+        for gate in ("V-PICKER", "V-INTROSPECT-SCREEN", "V-INTROSPECT-SANDBOX"):
+            results.setdefault(gate, (False, "session never came up; app-integration not run"))
     text = read_text(serial_path)
     drm = drm or DRM_RE.search(text)
     shell = shell or SHELL_RE.search(text)

@@ -35,6 +35,15 @@ console frames for each step.
    Native portal requesters also check frontend availability, actual Screenshot
    delivery, and a ScreenCast PipeWire frame with caller isolation and bounded
    withdrawal on the actual Super+L lock; no candidate desktop binaries are copied.
+   `tuna-test` is a fresh account that never chose a session, so its first
+   login is the [#1050](https://github.com/tuna-os/tuna-desktop/issues/1050)
+   fresh-account check (tunaOS#4055). Before login, the greeter step records
+   GDM's version and `[daemon] FallbackSession`, both AccountsService
+   templates and the account's own record. It requires that the account has
+   no saved session of its own and that each template resolves to `tuna`:
+   a non-empty template `Session`, or `FallbackSession=tuna` on GDM 51 and
+   later. After login it requires that the account's saved session is
+   `tuna` or empty. The receipt keeps both under `fresh_account`.
 5. Every step writes its frame, its guest-side checks, and the `tuna-*`
    journal lines it caused to `manifest.json` with timestamps. A step's
    result is `pass`, `fail` or `not-exercised` (with the reason). Then
@@ -91,6 +100,10 @@ remains the full daily-driver journey. See the
 [digest-pinned variant matrix](v1-variant-qualification.md) for sequential
 orchestration and the distinction between portal availability and functional
 capture/consent qualification.
+For the upgrade, rollback and crash-recovery proof of the v1 safety-net
+gate, add `--upgrade-to` with a second digest; it replaces the tour with the
+steps in [upgrade-recovery.md](upgrade-recovery.md) and records
+`scope: upgrade-recovery`.
 The native Screenshot requester remains connected until the actual portal
 Response and retains a returned PNG, without app-ID or consent bypass. Its
 request-time console frame requires visual review; a successful PNG response
@@ -139,7 +152,8 @@ long-lived console output is backed by a file, not an undrained stderr pipe.
 ## Limits
 
 - The pointer coordinates in `POINTS` match the 1280x800 output and
-  the Tuna Desktop 1.0.0-beta.2 layout. Night Light is row 2, right.
+  the Tuna Desktop 1.0.0-beta.2 layout, which beta.3 keeps (its Airplane
+  Mode tile is not offered in the VM). Night Light is row 2, right.
   The beta.1 coordinate now hits Wired and disconnects the VM's network.
   The run fails at its first step when the console reports another size.
   A layout change means updating that table.
@@ -148,8 +162,8 @@ long-lived console output is backed by a file, not an undrained stderr pipe.
   (tuna-os/corral main after
   [#627](https://github.com/tuna-os/corral/pull/627)). Install it with
   Corral's `scripts/install.sh`, then `corral plugin install bootc`.
-- KubeVirt VMs have no sound card and no backlight, so the volume and
-  brightness sliders are reported as `not-exercised`.
+- KubeVirt VMs have no sound card and no backlight. PipeWire offers its
+  Dummy Output sink, so the sliders step fails on the backlight check.
 - There is no GPU. These frames come from bochs-drm with software
   rendering, so they say nothing about GPU drivers, multiple outputs,
   hotplug or suspend.
