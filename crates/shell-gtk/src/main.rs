@@ -507,6 +507,12 @@ impl overview::OverviewActions for ShellActions {
         }
     }
 
+    fn launch_started(&self, app_id: &str) {
+        if let Some(control) = self.0.borrow_mut().control.as_mut() {
+            let _ = control.begin_startup_sequence(app_id);
+        }
+    }
+
     fn window_icon(&self, id: u64) -> Option<String> {
         self.0
             .borrow()
@@ -3792,6 +3798,15 @@ fn build(app: &adw::Application) {
                         .is_some_and(|schema| schema.has_key("center-new-windows"))
                     {
                         out.center_new_windows = mutter.boolean("center-new-windows");
+                    }
+                    // mutter 51 prefs.c:380,423 (#1190, #1191).
+                    if let Some(schema) = mutter.settings_schema() {
+                        if schema.has_key("auto-maximize") {
+                            out.auto_maximize = mutter.boolean("auto-maximize");
+                        }
+                        if schema.has_key("overlay-key") {
+                            out.overlay_key = mutter.string("overlay-key").to_string();
+                        }
                     }
                 }
                 if let Some(mutter) = all[8].as_ref() {

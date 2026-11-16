@@ -37,6 +37,9 @@ pub trait OverviewActions {
     fn close_overview(&self);
     /// Raise an existing window by compositor id.
     fn activate_window(&self, id: u64);
+    /// An app was launched (`app_id` its desktop id): the compositor shows
+    /// the busy cursor until its window maps (mutter's startup sequence).
+    fn launch_started(&self, _app_id: &str) {}
     /// Running windows as `(id, app_id)`.
     fn window_icon(&self, _id: u64) -> Option<String> {
         None
@@ -123,7 +126,10 @@ fn activate_app(
     match activation {
         // Do not spawn a replacement after a stale/denied activation request.
         Activation::Raise(window) => actions.activate_window(window),
-        Activation::Launch | Activation::NewWindow => spawn(entry, activation)?,
+        Activation::Launch | Activation::NewWindow => {
+            spawn(entry, activation)?;
+            actions.launch_started(&entry.app_id);
+        }
     }
     activated(activation);
     actions.close_overview();

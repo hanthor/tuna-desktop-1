@@ -895,6 +895,21 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// An app launch's startup sequence (mutter's `MetaLaunchContext`,
+    /// #1193): the compositor shows the busy cursor until a window of
+    /// `app_id` (the desktop id without `.desktop`) maps or 15 s pass.
+    pub fn begin_startup_sequence(&mut self, app_id: &str) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::BeginStartupSequence {
+                app_id: app_id.trim_end_matches(".desktop").to_owned(),
+                wm_class: None,
+            },
+        })?;
+        Ok(id)
+    }
+
     /// Where the switcher's window thumbnails sit (empty: none).
     pub fn set_switcher_thumbnails(
         &mut self,

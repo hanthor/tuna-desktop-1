@@ -237,9 +237,13 @@ impl ProtocolVersion {
     /// pidfd-pinned socket, and the compositor recognises the shell on
     /// D-Bus by that unique name only (ADR 0010). Positional postcard peers
     /// must ship together.
+    /// `0.53` appends mutter's `auto-maximize` and `overlay-key` to
+    /// InputSettings and the shell-to-compositor `BeginStartupSequence`
+    /// (an app launch's startup sequence: the busy cursor until its window
+    /// maps). Positional postcard peers must ship together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 52,
+        minor: 53,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -537,6 +541,16 @@ pub enum CommandKind {
     /// session that is not the supervised shell is denied. A later
     /// declaration replaces the earlier one.
     DeclareBusName { unique_name: String },
+    /// Since 0.53: the shell launched an app (mutter's `MetaLaunchContext`
+    /// startup sequence, `meta-launch-context.c:129-189`). The compositor
+    /// shows the busy cursor until a window of `app_id` (the desktop id
+    /// without `.desktop`) or of `wm_class` (its `StartupWMClass`) maps, or
+    /// the sequence times out (`STARTUP_TIMEOUT_MS`, 15 s). Both strings are
+    /// at most [`MAX_TITLE_LEN`] bytes; longer ones are denied.
+    BeginStartupSequence {
+        app_id: String,
+        wm_class: Option<String>,
+    },
 }
 
 /// mutter 51 `MetaCloseDialogResponse`: what the user chose in the dialog
@@ -1411,6 +1425,15 @@ pub struct InputSettings {
     /// placement, else mutter's first-fit from the work area's corner.
     #[serde(default = "default_center_new_windows")]
     pub center_new_windows: bool,
+    /// `org.gnome.mutter auto-maximize` (0.53): a window first mapping
+    /// larger than 80% of the work area opens maximized.
+    #[serde(default = "default_auto_maximize")]
+    pub auto_maximize: bool,
+    /// `org.gnome.mutter overlay-key` (0.53): the lone key that toggles the
+    /// overview, as mutter parses it (`Super` means `Super_L` and
+    /// `Super_R`; empty disables it).
+    #[serde(default = "default_overlay_key")]
+    pub overlay_key: String,
 }
 
 /// GNOME's `GDesktopPointerAccelProfile`, shared by the mouse, touchpad,
@@ -1704,6 +1727,16 @@ fn default_center_new_windows() -> bool {
     true
 }
 
+/// Mutter 51's `auto-maximize` default.
+fn default_auto_maximize() -> bool {
+    true
+}
+
+/// Mutter 51's `overlay-key` default.
+fn default_overlay_key() -> String {
+    "Super".into()
+}
+
 impl Default for InputSettings {
     /// GNOME 51's defaults.
     fn default() -> Self {
@@ -1744,6 +1777,8 @@ impl Default for InputSettings {
             trackball: TrackballSettings::default(),
             pointing_stick: PointingStickSettings::default(),
             center_new_windows: true,
+            auto_maximize: true,
+            overlay_key: default_overlay_key(),
         }
     }
 }
@@ -2654,6 +2689,34 @@ mod tests {
         }
         assert!(InputSettings::default().center_new_windows);
     }
+
+    /// mutter 51 `prefs.c:380,423`: `auto-maximize` defaults on and
+    /// `overlay-key` to `Super`; both survive the positional wire, and the
+    /// startup-sequence command round-trips.
+    #[test]
+    fn auto_maximize_overlay_key_and_startup_sequence_survive_the_wire() {
+        let defaults = InputSettings::default();
+        assert!(defaults.auto_maximize);
+        assert_eq!(defaults.overlay_key, "Super");
+        for (auto_maximize, overlay_key) in [(false, "Super_R"), (true, "")] {
+            let settings = InputSettings {
+                auto_maximize,
+                overlay_key: overlay_key.into(),
+                ..Default::default()
+            };
+            let mut buffer = [0u8; 512];
+            let body = postcard::to_slice(&settings, &mut buffer).unwrap();
+            let decoded: InputSettings = postcard::from_bytes(body).unwrap();
+            assert_eq!(decoded, settings);
+        }
+        let kind = CommandKind::BeginStartupSequence {
+            app_id: "org.gnome.TextEditor".into(),
+            wm_class: Some("gnome-text-editor".into()),
+        };
+        let mut buffer = [0u8; 256];
+        let body = postcard::to_slice(&kind, &mut buffer).unwrap();
+        assert_eq!(postcard::from_bytes::<CommandKind>(body).unwrap(), kind);
+    }
     #[test]
     fn secrets_never_reach_debug_output() {
         let kind = CommandKind::Unlock {
@@ -2665,8 +2728,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_52() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 52));
+    fn current_version_is_0_53() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 53));
         // A 0.51 shell still negotiates; a newer minor does not.
         assert!(ProtocolVersion::new(0, 51).is_compatible_with(&CURRENT_VERSION));
         assert!(!ProtocolVersion::new(0, 53).is_compatible_with(&CURRENT_VERSION));

@@ -1081,3 +1081,48 @@ fn hub_round_reports_whether_anything_arrived_on_its_sockets() {
     assert!(hub.poll(&mut model).received, "the hang-up was read");
     assert!(!hub.poll(&mut model).received);
 }
+
+/// #1193: the shell's app launches reach the hub outcome as startup
+/// sequences (mutter's `MetaLaunchContext`); empty or oversized ids are
+/// denied and nothing is queued.
+#[test]
+fn app_launch_startup_sequences_reach_the_hub_outcome() {
+    let dir = private_tempdir();
+    let path = dir.path().join("control.sock");
+    let mut hub =
+        ControlHub::bind(path.clone(), std::rc::Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
+    let mut model = StateModel::new();
+    let mut client = hub_client(&path);
+    hub_handshake(&mut hub, &mut model, &mut client);
+    let long = "x".repeat(tuna_shell_control::MAX_TITLE_LEN + 1);
+    for (id, app_id, wm_class, applied) in [
+        (1, "org.gnome.TextEditor", Some("gnome-text-editor"), true),
+        (2, "", None, false),
+        (3, long.as_str(), None, false),
+        (4, "xterm", Some(long.as_str()), false),
+        (5, "xterm", None, true),
+    ] {
+        client_write(
+            &mut client,
+            &Message::Command {
+                id,
+                kind: CommandKind::BeginStartupSequence {
+                    app_id: app_id.into(),
+                    wm_class: wm_class.map(Into::into),
+                },
+            },
+        );
+        let outcome = hub.poll(&mut model);
+        let expected = if applied {
+            vec![(app_id.to_owned(), wm_class.map(str::to_owned))]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(outcome.startup_sequences, expected);
+        let Message::CommandResult { id: reply, status } = client_read(&mut client) else {
+            panic!("expected command result");
+        };
+        assert_eq!(reply, id);
+        assert_eq!(matches!(status, CommandStatus::Applied), applied);
+    }
+}
