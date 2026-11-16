@@ -618,7 +618,7 @@ fn locking_dismisses_the_grab_and_unlock_never_returns_to_the_menu() {
         entered,
         "the session got the keyboard back while locked"
     );
-    f.manager.refocus_after_lock(&mut f.comp.state);
+    f.manager.unlock_input(&mut f.comp.state);
     sync(&mut f);
     assert_eq!(
         f.client.keyboard_entered.last().copied(),

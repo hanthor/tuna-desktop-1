@@ -1063,7 +1063,7 @@ impl State {
     /// grab, so `popup_done` goes to each grabbed popup (a GTK popover
     /// holding its toolkit grab would otherwise keep the lock screen's
     /// keys in the same client). Nothing is handed the keyboard back:
-    /// it is the lock's until `refocus_after_lock`. Returns whether a
+    /// it is the lock's until `unlock_input`. Returns whether a
     /// grab was dismissed.
     pub fn dismiss_popup_grab_for_lock(&mut self) -> bool {
         let dismissed = self.dismiss_popup_grab();
@@ -1089,6 +1089,11 @@ impl State {
     /// Whether an explicit popup grab is active.
     pub fn popup_grab_active(&self) -> bool {
         !self.popup_grab.is_empty()
+    }
+
+    /// Keyboard owner at the deepest surviving level of an explicit grab.
+    pub(crate) fn popup_grab_surface(&self) -> Option<&wl_surface::WlSurface> {
+        self.popup_grab.last().map(|popup| popup.wl_surface())
     }
 
     /// Whether `surface` is a popup holding (part of) the explicit grab.
