@@ -72,9 +72,10 @@ def main(argv=None):
             return 0
         hosts = sorted({host for pair in pairs for desktop in perf_budget.DESKTOPS
                         if (host := perf_budget.host_cpu(pair[desktop]))})
+        kernel = perf_budget.diagnostic_kernel_attribution(args.artifacts)
         processes = perf_budget.memory_processes(pairs)
         memory = perf_budget.memory_criterion(rows, budgets.get("target_ratio", 1.0))
-        summary = perf_budget.markdown(rows, pairs, budgets, comparison, refused, hosts, processes)
+        summary = perf_budget.markdown(rows, pairs, budgets, comparison, refused, hosts, kernel, processes)
         print(summary)
         if args.markdown:
             with open(args.markdown, "a") as stream:
@@ -82,6 +83,7 @@ def main(argv=None):
         if args.out:
             Path(args.out).write_text(json.dumps({"profile": budgets.get("profile", "stock"), "pairs": [{k: str(v) for k, v in p.items()} for p in pairs],
                                                   "refused_sessions": refused, "host_cpu": hosts,
+                                                  "diagnostic_kernel_attribution": kernel,
                                                   "bootstrap": {"replicates": perf_budget.BOOTSTRAP_REPLICATES,
                                                                 "seed": perf_budget.BOOTSTRAP_SEED,
                                                                 "block_intervals": perf_budget.BOOTSTRAP_BLOCK,
