@@ -103,6 +103,17 @@ which includes `login`) for `getpwuid(getuid())`.
   [password result ownership](../security/password-owner-epoch.md),
   [PAM conversation relay](../security/pam-conversation-relay.md).
 
+**Fingerprint through PAM (pending fix, F5).** Today fingerprint unlock
+does not use PAM. The compositor talks to fprintd over D-Bus itself, and a
+`Matched` result goes straight to `Runtime::apply_verified_unlock`
+(`runtime/auth.rs`, `Runtime::begin_fingerprint`; `crates/compositor/src/fprintd.rs`).
+No account stack, `pam_faillock` or `pam_access` runs on this path, and the
+`enable-fingerprint-authentication` key is enforced only by the shell.
+GNOME 51 runs the `gdm-fingerprint` PAM service instead. The fix being
+built runs fingerprint through the private PAM helper on its own PAM
+service, with `pam_fprintd` and the account stack. Until it lands, an
+administrator's PAM account policy does not apply to a fingerprint unlock.
+
 **Unlock.** A verified credential reaches `Runtime::apply_verified_unlock`,
 which unlocks only if the session is still locked and `Slot::grant` wins a
 compare-and-swap on the attempt's epoch. Then `Runtime::release_lock`
@@ -173,7 +184,8 @@ portal backend's dialogs, from the shell's own capture UI, or, for
 gnome-remote-desktop, from its configured credentials. The compositor only
 authenticates the caller (ADR 0010). Screenshot consent is the portal's
 Access dialog ([screenshot consent](../portal-screenshot-consent.md)).
-InputCapture admits the portal only.
+InputCapture admits the portal only. No indicator or Stop control shows an
+active grant today; one is being built (F2, risk L13).
 
 **Grant.**
 
@@ -276,12 +288,18 @@ microphone privacy is enforced in the shell
 
 ## Residual risks
 
-- **L1. Unlock without a password.** Any same-UID process can run
+[ADR 0010](0010-same-uid-trusted-identity.md#review-findings-and-dispositions)
+maps every finding of the #1162 security review, and every gap found while
+writing these ADRs, to a disposition. "In progress" means a fix is being
+built and is not on `main`.
+
+- **L1. Unlock without a password (F9, G5; accepted, GNOME parity).** Any
+  same-UID process can run
   `loginctl unlock-session`; logind lets the session owner do so without
   polkit, and the compositor unlocks (`Runtime::unlock_for_logind`). VM gate
   `V-LOCKED-HINT` exercises this path. GNOME 51 behaves the same way
   (`screenShield.js` `deactivate`).
-- **L2. No sleep delay inhibitor (gap).** `sleep.rs` subscribes to
+- **L2. No sleep delay inhibitor (F6, G3; gap, in progress).** `sleep.rs` subscribes to
   `PrepareForSleep` but holds no logind `delay` inhibitor, so logind does
   not wait for a locked frame before suspending. [INFERENCE] The last
   scanned-out frame can be the unlocked desktop and may show on resume
@@ -290,8 +308,9 @@ microphone privacy is enforced in the shell
   delay inhibitor (`loginManager.js`, `screenShield.js` `_syncInhibitor`).
 - **L3. Stuck lock.** If the shell's restart budget runs out while locked,
   no lock surface returns and input is discarded. A quarantined PAM attempt
-  keeps the slot busy. Both fail closed; logind `Unlock` or ending the
-  session is the way out.
+  keeps the slot busy. A flood of foreign lock requests can also leave the
+  lock without a prompt (F3, in progress; ADR 0010 R5). All fail closed;
+  logind `Unlock` or ending the session is the way out.
 - **L4. No compositor rate limit.** The compositor allows one attempt at a
   time and nothing more. Throttling is whatever `login` includes. The helper
   runs as the user, not root, so modules that need root, such as
@@ -304,10 +323,10 @@ microphone privacy is enforced in the shell
   named `tuna-screen-cast` (`crates/compositor/src/screencast.rs`). Any
   unsandboxed same-UID PipeWire client can link to an active node.
   [INFERENCE.] Mutter's nodes are equally open to unsandboxed clients.
-- **L7. Untested EIS revocation.** No test checks that a delivered EIS
+- **L7. Untested EIS revocation (G9; in progress).** No test checks that a delivered EIS
   client sees a disconnect after lock or owner loss. The code closes the
   compositor's end.
-- **L8. Portal reach beyond need.** `org.tuna.Screenshot.ScreenshotWindows`
+- **L8. Portal reach beyond need (G6; in progress).** `org.tuna.Screenshot.ScreenshotWindows`
   uses `Authority::admit` (`screenshot.rs`, `WindowsService::screenshot_windows`),
   so the authenticated portal, not only the shell, can save every window to
   any absolute directory. `disable-save-to-disk` does not cover it.
@@ -318,10 +337,29 @@ microphone privacy is enforced in the shell
   `portal-security` and `remote-security` are rotated lanes; a change to
   `crates/compositor` alone does not select them (`scripts/ci-select-lanes`),
   and `ci-gate` accepts a skipped lane. They always run on `main` and
-  nightly. The P-LK-01 ledger row cites `crates/compositor/tests/unlock.rs`
-  (`correct_password_dismisses_lock_intact`), which drives
-  `unlock::unlock_session`, a path the runtime does not use; production
-  unlock is `Runtime::apply_verified_unlock`.
+  nightly (G7; accepted). The P-LK-01 ledger row cites
+  `crates/compositor/tests/unlock.rs` (`correct_password_dismisses_lock_intact`),
+  which drives `unlock::unlock_session`, a path the runtime does not use;
+  production unlock is `Runtime::apply_verified_unlock` (G8; in progress).
+- **L11. A drag icon above the lock (F7; in progress).** `engage_lock` does
+  not cancel a client drag, and the drag icon is drawn on top of the scene
+  without a lock check (`runtime.rs`, `dnd_icon_elements`). An application
+  that starts a drag and then locks the session can cover the lock screen
+  with its icon until the button is released. Keys still reach the lock
+  surface.
+- **L12. An unmapped idle inhibitor stops the idle lock (F8; in progress).**
+  `State::idle_inhibited` (`protocols.rs`) counts any live surface with an
+  inhibitor, mapped or not, and the idle-inhibit global is open to
+  sandboxed clients. A background client can keep the session from ever
+  locking on idle.
+- **L13. Silent grants (F2; in progress).** No indicator or Stop control
+  shows an active ScreenCast, RemoteDesktop or InputCapture grant. Only the
+  shell's own recorder shows one (`crates/shell-gtk/src/screencast.rs`). A
+  consented share, a restored share or a gnome-remote-desktop session runs
+  with nothing on screen until it ends or the session locks. GNOME 51 shows
+  a remote-access indicator with Stop.
+- **L14. Fingerprint bypasses PAM (F5; in progress).** See
+  [Fingerprint through PAM](#lock-lifecycle) above.
 
 ## Evidence
 

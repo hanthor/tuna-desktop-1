@@ -39,12 +39,31 @@ does for every trusted identity, and proposes it as the 1.0 boundary.
 
 ## Decision (proposed)
 
-**Boundary.** Tuna Desktop authenticates processes that *claim* a trusted
-identity: a bus name, an app ID, a socket connection, a copied binary. It
-does not try to detect a trusted process that a same-UID attacker has
-*started, debugged or modified*. This is the boundary ADR 0005 already
-accepted for the shell. GNOME 51 draws its boundary at the session bus,
-which is a weaker line (see [Comparison with GNOME 51](#comparison-with-gnome-51)).
+**Boundary.** Native same-UID processes are out of scope, as in GNOME 51.
+A native process running as the session user can start the genuine,
+root-owned portal or grd binary with `LD_PRELOAD` and act as it; it needs
+no `ptrace` and Yama does not stop it. No check of process attributes
+(PID, pidfd, executable, bus name) can tell that process from the real
+one, so this ADR claims no defence against it (review finding F1).
+
+In scope are callers that are not native same-UID processes: sandboxed
+applications (Wayland clients in a `wp_security_context_v1`, and Flatpak
+apps whose session-bus access is filtered), processes of other users, and
+a person at the locked screen. Against them the identity checks
+below are the boundary. Against native same-UID processes they are defence
+in depth: they refuse a process that only *claims* an identity (a bus name,
+an app ID, a socket connection, a copied binary), and so raise the cost of
+an attack. GNOME 51 makes the same out-of-scope choice with weaker checks
+(see [Comparison with GNOME 51](#comparison-with-gnome-51)).
+
+Mitigations being built for the native same-UID case (not on `main`):
+
+- a GNOME-style screen-sharing and remote-access indicator with a Stop
+  control, so that no capture, remote input or input capture is silent (F2);
+- gnome-remote-desktop sessions admitted only while Remote Desktop is
+  enabled in gsettings, since that path has no portal dialog (F1, item 3);
+- pidfd-pinned identity for the shell's session-lock request and D-Bus
+  calls (F4).
 
 The compositor recognises the identities below. Any other client is an
 ordinary client with authority only over its own surfaces. Paths are
@@ -242,37 +261,46 @@ D-Bus API. None of it ships today, and this ADR decides nothing about it.
 - **Run authentication in a root service** (GDM's reauthentication, as
   GNOME does). The password would still pass through the same-UID shell.
   Kept open for the 004 production credential design.
-- **Trust the session bus, as GNOME does.** Rejected: name claims are the
-  documented threat, and capture would need no consent from a same-UID caller.
+- **Trust the session bus, as GNOME does.** Rejected as the only control:
+  the identity checks cost little, refuse name claims, and keep capture
+  behind consent for every caller that is not a native same-UID process.
+  The out-of-scope choice is the same as GNOME's.
 
 ## Consequences
 
-- A same-UID process that only *claims* an identity is refused: an owned
-  portal name without the installed binary, a copied binary, a forged app
-  ID, a second connection to the Wayland or control socket, a sandboxed
-  client.
+- Native same-UID processes are out of scope. A native process can obtain
+  screen capture and EIS input with no consent by running the genuine
+  portal or grd binary with `LD_PRELOAD` (F1). Until the indicator (F2)
+  lands, such capture is also silent.
+- A process that only *claims* an identity is refused: an owned portal name
+  without the installed binary, a copied binary, a forged app ID, a second
+  connection to the Wayland or control socket, a sandboxed client.
 - Every trusted identity except the PAM helper and the IBus bridge depends
   on a PID. The shell's own PID is safe because the compositor holds it.
   The peer's PID is safe only where a pidfd pins it.
 - The identity of the shell, the IBus bridge and the PAM service comes from
   the session's environment. Packaging sets none of the overrides.
 - Security review of this ADR, and of [ADR 0011](0011-lock-auth-and-capture-grant-lifecycle.md),
-  is what roadmap gate 4 needs before 1.0.
+  is what roadmap gate 4 needs before 1.0. The review's findings and their
+  dispositions are listed below.
 
 ## Residual risks
 
-A same-UID attacker can still do the following. None of it is a
-regression against GNOME 51; R2 is a gap against this ADR's own boundary.
+These remain on `main`. The native same-UID cases are outside the boundary
+above; none of them is a regression against GNOME 51. R2 and R5 are gaps
+against this ADR's own checks.
 
-- **R1. Become a trusted process.** With Yama `ptrace_scope` 0 (the default
-  on Fedora up to 44 and on CentOS Stream 10) it can attach to the shell,
-  the portal or grd and act as them. With scope 1 (the kernel and Arch
-  default, so Marlin unless its image overrides it; not checked) it can
-  still start the genuine portal or grd binary itself, with `LD_PRELOAD` or
-  as its own traced child, after killing the real one. `/proc/<pid>/exe`
-  then names the genuine root-owned file and every check passes. The check
-  also reads the PID first and `/proc/<pid>/exe` second, without a pidfd.
-- **R2. PID reuse (gap).** The session-lock approval (`session_lock.rs`,
+- **R1. Become a trusted process (F1).** A native same-UID process can kill
+  the portal or grd and start the genuine binary itself with `LD_PRELOAD`.
+  `/proc/<pid>/exe` then names the genuine root-owned file, the binary
+  claims its bus name, and every check passes. The preloaded code can then
+  create RemoteDesktop and ScreenCast sessions and connect to EIS: screen
+  capture and keystroke injection with no dialog. This needs no `ptrace`,
+  and Yama `ptrace_scope` does not stop it. Where `ptrace_scope` is 0 (the
+  default on Fedora up to 44 and on CentOS Stream 10), the process can also
+  attach to the running shell, portal or grd. The check also reads the PID
+  first and `/proc/<pid>/exe` second, without a pidfd.
+- **R2. PID reuse (F4; gap).** The session-lock approval (`session_lock.rs`,
   `SessionLockHandler::lock`) and the D-Bus shell check
   (`capture_security.rs`, `authenticate_sender`, `owner_alive`) compare a
   numeric PID recorded when the peer connected. `pinned_process_id` exists
@@ -281,31 +309,60 @@ regression against GNOME 51; R2 is a gap against this ADR's own boundary.
   as the shell. On the bus that gives capture and RemoteDesktop input with
   no consent. On Wayland an approved lock replaces the lock owner even while
   locked (`State::resolve_lock_request`), so the attacker's lock surface
-  would receive the password. With `ptrace_scope` 1 this is more than
-  `ptrace` alone gives. [INFERENCE: not exploited in a test.]
-- **R3. Choose the next session's trusted code.** `TUNA_SHELL_BIN`, `PATH`,
-  `TUNA_IBUS_BRIDGE_BIN` (`ime.rs`) and `TUNA_PAM_SERVICE` are read from the
-  inherited environment, as are `TUNA_INTROSPECT_UNRESTRICTED`,
+  would receive the password. [INFERENCE: not exploited in a test.]
+- **R3. Choose the next session's trusted code (F9).** `TUNA_SHELL_BIN`,
+  `PATH`, `TUNA_IBUS_BRIDGE_BIN` (`ime.rs`) and `TUNA_PAM_SERVICE` are read
+  from the inherited environment, as are `TUNA_INTROSPECT_UNRESTRICTED`,
   `TUNA_SHELL_DBUS_UNRESTRICTED` and `LD_PRELOAD`. A same-UID process that
   edits the user's login environment (`~/.profile`, `environment.d`,
   autostart, systemd user units) controls them at the next login.
   [INFERENCE: GDM starts Wayland sessions through the login shell.] The
-  same is true of `gnome-shell`.
+  same is true of `gnome-shell`. Orca, which hears lock-screen keys by
+  design, also runs code from per-user customization files, as in GNOME.
 - **R4. Name allowlist on `org.gnome.Shell`.** OSD, search, app-grid and
   accelerator-grab methods trust the owner of `org.gnome.Settings`,
   `org.gnome.SettingsDaemon.MediaKeys` or the portal name
   (`crates/shell-gtk/src/shell_dbus.rs`), as GNOME's `DBusSenderChecker` does.
-- **R5. Cancel the shell's pending lock request.** A newer
-  `ext_session_lock_v1` request replaces a pending one before the runtime
-  decides (`SessionLockHandler::lock`). A foreign client can make the
-  shell's lock request fail. The compositor's own flag is unaffected, so
-  this denies the lock UI, not the lock.
+- **R5. A stuck lock with no prompt (F3; gap).** Any unsandboxed Wayland
+  client can send `ext_session_lock_v1` requests. A newer request replaces a
+  pending one before the runtime decides (`SessionLockHandler::lock`), so a
+  flood can make the shell's request fail. The GTK lock UI does not ask
+  again while locked (`crates/shell-gtk/src/lock.rs`). The session stays
+  locked with no unlock prompt until `loginctl unlock-session` or a reboot.
+  It fails closed; GNOME 51 has no equivalent, because its lock is
+  in-process.
 - **R6. Untested paths.** No test drives the runtime's real Wayland accept
   path for the shell flag; protocol tests set it through
   `TestCompositor::add_shell_client`. The fallback without `SO_PEERPIDFD`
   (kernels before 6.5) has no test.
-- **Out of scope by design:** root, the kernel, and the platform services
-  named in the [security model](../security-model.md#out-of-scope).
+- **Out of scope by design:** native same-UID processes (above), root, the
+  kernel, and the platform services named in the
+  [security model](../security-model.md#out-of-scope).
+
+### Review findings and dispositions
+
+The specialist review for #1162 found no critical issue, one high (F1),
+medium F2–F6 and low F7–F9. The G numbers are the gaps found while writing
+these ADRs. "In progress" means a fix is being built and is not on `main`.
+
+| Finding | Gap | Summary | Recorded in | Disposition |
+|---|---|---|---|---|
+| F1 (high) | — | `LD_PRELOAD` into the genuine portal or grd gives capture and EIS input with no consent | R1 | Accepted residual risk for native same-UID processes (GNOME parity); mitigations F2, grd gsettings gate and F4 in progress |
+| F2 | — | No indicator or Stop for active ScreenCast, RemoteDesktop or InputCapture | ADR 0011 L13 | In progress |
+| F3 | — | Foreign lock requests leave a locked session with no prompt | R5 | In progress |
+| F4 | G1, G2 | Session-lock and D-Bus shell identity are unpinned PIDs | R2 | In progress |
+| F5 | — | Fingerprint unlock bypasses PAM | ADR 0011 lock lifecycle, L14 | In progress: fingerprint will run through PAM |
+| F6 | G3 | No logind sleep delay inhibitor | ADR 0011 L2 | In progress |
+| F7 | — | A drag icon is drawn above the lock surface | ADR 0011 L11 | In progress |
+| F8 | — | An unmapped idle inhibitor stops the idle lock | ADR 0011 L12 | In progress |
+| F9 | G4, G5 | Environment overrides; `loginctl unlock-session`; Orca customization | R3, ADR 0011 L1 | Accepted residual risk (GNOME parity) |
+| — | G6 | The portal can call `org.tuna.Screenshot.ScreenshotWindows` | ADR 0011 L8 | In progress |
+| — | G7 | Security lanes are not required per pull request | ADR 0011 L10 | Accepted residual risk; they run on `main` and nightly |
+| — | G8 | P-LK-01 cites a test of a non-production unlock path | ADR 0011 L10 | In progress |
+| — | G9 | Untested: delivered EIS revocation, the real accept path, the no-pidfd fallback | R6, ADR 0011 L7 | In progress |
+
+The F9 note that `docs/security-model.md` called input-method v2 open to
+any client is fixed there.
 
 ### Comparison with GNOME 51
 
