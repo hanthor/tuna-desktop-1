@@ -15,9 +15,10 @@
 #   --keyboard-routes-only runs panel readiness and the P-A11Y-02 keyboard
 #   route gates (G-PANEL-MENU-KEYS, G-QS-MENU-KEY, G-NOTIFICATION-KEYS,
 #   G-SCREENSHOT-CTRL-C) only.
-#   --datemenu-only runs panel readiness, the date menu's gates (G-CAL-OPEN,
-#   G-CAL-EVENTS, G-CAL-PREFS, G-CAL-LAUNCH, G-DATEMENU-WORLD-CLOCKS,
-#   G-DATEMENU-WEATHER), its accessibility golden and G-SHELL-STABLE only.
+#   --datemenu-only runs panel readiness, G-CLOCK-DAMAGE, the date menu's
+#   gates (G-CAL-OPEN, G-CAL-EVENTS, G-CAL-PREFS, G-CAL-LAUNCH,
+#   G-DATEMENU-WORLD-CLOCKS, G-DATEMENU-WEATHER), its accessibility golden
+#   and G-SHELL-STABLE only.
 #   --search-leak-only runs panel readiness, G-SEARCH-LEAK (50 searches with
 #   results leave shm mappings and descriptors where they were, #1084) and
 #   G-SHELL-STABLE only.
@@ -33,6 +34,8 @@
 #   A11Y-PANEL  the panel controls are exposed to screen readers by name
 #   G-SHELL-CAIRO on software GL the compositor starts the shell with
 #               GSK_RENDERER=cairo and the shell loads no Mesa rasterizer (#503)
+#   G-CLOCK-DAMAGE a clock tick repaints the clock's rectangle in the bar,
+#               under 2% of the output, not the whole output (#1154)
 #   G-CAL-EVENTS the calendar server's events for today list in the date
 #               menu's events card, timed as GNOME formats them
 #   G-CAL-OPEN  clicking the clock opens the calendar popover (xdg popup
@@ -1896,6 +1899,7 @@ if [ "$DATEMENU_ONLY" = 1 ]; then
         fail G-CAL-OPEN "desktop never became ready"
     # The startup cover must be gone before frames are read.
     sleep 3
+    clock_damage_proof
     calendar_proof
     datemenu_proof
     xdotool key Escape
@@ -2024,6 +2028,11 @@ gsettings set org.gnome.desktop.background picture-uri-dark "$wallpaper_before_d
 gsettings set org.gnome.desktop.background picture-options "$wallpaper_before_options"
 sleep 1
 pass G-WALLPAPER-URI "spaces, Unicode and literal percent escapes identify the actual selected wallpaper pixels"
+
+# The comparison slice runs old binaries that publish no damage bounds.
+if [ "$GRID_CANCEL_ONLY" != 1 ]; then
+    clock_damage_proof
+fi
 
 # A popover counts as open only when its contents are showing in the
 # accessible tree: a pixel diff passes on a mere hover highlight.
