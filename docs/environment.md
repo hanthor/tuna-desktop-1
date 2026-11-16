@@ -32,8 +32,9 @@ environment `tuna-session` or `tuna-compositor` starts from.
 | `TUNA_IBUS` | compositor | `0` does not start the IBus bridge. By default the bridge starts whenever `ibus-daemon` is on `PATH` and a bridge binary can be found. | `crates/compositor/src/ime.rs:47-62` |
 | `TUNA_IBUS_BRIDGE_BIN` | compositor | Path of the `tuna-ibus-bridge` binary. Without it the compositor looks beside its own executable, then on `PATH`. | `crates/compositor/src/ime.rs:62-69` |
 | `TUNA_BELL` | compositor | `0` silences the audible bell. The visual bell still follows its setting. | `crates/compositor/src/bell.rs:80-85` |
-| `TUNA_PAM_SERVICE` | compositor | PAM service the lock screen authenticates against, instead of `tuna-lock`. An empty value uses the default. | `crates/compositor/src/pam.rs:20-23`, `crates/compositor/src/pam.rs:247-251` |
-| `TUNA_FPRINTD_OFF` | compositor | When set, fingerprint unlock is off: the lock screen behaves as if there is no reader and asks for the password. | `crates/compositor/src/fprintd.rs:73-76`, `crates/compositor/src/fprintd.rs:976-978` |
+| `TUNA_PAM_SERVICE` | compositor | PAM service the lock screen authenticates against, instead of `tuna-lock`. An empty value uses the default. | `crates/compositor/src/pam.rs:23-26`, `crates/compositor/src/pam.rs:254-270` |
+| `TUNA_PAM_FINGERPRINT_SERVICE` | compositor | PAM service the lock screen's fingerprint conversation runs, instead of `tuna-lock-fingerprint`. An empty value uses the default. | `crates/compositor/src/pam.rs:27-30`, `crates/compositor/src/pam.rs:259-270` |
+| `TUNA_FPRINTD_OFF` | compositor | When set, fingerprint unlock is off: the lock screen behaves as if there is no reader and asks for the password. | `crates/compositor/src/fprintd.rs:41-44`, `crates/compositor/src/fprintd.rs:338-341` |
 | `TUNA_IDLE_TIMEOUT_MS` | compositor | Idle time in milliseconds before the session locks, for scripted lock tests. Zero, non-numbers and unset use the five-minute default. | `crates/compositor/src/runtime.rs:44-53`, `crates/compositor/src/lock.rs:15-16` |
 
 ## Set by Tuna Desktop for its own processes
@@ -95,7 +96,7 @@ these emitters (all paths below are under `crates/`):
 | `tuna-compositor: drm: output`, session paused/activated | `compositor/src/drm.rs` |
 | Compositor workspace, switcher, modifier, session mode, media diagnostics | `compositor/src/windows.rs` |
 | Compositor lock conversation and authentication retirement | `compositor/src/runtime/auth.rs`, `compositor/src/runtime.rs` |
-| `screen reader retired`, `FPRINT-PHASE` receipts | `compositor/src/orca.rs`, `compositor/src/fprintd.rs` |
+| `screen reader retired` | `compositor/src/orca.rs` |
 | Shell grid, transient, unlock-dialog, switcher fade | `shell-gtk/src/grid_animation.rs`, `transient.rs`, `lock_curtain.rs`, `switcher.rs` |
 | Shell lock/auth, command results, password-submission **markers** (not passwords) | `shell-gtk/src/lock.rs`, `lock_auth.rs` |
 | Shell keybindings, media-key setup, policy refusals, screenshot-clipboard marker | `shell-gtk/src/main.rs`, `power.rs`, `run_dialog.rs` |
@@ -104,9 +105,8 @@ these emitters (all paths below are under `crates/`):
 | Shell media diagnostics and `FOLDER-CREATE` observations | `shell-gtk/src/media_keys.rs`, `folders.rs` |
 | Bridge ready/context, key/cursor/focus, property and method diagnostics | `shell-host/src/bin/tuna-ibus-bridge.rs`, `shell-host/src/ibus.rs` |
 
-Preformatted switcher and fingerprint receipts also use their crate's helper,
-without allocating another buffer; the fingerprint proof still fails on a
-receipt write error. Python proof fixtures (IBus test engine, fprintd mock,
+Preformatted switcher receipts also use their crate's helper, without
+allocating another buffer. Python proof fixtures (IBus test engine, fprintd mock,
 service stubs) use separate artifact logs, not this shared session stream.
 Wallpaper/SVG helper diagnostics are not proof receipts, but are buffered too
 because they can otherwise fragment another process's receipt.
@@ -164,7 +164,6 @@ start. They have no effect on an installed session.
 | `TUNA_NATIVE_NODE`, `TUNA_NATIVE_SERIAL`, `TUNA_NATIVE_COOKIE`, `TUNA_NATIVE_MUTED`, `TUNA_NATIVE_EXPECTED` | Inputs to the PipeWire privacy test's child process. | `crates/shell-gtk/src/privacy.rs:1725-1730` |
 | `TUNA_A11Y_TEST_SCHEMA_DIR`, `TUNA_A11Y_RECEIPT` | Schema fixture and receipt file for `scripts/tuna-gtk-accessibility-proof`. | `crates/shell-gtk/src/accessibility.rs:381`, `crates/shell-gtk/src/accessibility.rs:439` |
 | `TUNA_SCREENSHOT_LIFECYCLE_RECEIPT` | Receipt file the screenshot UI test writes when it passes. | `crates/shell-gtk/src/screenshot_ui.rs:1141-1146` |
-| `TUNA_FPRINT_PHASE_NONCE` | A 32-hex-digit nonce that makes the fingerprint tests record phase timings for `scripts/tuna-fprint-phase-proof`. | `crates/compositor/src/fprintd.rs:4238-4247` |
 | `TUNA_XIM_PROBE_OWNER_FIXTURE`, `TUNA_XIM_PROBE_PID_FILE` | IBus XIM ownership test fixture. | `crates/compositor/src/ime.rs:391-402` |
 | `GSETTINGS_BACKEND` | Two shell tests check for `memory`. | `crates/shell-gtk/src/accessibility.rs:286`, `crates/shell-gtk/src/lockdown.rs:499` |
 | `DBUS_SESSION_BUS_ADDRESS`, `WAYLAND_DISPLAY`, `WAYLAND_SOCKET` | The admitted GTK tests check that they run on a private session bus and X display, with no Wayland connection. | `crates/shell-gtk/src/notify.rs:1892-1895`, `crates/shell-gtk/src/osd.rs:400-405` |
@@ -276,8 +275,8 @@ processes and are not options: the `TUNA_*_PRIVATE_BUS` and
 under `dbus-run-session`, the `TUNA_STUB_*_LOG` call logs, the
 `TUNA_TEST_*` controls for `scripts/lib/tuna-test-window.py`,
 `TUNA_FLASH_PROOF_ARTIFACTS` and `TUNA_PROOF_SOURCE_SHA` for proof helper
-scripts, and the ownership markers `TUNA_GRID_COMPARISON_OWNER` and
-`TUNA_FPRINT_PHASE_OWNER`. `scripts/ci-select-lanes` and the proof identity
+scripts, and the ownership marker `TUNA_GRID_COMPARISON_OWNER`.
+`scripts/ci-select-lanes` and the proof identity
 helpers in `scripts/lib/` read the `GITHUB_*` and `RUNNER_*` variables GitHub
 Actions provides.
 

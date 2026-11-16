@@ -48,10 +48,10 @@ base, and picks the proof lanes the change can affect:
   `test_notify_callback_contract.py`); a test only `check` runs selects none.
   `WorkflowSync.test_lane_run_tests_select_their_lane` fails when a lane job
   runs a test the selector does not map.
-- a packaged conffile (`share/pam.d/`, installed as `/etc/pam.d/tuna-lock`):
-  `journey`, whose disposable Debian lifecycle fails when its bytes drift
-  from the released package's, plus the core lanes and every package
-  consumer.
+- a packaged conffile (`share/pam.d/`, installed as `/etc/pam.d/tuna-lock`
+  and `/etc/pam.d/tuna-lock-fingerprint`): `journey`, whose disposable Debian
+  lifecycle fails when `tuna-lock`'s bytes drift from the released package's,
+  plus the core lanes and every package consumer.
 - anything else (crates, `share/`, other scripts): `gtk-shell` plus a
   round-robin slice of the other end-to-end lanes, rotated by run number.
   The slice size is the repository variable `CI_ROUND_ROBIN_SIZE`
@@ -60,7 +60,7 @@ base, and picks the proof lanes the change can affect:
 
 The step summary of `select-lanes` names the chosen lanes and why.
 Independent lanes start after selection, without waiting for workspace
-tests. GTK, grid comparison and fingerprint admission still require the
+tests. GTK and grid comparison admission still require the
 successful current-run `check`; the ledger also consumes its test list,
 and image publication waits for it. Package and screenshot consumers still
 wait for their producing proof jobs.
@@ -118,7 +118,7 @@ action invokes its paired installer through `GITHUB_ACTION_PATH` and hashes
 those actual workflow-owned files, not similarly named candidate files.
 Older PR heads need not contain the cache action or staged installer.
 The required `check` job tests the PR merge ref and exports its actual
-`tested_sha`; GTK authentication, fingerprint and grid comparison proofs
+`tested_sha`; GTK authentication and grid comparison proofs
 check out that exact revision. Admission separately validates the workflow
 event commit, checked output, clean checkout/tree and API triggering head,
 so a green job's `head_sha` is never mistaken for its tested merge tree.
@@ -138,10 +138,10 @@ Ubuntu keys include the native distro ID/version in addition to the
 pinned cache action's compiler, architecture, environment and dependency
 identity. `check` includes the standalone `third-party/reis` and
 `third-party/smithay` targets. Grid comparison has separate cached
-old/fixed targets under `target/ci-grid`, keyed to its reviewed old source;
-fingerprint uses `target/ci-fprint`. Setting `CARGO_TARGET_DIR` opts these
-two proof scripts into persistent build targets; without it, local runs
-keep isolated targets inside their fresh artifact directory. Receipts,
+old/fixed targets under `target/ci-grid`, keyed to its reviewed old source.
+Setting `CARGO_TARGET_DIR` opts its proof script into persistent build
+targets; without it, local runs keep isolated targets inside their fresh
+artifact directory. Receipts,
 admissions and verdicts are always freshly produced outside the cache.
 
 The Arch job shares an explicit Cargo home between cache restoration and

@@ -26,7 +26,8 @@ BINS = tuple(f"usr/bin/{name}" for name in (
     "tuna-compositor", "tuna-session", "tuna-shell-host",
     "tuna-shell-gtk", "tuna-ibus-bridge"))
 REQUIRED = BINS + ("usr/share/wayland-sessions/tuna.desktop",
-                  "usr/lib/systemd/user/tuna-session.target", "etc/pam.d/tuna-lock")
+                  "usr/lib/systemd/user/tuna-session.target", "etc/pam.d/tuna-lock",
+                  "etc/pam.d/tuna-lock-fingerprint")
 
 
 class Refusal(ValueError):
