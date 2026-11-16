@@ -385,6 +385,10 @@ pub struct WindowManager {
     /// entry holds the one unified handle.
     #[cfg(feature = "xwayland")]
     x11_index: HashMap<u32, u64>,
+    /// X11 windows last told they are iconic (`WM_STATE` IconicState and
+    /// `_NET_WM_STATE_HIDDEN`): those hidden by minimize.
+    #[cfg(feature = "xwayland")]
+    x11_iconic: HashSet<u64>,
     /// Model ids bottom-to-top; focus raises to the top.
     stacking: Vec<u64>,
     // Explicit activation history is independent of raising transient families.
@@ -703,6 +707,8 @@ impl WindowManager {
             surface_index: HashMap::new(),
             #[cfg(feature = "xwayland")]
             x11_index: HashMap::new(),
+            #[cfg(feature = "xwayland")]
+            x11_iconic: HashSet::new(),
             stacking: Vec::new(),
             focus_history: Vec::new(),
             cascade: 0,
@@ -854,6 +860,8 @@ impl WindowManager {
         );
         #[cfg(feature = "xwayland")]
         check("x11_index", self.x11_index.values().any(|v| *v == id));
+        #[cfg(feature = "xwayland")]
+        check("x11_iconic", self.x11_iconic.contains(&id));
         check("stacking", self.stacking.contains(&id));
         check("focus_history", self.focus_history.contains(&id));
         check(
@@ -996,6 +1004,7 @@ impl WindowManager {
                 window.minimized = false;
             }
         }
+        self.sync_x11_iconic();
         target
     }
 
@@ -1625,6 +1634,8 @@ impl WindowManager {
         // hold focus past this tick while the overview is open.
         self.reconcile_overview_focus(state);
         self.reconcile_exclusive_layer(state);
+        // Transient parents and maps change who minimize hides.
+        self.sync_x11_iconic();
         // The shell's ext-foreign-toplevel-list follows the model as it
         // stands after this tick's maps, title changes and unmaps (#1046).
         state.sync_foreign_toplevels(self.model.revision(), self.model.windows());
@@ -2165,7 +2176,7 @@ impl WindowManager {
     }
 
     /// Drain queued X11 manager events: map/unmap/size and identity
-    /// updates plus maximize/fullscreen requests, all on the one
+    /// updates plus maximize/fullscreen/minimize requests, all on the one
     /// manager call path. (xwayland feature only.)
     #[cfg(feature = "xwayland")]
     fn drain_x11_events(&mut self, state: &mut State) {
@@ -2239,6 +2250,11 @@ impl WindowManager {
                 X11ManagerEvent::Fullscreen(id, on) => {
                     if let Some(model) = self.x11_index.get(&id).copied() {
                         self.set_fullscreen(state, model, on);
+                    }
+                }
+                X11ManagerEvent::Minimize(id) => {
+                    if let Some(model) = self.x11_index.get(&id).copied() {
+                        self.minimize(state, model);
                     }
                 }
             }
@@ -2381,6 +2397,7 @@ impl WindowManager {
                 #[cfg(feature = "xwayland")]
                 WindowSurface::X11(surface) => {
                     self.x11_index.remove(&surface.window_id());
+                    self.x11_iconic.remove(&id);
                     state.window_icons.remove_cache(&format!("x11:{id}"));
                 }
             }
@@ -2732,6 +2749,39 @@ impl WindowManager {
         }
         #[cfg(not(feature = "xwayland"))]
         let _ = id;
+    }
+
+    /// Mutter's meta_window_x11_set_wm_state and set_net_wm_state: an X11
+    /// window hidden by minimize (its own or a transient ancestor's, as
+    /// meta_window_showing_on_its_workspace has it) is `WM_STATE`
+    /// IconicState with `_NET_WM_STATE_HIDDEN`, and restoring it makes it
+    /// NormalState without, so the client can pause rendering and playback
+    /// while hidden. Only changes reach the X server.
+    fn sync_x11_iconic(&mut self) {
+        #[cfg(feature = "xwayland")]
+        {
+            if self.x11_index.is_empty() {
+                return;
+            }
+            let hidden = self.hidden_by_minimize();
+            for (id, window) in &self.windows {
+                let WindowSurface::X11(surface) = window.surface.underlying_surface() else {
+                    continue;
+                };
+                let iconic = hidden.contains(id);
+                if iconic == self.x11_iconic.contains(id) {
+                    continue;
+                }
+                if let Err(error) = surface.set_iconic(iconic) {
+                    eprintln!("tuna-compositor: window {id} X11 WM_STATE refused: {error}");
+                }
+                if iconic {
+                    self.x11_iconic.insert(*id);
+                } else {
+                    self.x11_iconic.remove(id);
+                }
+            }
+        }
     }
 
     /// Send a configure advertising this window's geometry, activation
@@ -4763,6 +4813,7 @@ impl WindowManager {
             let workspace = self.model.active_workspace();
             self.focus_topmost(state, workspace);
         }
+        self.sync_x11_iconic();
         true
     }
 
