@@ -198,6 +198,23 @@ step); [private PAM helper](../security/private-pam-helper.md).
   `ClientState::sandboxed`). Evidence: `crates/compositor/tests/protocols.rs`
   (`security_context_clients_see_no_privileged_global`).
 
+### Greeter (planned, not on `main`)
+
+The owner added a Tuna greeter to v1 (epic #1164; PR #1166 adds it to
+[ADR 0008](0008-v1-beta-track-and-release-scope.md) as item 6). It keeps GDM's daemon and replaces GDM's
+GNOME Shell greeter with `tuna-compositor` in a greeter mode and a
+`tuna-greeter` GTK client that uses GDM's `UserVerifier` and `Greeter`
+D-Bus API. None of it ships today, and this ADR decides nothing about it.
+
+- It runs as GDM's greeter user, not as the session user, so the
+  same-UID model of this ADR does not cover it.
+- It relays PAM questions and answers to GDM; GDM's root worker runs PAM.
+  It holds no secrets after relaying them.
+- Its identity checks are **pending implementation**: how the greeter-mode
+  compositor recognises `tuna-greeter`, which privileged globals and
+  interfaces the greeter may bind, and how GDM's API is reached. They must
+  be recorded here, with tests, before the greeter ships (#1164).
+
 ### Summary
 
 | Identity | Recognised by | May bind or call |
@@ -207,6 +224,7 @@ step); [private PAM helper](../security/private-pam-helper.md).
 | gnome-remote-desktop | Root-owned installed executable plus current owner of a grd name | RemoteDesktop and its linked ScreenCast only |
 | PAM helper | Spawned from the compositor's own held image over private pipes | Nothing; it only answers the compositor |
 | IBus bridge | Compositor-inserted socketpair | Input-method v2, virtual keyboard |
+| Greeter (planned, #1164) | Pending implementation | Pending implementation; relays PAM to GDM, holds no secrets |
 
 ## Alternatives considered
 
