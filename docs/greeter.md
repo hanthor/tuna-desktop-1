@@ -50,18 +50,33 @@ main, and the installed files of `ghcr.io/tuna-os/marlin` (image
 
 ### Integration point (chosen)
 
-Replace the vendor drop-in by name: ship
+Replace the vendor drop-in by name in `/etc`:
 `/etc/systemd/user/gnome-session@gnome-login.target.d/gnome-login.session.conf`
 with `Requires=gnome-session-basic-services.target` and
-`Requires=tuna-greeter.service`. systemd lets a drop-in in `/etc` override the
-one of the same name in `/usr/lib` (systemd.unit(5), "Drop-in files … with
-the same name"), and dependency lists cannot be emptied by another drop-in,
-so this is the only override that removes the shell. It keeps everything
-else of GDM's design: the `gnome-greeter` session, gnome-session's leader
-and `gnome-login` target, the settings daemon plugins, and GDM's own
-restart of a failed greeter. TunaOS already themes the greeter through
-`/etc/systemd/user/org.gnome.Shell@gdm.service.d/` (the Marlin image has
-`tunaos-gdm-theme.conf` there), so `/etc` is the image's existing seam.
+`Requires=tuna-greeter.service`. Drop-ins of the same name mask each other
+along the unit search path, first directory wins (systemd.unit(5); checked
+with a probe unit), and dependency lists cannot be emptied by another
+drop-in, so a same-name replacement is the only override that removes the
+shell. It keeps everything else of GDM's design: the `gnome-greeter`
+session, gnome-session's leader and `gnome-login` target, the settings
+daemon plugins, and GDM's own restart of a failed greeter.
+
+Why `/etc` and not a vendor directory: the same name under
+`/usr/lib/systemd/user` is GDM's own file (a package conflict).
+`/usr/share/systemd/user` (`$XDG_DATA_DIRS/systemd/user`) precedes
+`/usr/lib/systemd/user` and would override it, but the package would then
+switch the login screen of every system it is installed on, including the
+stock-GNOME reference fixtures (`vm-lane/Containerfile.reference`), the
+preview image and Ubuntu installs of the `.deb`. So every package format
+ships the replacement inactive, as
+`/usr/share/tuna-desktop/greeter/gnome-login.session.conf` (source
+`share/greeter/`), beside `/usr/lib/systemd/user/tuna-greeter.service`
+(`share/systemd/user/`) and `/usr/bin/tuna-greeter`. TunaOS images enable
+it: tunaOS's `tuna-greeter` hook (vendored in `vm-lane/tunaos/`) copies it
+to `/etc` after checking that it equals GDM's drop-in with only the shell
+requirement replaced, and replaces the old `tuna-gdm-theme` GNOME Shell
+stylesheet hook. GDM 48 and older (Debian trixie) start the shell through
+`session.conf` instead and keep GNOME Shell's greeter.
 
 Rejected:
 
@@ -73,7 +88,7 @@ Rejected:
 - A different `gnome-greeter.desktop`: the file belongs to the `gdm`
   package (package conflicts) and the session name is compiled into GDM.
 
-`tuna-greeter.service` (packaging slice, not in this change):
+`tuna-greeter.service` (`share/systemd/user/tuna-greeter.service`):
 
 ```ini
 [Unit]
