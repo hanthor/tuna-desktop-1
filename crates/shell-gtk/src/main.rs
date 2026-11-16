@@ -108,6 +108,7 @@ mod bt_menu;
 mod calendar;
 mod captive_portal;
 mod close_dialog;
+mod dash_motion;
 mod display_change;
 mod events;
 mod fd_watch;
