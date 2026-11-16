@@ -90,6 +90,10 @@ OWNED = [
     ("scripts/tuna-scale-proof", ["gtk-shell"]),
     ("scripts/tuna-slow-portal-proof", ["gtk-shell"]),
     ("scripts/tuna-session-restore-proof", ["gtk-shell"]),
+    # The login screen (#1164): tuna-compositor --greeter and tuna-greeter
+    # against a GDM 51 and AccountsService mock.
+    ("scripts/tuna-greeter-proof", ["gtk-shell"]),
+    ("scripts/lib/tuna-gdm-mock.py", ["gtk-shell"]),
     ("scripts/tuna-walkthrough", ["gtk-shell"]),
     # scripts/tests/* run by a lane job (#1108): a test edit must run the lane
     # that executes it, or it first runs after merge.
