@@ -605,6 +605,11 @@ class Journey:
         self.step('portal-screenshot', 'Request Screenshot through the actual published frontend', portal_screenshot)
 
         def portal_screencast(check):
+            if not self.args.qualification_only:
+                # The full tour comes here from the date menu. Close it first: left
+                # open, it covers the consent dialog in the prompt frame and is
+                # still open when Super+L locks.
+                c.key('Escape', wait=1500)
             record = self.receipt['portal_screencast'] = {'frame_validated': False}
             root = launch_capture('screencast', record, check)
             if root is None:
