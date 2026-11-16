@@ -117,7 +117,7 @@ the same session-file seam is `gnome-initial-setup`
 | Method | |
 |---|---|
 | `OpenSession() → s address` | Only from a process of the display's greeter session and only from its `allowed_user` uid; refused once a user session runs on the display ("Can only be called before user is logged in"). |
-| `OpenReauthenticationChannel(s user) → s address` | The unlock dialog's channel (not used by the greeter). |
+| `OpenReauthenticationChannel(s user) → s address` | The unlock dialog's channel, and the login screen's for user switching: from a login screen GDM grants it only for a user whose session runs (`gdm_session_start_reauthentication` on that session) and answers `AccessDenied` otherwise ("Login screen only allowed to open reauthentication channels for running sessions"). A conversation verified there makes GDM activate the user's session (`switch_to_compatible_user_session`) and close the channel. |
 | `RegisterSession()`, `RegisterDisplay()` | The greeter is up; GDM ends plymouth. |
 
 The address is a `GDBusServer` per `GdmSession`
@@ -178,6 +178,105 @@ that name. The session menu ("Login Options" → "Session Type") lists
 moves its active item. `SessionOpened` → (conflicting-session check through
 logind) → fade out → `StartSessionWhenReady(service, true)`.
 
+## Login flows (gnome-shell 51.1, GDM 51.1.1)
+
+What `userVerifier.js` (`ShellUserVerifier`), `authServices*.js`,
+`authPrompt.js` and `loginDialog.js` do, and what the greeter does (sources
+fetched at the tags; gnome-shell 51 has no `util.js` verifier any more, it
+moved to `userVerifier.js` and the auth services):
+
+- **Channels.** Every begin for a named user first asks
+  `OpenReauthenticationChannel(user)` (`_getUserVerifierProxies`); on
+  `AccessDenied` the conversation runs on the greeter's own channel.
+  libgdm enables the ChoiceList and CustomJSON extensions on each channel
+  it makes a UserVerifier proxy for, and asks `GetTimedLoginDetails` when it
+  makes the Greeter proxy (GDM answers with `TimedLoginRequested`).
+- **Auth services and mechanisms.** `AuthServicesSSSDSwitchable` comes
+  first while `enable-switchable-authentication` is set (GDM's default):
+  it begins `gdm-switchable-auth` and waits for SSSD's CustomJSON
+  `auth-mechanisms` request (`{"authSelection": {"mechanisms": {…},
+  "priority": […]}}`). A failed begin (the PAM service is missing: Arch's GDM
+  ships no `gdm-switchable-auth`; GDM answers
+  `SessionWorker.Error.ServiceUnavailable`, then `ServiceUnavailable`,
+  `VerificationFailed`, `ConversationStopped`), or plain PAM messages before
+  any JSON (pam_unix behind it), means `NOT_FOUND`: the roles cascade to
+  `AuthServicesLegacy`, whose mechanisms are Password (`gdm-password`) and
+  Smartcard (`gdm-smartcard`) as `enable-password-authentication` and
+  `enable-smartcard-authentication` allow. Login Options' first section
+  ("Login Options") lists the mechanisms; the selected one (else the first)
+  is selected, which resets softly (`Cancel`, then the begin of its service).
+  Only the selected service runs. A hard reset (back to the list) tries the
+  switchable service again; a soft one keeps the selection.
+- **Smartcard.** Smartcard is a mechanism like Password. gsd-smartcard's
+  token insertion or removal (`smartcardManager.js` on the session bus)
+  resets softly while Smartcard is selected, unless a PIN is being checked
+  and a card is still in. GNOME 51 does not start `gdm-smartcard` on its own
+  when a token appears (gnome-shell ≤ 46's `util.js` did); the greeter
+  follows 51. With only Smartcard allowed and switchable auth off, no
+  username is needed: the user list is skipped and `BeginVerification
+  (gdm-smartcard)` lets the certificate name the user.
+- **ChoiceList.** `ChoiceQuery(service, prompt, a{ss})` of the selected
+  service shows as a titled list (`authList.js`); choosing answers
+  `SelectChoice(service, key)`. It is a prompt step (Back from step 2
+  soft-resets).
+- **Web login (`eidp`) and SSSD's other mechanisms.** From SSSD's JSON the
+  greeter draws GNOME's prompts locally and answers with a CustomJSON
+  `Reply` (`{"authSelection": {"status": "Ok", "<id>": {…}}}`): password
+  (`{"password"}`), smartcard certificates (one: its PIN; several: "Select
+  Identity" then the PIN; none: "Insert Smartcard"), passkey (insert-key
+  instruction, PIN with the attempts warning, touch instruction) and web
+  login: the `initPrompt` button ("Log In"), then `webLogin.js`'s dialog
+  (link prompt, a 150 px QR code of the URL, the URL without its scheme,
+  "Login code: " and the code, Cancel and Done); Done replies `{}` and the
+  dialog waits; `timeout` refreshes the mechanisms. `cancelRequested`'s
+  steps back (dialog → button, PIN → certificate list, waiting → soft reset)
+  are the conversation's own.
+- **Multi-step.** Any further `InfoQuery`/`SecretInfoQuery` (a 2FA code
+  after the password) is the next prompt step of the shared AuthPrompt
+  machine: the entry clears, shows the question (visible for `InfoQuery`)
+  and Back returns to step 1 with a soft reset.
+- **Timed login.** `TimedLoginRequested(user, delay)`: the user's row (or,
+  with the user list disabled, the prompt) shows the countdown bar; over
+  5 s the bar waits until nothing was touched for 5 s
+  (`_TIMED_LOGIN_IDLE_THRESHOLD`), cancels an open prompt, then runs for the
+  rest; any key or click starts it over; when it ends the greeter calls
+  `BeginAutoLogin(user)` and starts `gdm-autologin`'s session on
+  `SessionOpened`. Note GDM 51.1.1's `BeginAutoLogin` only admits the
+  configured `AutomaticLogin` user (`gdm-session.c`), so timed login needs
+  that user to be the automatic-login user as well.
+- **Conflicting session.** On `SessionOpened(service, id)` logind's sessions
+  are read; another graphical, active or online session of the same user
+  opens "Session Already Running" (`conflictingSessionDialog.js`, with its
+  four local/remote texts and the force-stop warning). Cancel resets (GDM's
+  `Cancel` closes the opened session) back to the list; Force Stop calls
+  `StopConflictingSession` and the session starts when logind removes the
+  old one; after 60 s the dialog closes with "Login Attempt Timed Out".
+- **User switching.** The list rings users with a session (`logged-in`,
+  libaccountsservice's count from logind; the row's accessible description
+  is "Logged in"); a logged-in user's Login Options has no session type.
+  Choosing one runs the conversation on the user's re-authentication
+  channel; on success GDM switches to that session, no session opens and the
+  greeter stays verified until its own logind session is active again,
+  when the prompt resets (`_loginScreenSessionActivated`). Users whose
+  session GDM does not manage (remote, or started elsewhere) get
+  `AccessDenied`, log in on the greeter's channel and meet the conflicting
+  session dialog.
+- **Fingerprint: not applicable.** GDM 51.0 stopped logging in with
+  fingerprint; it re-authenticates only. gnome-shell 51's login dialog makes
+  its verifier with `reauthenticationOnly: false`, so
+  `AuthServicesLegacy._connectFingerprintManager` never runs and Fingerprint
+  is filtered out of the mechanisms, also on a user-switch re-authentication
+  channel. The greeter matches: no `gdm-fingerprint` (the lock screen keeps
+  its own fprintd path).
+- **Desktop side (P-SY-12).** gnome-shell 51's `activateSwitchUser` locks
+  and calls libgdm's `gdm_goto_login_session_sync`; GDM 51.1.1's
+  `goto_login_session` (`common/gdm-common.c`) activates an existing
+  `greeter`-class, non-closing `gdm-launch-environment` session on the seat
+  with logind `ActivateSessionOnSeat`, and otherwise (on `seat0` only) calls
+  `LocalDisplayFactory.CreateTransientDisplay`. `crates/shell-gtk/src/
+  user_switch.rs` does the same calls in the same order; checked against
+  51.1.1, no change needed.
+
 ## What GDM 51's login screen shows
 
 - Background `#222226`, text `#fafafb` (`#lockDialogGroup`,
@@ -218,35 +317,56 @@ logind) → fade out → `StartSessionWhenReady(service, true)`.
 - `crates/greeter` (`tuna-greeter`): `gdm.rs` (channel, signal parsing,
   calls; the session object's signals are subscribed through GDBus
   directly, because gio-rs 0.22's subscription aborts on the sender-less
-  signals of a peer-to-peer channel), `conversation.rs` (GDM's UserVerifier
-  as the machine's `Host`), `accounts.rs` (AccountsService list),
-  `sessions.rs` (libgdm's session enumeration), `main.rs` (layer-shell
-  window, pages, Login Options).
+  signals of a peer-to-peer channel), `channel.rs` (the greeter's channel
+  and per-begin re-authentication channels, calls in order),
+  `conversation.rs` (`ShellUserVerifier` and the auth services as the
+  machine's `Host`: mechanisms, SSSD's JSON, ChoiceList), `auth_ui.rs`
+  (choice list, button, web login dialog with QR code), `timed_login.rs`,
+  `conflict.rs`, `logind.rs`, `smartcard.rs` (gsd-smartcard tokens),
+  `accounts.rs` (AccountsService list), `sessions.rs` (libgdm's session
+  enumeration), `main.rs` (layer-shell window, pages, Login Options).
+- The AuthPrompt machine gained GNOME's non-entry steps (`Ask`: choice
+  list, button, web login, answered through the same query sequence),
+  `cancel_requested`, soft `restart`, and the entry area's visibility
+  (`clear()` hides it until a question); the lock screen ignores them.
 
 ## Proof
 
 `scripts/tuna-greeter-proof` (gtk-shell CI job) runs the real
 `tuna-compositor --greeter` nested on Xvfb with the real `tuna-greeter`;
-GDM's daemon and AccountsService are `scripts/lib/tuna-gdm-mock.py` on a
-private system bus, serving the API above with GDM 51.1.1's signal order and
-failure text. Users are chosen and passwords typed with real X11 keys, and
-the result is read back through AT-SPI, the mock's call log and the
-compositor's state; `A-1-user-list.png` and `C-1-prompt.png` are the review
-shots against GNOME 51's login dialog. Gates: `G-GREETER-READY`,
-`-USER-LIST`, `-NO-SHELL`, `-NOT-LISTED`, `-GIVE-UP`, `-SESSION`,
-`-WRONG-PASSWORD`, `-PASSWORD`, `-START`, `-SUPERVISION`, `-HYGIENE`.
-Nested only: no real GDM, PAM, gnome-session or DRM.
+GDM's daemon, AccountsService, logind and gsd-smartcard are
+`scripts/lib/tuna-gdm-mock.py` on a private system bus (gsd-smartcard on
+the private session bus), serving the API above with GDM 51.1.1's signal
+order and failure text, and a control interface the proof uses to insert
+the card, install `gdm-switchable-auth`, set timed login and restart the
+greeter's channel. `org.gnome.login-screen` is GDM 51.1.1's schema,
+compiled for the run and set with `gsettings`. Users are chosen and
+passwords typed with real X11 keys, and the result is read back through
+AT-SPI, the mock's call log and the compositor's state; `A-1-user-list.png`
+and `C-1-prompt.png` are the review shots against GNOME 51's login dialog,
+with `F-2-code.png`, `G-2-conflict.png`, `H-1-insert.png`,
+`H-2-choice.png`, `I-2-web-login.png`, `J-1-policy.png` and `K-1-timed.png`
+for the flows. Gates: `G-GREETER-READY`, `-USER-LIST`, `-NO-SHELL`,
+`-NOT-LISTED`, `-GIVE-UP`, `-SESSION`, `-WRONG-PASSWORD`, `-PASSWORD`,
+`-START`, `-MULTISTEP`, `-SWITCH-RETURN`, `-CONFLICT`, `-SMARTCARD`,
+`-CHOICE-LIST`, `-WEB-LOGIN`, `-POLICY-AUTH`, `-TIMED-LOGIN`,
+`-SUPERVISION`, `-HYGIENE`. Nested only: no real GDM, PAM, SSSD, card
+reader, identity provider, gnome-session or DRM.
 
 ## Security model
 
 - The greeter runs as GDM's dynamic greeter user and holds no secret beyond
-  relaying an answer: the answer goes straight from the entry to
-  `AnswerQuery` on GDM's private channel, the entry is cleared, `Call`'s
-  `Debug` redacts it and no trace prints it. PAM runs in GDM's session
+  relaying an answer: the answer (password, code, PIN, or SSSD's JSON reply
+  carrying one) goes straight from the entry to `AnswerQuery` or
+  `CustomJSON.Reply` on GDM's channel, the entry is cleared, `Call`'s
+  `Debug` redacts both and no trace prints them. PAM runs in GDM's session
   worker as root; the greeter never sees a PAM handle or a password hash.
 - Only the greeter session's uid may `OpenSession` or connect to the
-  channel (GDM's checks). Only GDM's allowed `gdm-*` services start; the
-  greeter only asks for `gdm-password` in this slice.
+  channel (GDM's checks); a re-authentication channel is GDM's to grant,
+  for a running session only. Only GDM's allowed `gdm-*` services start;
+  the greeter asks for `gdm-password`, `gdm-smartcard` and
+  `gdm-switchable-auth`, never `gdm-autologin` (GDM runs it after
+  `BeginAutoLogin`, which it admits for the configured user only).
 - `SelectSession` ids come from the session files GDM itself would accept;
   GDM validates them again (51.beta).
 - The compositor admits layer-shell only to its supervised child, so no
@@ -283,9 +403,17 @@ Nested only: no real GDM, PAM, gnome-session or DRM.
 | Register session/display with GDM | yes | yes | G-GREETER-READY (mock GDM); V-GDM-LOGIN once packaged |
 | Banner, logo, `disable-user-list`, `disable-restart-buttons` | yes | read when the schema is installed | none yet |
 | Wiggle, fades | yes | no | — |
-| Fingerprint (re-auth only in 51), smartcard, switchable auth, ChoiceList, CustomJSON web login | yes | no | #1164 |
+| Fingerprint | re-auth only in 51; not on the login dialog | not offered (as GNOME) | not applicable; see Login flows |
+| Smartcard (`gdm-smartcard`, gsd-smartcard insertion, PIN) | yes | yes | G-GREETER-SMARTCARD; cargo: `smartcard_changes_restart_only_the_smartcard_mechanism`, `tokens_report_insertions_like_smartcard_manager` |
+| Authentication policy keys (`enable-password-/smartcard-/switchable-authentication`) | yes | yes (followed live) | G-GREETER-POLICY-AUTH; cargo: `password_policy_leaves_smartcard_without_a_username` |
+| ChoiceList | yes | yes | G-GREETER-CHOICE-LIST; cargo: `legacy_choice_lists_answer_with_select_choice` |
+| Switchable auth, CustomJSON web login (`eidp`), SSSD smartcard/passkey | yes | yes (passkey and SSSD smartcard unit-tested only) | G-GREETER-WEB-LOGIN; cargo: `sssd_*`, `missing_switchable_service_cascades_to_password` |
+| Multi-step (2FA after the password) | yes | yes | G-GREETER-MULTISTEP |
 | Accessibility menu, Orca, OSK, input sources before login | yes | AT-SPI tree only | #1164 |
 | Quick settings (power, volume, network) | yes | power actions on hardware only | — |
-| Timed/auto login, conflicting session dialog, realmd hint | yes | no | — |
+| Timed login | yes | yes | G-GREETER-TIMED-LOGIN |
+| Conflicting session dialog | yes | yes (in-window dialog; the timeout notice is a toast) | G-GREETER-CONFLICT |
+| User switching: logged-in ring, return to the running session | yes | yes | G-GREETER-SWITCH-RETURN |
+| Realmd login hint | yes | no | — |
 | Translations | yes | no | — |
 | Greeter on every variant, `org.gnome.Shell@gdm.service` gone | — | no packaging yet | V-GREETER-LIST, V-GDM-LOGIN, V-GDM-FALLBACK |
