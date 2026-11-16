@@ -281,6 +281,13 @@ pub struct NestedSession {
     /// session normally runs inside a desktop that already has its own
     /// reader and accessibility manager (`--screen-reader`).
     pub screen_reader: bool,
+    /// Greeter mode (#1164): the login screen on GDM's daemon. The
+    /// supervised client is `tuna-greeter` (see [`resolve_greeter_bin`])
+    /// instead of the shell; there is no user session, so no lock screen,
+    /// no overview, no shell gestures and no Tuna session target, as
+    /// GNOME Shell's `gdm` session mode has none. Outputs, input and
+    /// accessibility are the same as in a user session.
+    pub greeter: bool,
 }
 
 /// Which display backend a session runs on.
@@ -344,6 +351,7 @@ impl NestedSession {
             backend: BackendChoice::Auto,
             startup_overview: false,
             screen_reader: false,
+            greeter: false,
         }
     }
 
@@ -500,13 +508,50 @@ pub fn resolve_shell_bin_in(
     exe_dir: Option<std::path::PathBuf>,
     path_var: Option<std::ffi::OsString>,
 ) -> std::path::PathBuf {
+    resolve_bin_in(&SHELL_BINARIES, configured, env_bin, exe_dir, path_var)
+}
+
+/// The login screen's client in greeter mode (#1164).
+pub const GREETER_BINARY: &str = "tuna-greeter";
+
+/// Greeter binary for a greeter session: explicit config, then
+/// `TUNA_GREETER_BIN`, then the sibling of this binary, then `PATH`, else
+/// the bare name for a spawn-time lookup.
+pub fn resolve_greeter_bin(configured: Option<&std::path::Path>) -> std::path::PathBuf {
+    resolve_greeter_bin_in(
+        configured,
+        std::env::var_os("TUNA_GREETER_BIN"),
+        current_exe_dir(),
+        std::env::var_os("PATH"),
+    )
+}
+
+/// [`resolve_greeter_bin`] with its inputs explicit, for tests.
+pub fn resolve_greeter_bin_in(
+    configured: Option<&std::path::Path>,
+    env_bin: Option<std::ffi::OsString>,
+    exe_dir: Option<std::path::PathBuf>,
+    path_var: Option<std::ffi::OsString>,
+) -> std::path::PathBuf {
+    resolve_bin_in(&[GREETER_BINARY], configured, env_bin, exe_dir, path_var)
+}
+
+/// The first of `names` the inputs find, in [`resolve_shell_bin`]'s
+/// order; the last name, bare, when none is installed.
+fn resolve_bin_in(
+    names: &[&str],
+    configured: Option<&std::path::Path>,
+    env_bin: Option<std::ffi::OsString>,
+    exe_dir: Option<std::path::PathBuf>,
+    path_var: Option<std::ffi::OsString>,
+) -> std::path::PathBuf {
     if let Some(path) = configured {
         return path.to_owned();
     }
     if let Some(path) = env_bin.filter(|p| !p.is_empty()) {
         return std::path::PathBuf::from(path);
     }
-    for name in SHELL_BINARIES {
+    for name in names {
         if let Some(found) = exe_dir.as_deref().and_then(|dir| sibling_binary(dir, name)) {
             return found;
         }
@@ -514,12 +559,12 @@ pub fn resolve_shell_bin_in(
     let dirs: Vec<std::path::PathBuf> = path_var
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
-    for name in SHELL_BINARIES {
+    for name in names {
         if let Some(found) = dirs.iter().find_map(|dir| sibling_binary(dir, name)) {
             return found;
         }
     }
-    std::path::PathBuf::from(SHELL_BINARIES[1])
+    std::path::PathBuf::from(names[names.len() - 1])
 }
 
 #[cfg(test)]
@@ -618,6 +663,29 @@ mod shell_bin_tests {
             exe.path().join("tuna-shell-gtk")
         );
     }
+
+    #[test]
+    fn greeter_resolves_like_the_shell_under_its_own_name() {
+        let exe = tempfile::tempdir().unwrap();
+        let path = tempfile::tempdir().unwrap();
+        let exe_dir = Some(exe.path().to_owned());
+        let path_var = Some(path.path().as_os_str().to_owned());
+        let resolve = |env: Option<&str>| {
+            resolve_greeter_bin_in(None, env.map(Into::into), exe_dir.clone(), path_var.clone())
+        };
+        // A shell beside the compositor is never the greeter.
+        touch(exe.path(), "tuna-shell-gtk");
+        assert_eq!(resolve(None), std::path::PathBuf::from("tuna-greeter"));
+        touch(path.path(), "tuna-greeter");
+        assert_eq!(resolve(None), path.path().join("tuna-greeter"));
+        touch(exe.path(), "tuna-greeter");
+        assert_eq!(resolve(None), exe.path().join("tuna-greeter"));
+        assert_eq!(resolve(Some("")), exe.path().join("tuna-greeter"));
+        assert_eq!(
+            resolve(Some("/x/greeter")),
+            std::path::PathBuf::from("/x/greeter")
+        );
+    }
 }
 
 /// Summary of one nested run, for diagnostics (no sensitive content).
@@ -629,6 +697,9 @@ pub struct RunStats {
     pub clients: u64,
     /// Shell restarts consumed (initial spawn excluded).
     pub shell_restarts: u32,
+    /// Greeter mode only: the greeter's restart budget ran out, so the
+    /// session ended for GDM to restart the login screen.
+    pub greeter_exhausted: bool,
 }
 
 /// Ways the nested runtime can fail to start or run.
@@ -703,6 +774,8 @@ pub struct Runtime {
     manager: WindowManager,
     control: ControlHub,
     shell: ShellDriver,
+    /// [`NestedSession::greeter`]: the login screen, not a user session.
+    greeter: bool,
     orca: crate::orca::Reader,
     a11y_keyboard: Option<crate::a11y_keyboard::Monitor>,
     /// The IBus bridge, when IBus is installed.
@@ -1226,7 +1299,11 @@ impl Runtime {
         let shell_policy = RestartPolicy::default();
         let mut shell = ShellDriver::new(
             shell_policy,
-            resolve_shell_bin(session.shell_bin.as_deref()),
+            if session.greeter {
+                resolve_greeter_bin(session.shell_bin.as_deref())
+            } else {
+                resolve_shell_bin(session.shell_bin.as_deref())
+            },
             session.socket_name.clone(),
             control_path,
         );
@@ -1508,6 +1585,7 @@ impl Runtime {
             manager,
             control,
             shell,
+            greeter: session.greeter,
             ime: crate::ime::ImeBridge::configured(&session.socket_name),
             overlay,
             wallpaper: Wallpaper::new(),
@@ -1708,7 +1786,7 @@ impl Runtime {
             }
         }
         // GNOME Shell greets a login with the overview.
-        if session.startup_overview {
+        if session.startup_overview && !session.greeter {
             runtime.control.set_overview(true);
         }
         Ok((runtime, event_loop))
@@ -1864,6 +1942,12 @@ impl Runtime {
     /// snapshots), overview dismissed, and the exclusive lock surface
     /// up with an empty list — no window titles while locked.
     fn engage_lock(&mut self) {
+        // GNOME Shell's `gdm` session mode has no screen shield: idle,
+        // suspend and logind's Lock leave the login screen as it is.
+        if self.greeter {
+            self.lock.unlock(self.lock_now_ms());
+            return;
+        }
         // Motion that came before the lock is the session's, not the shield's.
         self.flush_motion();
         // Track lifecycle separately: idle check_timeout has already locked its flag.
@@ -2364,7 +2448,8 @@ impl Runtime {
         }
         // Swipes of three or more fingers are the shell's (GNOME 51):
         // consumed here. Other swipes reach the client.
-        if self.shell_swipe_input(&input) {
+        // The login screen has no workspaces or overview to swipe to.
+        if !self.greeter && self.shell_swipe_input(&input) {
             self.publish_workspace_progress();
             return;
         }
@@ -2414,7 +2499,9 @@ impl Runtime {
             let inhibited =
                 matches!(input, ManagerInput::Key { .. }) && self.state.shortcuts_inhibited();
             let popup = crate::layer::exclusive_popup_keyboard_layer(&self.state).is_some();
-            let action = if inhibited || popup {
+            // The login screen has no overview (`gdm` mode's hasOverview
+            // is false): Super and the hot corner do nothing.
+            let action = if inhibited || popup || self.greeter {
                 self.triggers.cancel();
                 TriggerAction::None
             } else {
@@ -5641,6 +5728,19 @@ impl Runtime {
                         self.overlay.hide();
                     }
                 }
+                ShellStatus::Exhausted if self.greeter => {
+                    // No graphical login without the greeter: end the
+                    // session so GDM restarts the login screen (GDM's
+                    // own greeter-failure recovery) instead of leaving
+                    // an empty shield up.
+                    if !self.stats.greeter_exhausted {
+                        eprintln!(
+                            "tuna-compositor: greeter restart budget exhausted; ending the login screen"
+                        );
+                    }
+                    self.stats.greeter_exhausted = true;
+                    self.exit = true;
+                }
                 ShellStatus::Waiting { .. } | ShellStatus::Fault(_) | ShellStatus::Exhausted => {
                     self.refresh_overlay()
                 }
@@ -8685,7 +8785,10 @@ fn run_loop(
     let (mut runtime, mut event_loop) = Runtime::launch(session)?;
     #[cfg(feature = "drm")]
     let _session_services = if matches!(runtime.backend, Backend::Drm(_)) {
-        Some(crate::session_services::publish(&session.socket_name))
+        Some(crate::session_services::publish(
+            &session.socket_name,
+            session.greeter,
+        ))
     } else {
         None
     };

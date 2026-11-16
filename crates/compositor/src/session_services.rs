@@ -97,12 +97,16 @@ fn bus_import_args(vars: &[(&str, &str)]) -> Vec<String> {
 pub struct SessionServices {
     alive: Arc<AtomicBool>,
     leader: Option<Leader>,
+    /// A user session queued tuna-session.target; the greeter queues none.
+    user_session: bool,
 }
 impl Drop for SessionServices {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::Release);
         HARDWARE_SESSION.store(false, Ordering::Release);
-        let _ = run("systemctl", &argv(STOP_TARGET));
+        if self.user_session {
+            let _ = run("systemctl", &argv(STOP_TARGET));
+        }
         if let Some(leader) = self.leader.take() {
             // gnome-session 51's leader on session end: start the shutdown
             // target, then hang up the FIFO the monitor watches (which
@@ -401,11 +405,19 @@ fn register_with_gdm(run: &mut Runner<'_>) {
 }
 
 /// Called only for the actual DRM backend, before its shell is started.
-pub fn publish(socket: &str) -> SessionServices {
+///
+/// In greeter mode (`greeter`) GDM's `gnome-session --session gnome-login`
+/// leads the session: its `gnome-session@gnome-login.target` starts this
+/// compositor in place of `org.gnome.Shell@gdm.service`, gnome-session
+/// holds the leader FIFO, and the greeter registers with GDM itself as
+/// GNOME Shell's login screen does. The compositor only publishes the
+/// display so the settings daemon plugins of the login session find it.
+pub fn publish(socket: &str, greeter: bool) -> SessionServices {
     let alive = Arc::new(AtomicBool::new(true));
     let mut guard = SessionServices {
         alive: alive.clone(),
         leader: None,
+        user_session: !greeter,
     };
     let desktop = std::env::var("XDG_CURRENT_DESKTOP")
         .ok()
@@ -421,6 +433,10 @@ pub fn publish(socket: &str) -> SessionServices {
     eprintln!(
         "tuna-compositor: session services: display environment imported (systemd={systemd} bus={bus})"
     );
+    if greeter {
+        HARDWARE_SESSION.store(systemd, Ordering::Release);
+        return guard;
+    }
     // Queue the graphical session before returning: the shell is spawned on
     // the first loop tick, after this. A portal its toolkit activates then
     // waits behind graphical-session.target (xdg-desktop-portal-gnome is

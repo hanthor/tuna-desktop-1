@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use tuna_compositor::eprintln;
 use tuna_compositor::runtime::{run, BackendChoice, NestedSession};
 
-/// `tuna-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland]`.
+/// `tuna-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland] [--greeter]`.
 /// X11 compatibility is on when `Xwayland` is installed (`TUNA_XWAYLAND=0`
 /// turns it off, `--xwayland` or `TUNA_XWAYLAND=1` forces it).
 ///
@@ -101,6 +101,9 @@ fn main() -> ExitCode {
             "--screen-reader" => {
                 session.screen_reader = true;
             }
+            "--greeter" => {
+                session.greeter = true;
+            }
             "--backend" => match args.next().as_deref().and_then(BackendChoice::parse) {
                 Some(choice) => session.backend = choice,
                 None => {
@@ -116,7 +119,7 @@ fn main() -> ExitCode {
                 println!("tuna-compositor: nested Tuna Desktop session (001 developer preview)");
                 println!();
                 println!(
-                    "Usage: tuna-compositor [--backend auto|winit|drm] [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland] [--startup-overview] [--screen-reader]"
+                    "Usage: tuna-compositor [--backend auto|winit|drm] [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland] [--startup-overview] [--screen-reader] [--greeter]"
                 );
                 println!();
                 println!("Starts one isolated nested Wayland session on a private");
@@ -135,6 +138,10 @@ fn main() -> ExitCode {
                 println!("reader as a hardware session always does: it serves");
                 println!("org.freedesktop.a11y.Manager and runs Orca while");
                 println!("screen-reader-enabled is set.");
+                println!("--greeter runs GDM's login screen instead of a user");
+                println!("session: the supervised client is tuna-greeter");
+                println!("(TUNA_GREETER_BIN, else the sibling, else PATH), with");
+                println!("no lock screen, overview or Tuna session target.");
                 return ExitCode::SUCCESS;
             }
             other => {
@@ -143,9 +150,13 @@ fn main() -> ExitCode {
             }
         }
     }
-    if let Err(error) = tuna_compositor::user_upgrade::prepare() {
-        eprintln!("tuna-compositor: {error}");
-        return ExitCode::FAILURE;
+    // The user-settings upgrade belongs to a user's session; the login
+    // screen runs as GDM's dynamic greeter user.
+    if !session.greeter {
+        if let Err(error) = tuna_compositor::user_upgrade::prepare() {
+            eprintln!("tuna-compositor: {error}");
+            return ExitCode::FAILURE;
+        }
     }
     println!(
         "tuna-compositor: nested session on {} ({}x{})",
@@ -157,7 +168,11 @@ fn main() -> ExitCode {
                 "tuna-compositor: shutdown after {} frames, {} clients, {} shell restarts",
                 stats.frames, stats.clients, stats.shell_restarts
             );
-            ExitCode::SUCCESS
+            if stats.greeter_exhausted {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(err) => {
             eprintln!("tuna-compositor: {err}");
