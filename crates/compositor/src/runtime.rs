@@ -776,6 +776,8 @@ pub struct Runtime {
     shell: ShellDriver,
     /// [`NestedSession::greeter`]: the login screen, not a user session.
     greeter: bool,
+    /// Greeter mode: `READY=1` went to systemd once the greeter mapped.
+    greeter_ready_sent: bool,
     orca: crate::orca::Reader,
     a11y_keyboard: Option<crate::a11y_keyboard::Monitor>,
     /// The IBus bridge, when IBus is installed.
@@ -1586,6 +1588,7 @@ impl Runtime {
             control,
             shell,
             greeter: session.greeter,
+            greeter_ready_sent: false,
             ime: crate::ime::ImeBridge::configured(&session.socket_name),
             overlay,
             wallpaper: Wallpaper::new(),
@@ -6307,6 +6310,12 @@ impl Runtime {
                 .and_then(|name| self.state.lock_surface_for(&name))
                 .is_some();
         let shell_ready = !crate::layer::layer_layout(&self.state).is_empty();
+        if self.greeter && shell_ready && !self.greeter_ready_sent {
+            // The login screen is up: `tuna-greeter.service` is ready.
+            self.greeter_ready_sent = true;
+            crate::session_services::notify_ready();
+            eprintln!("tuna-compositor: greeter mapped; READY=1");
+        }
         // Animation time, so proofs can sample transitions at exact delays.
         let now = self.animation_clock.now();
         if self.animation_clock.is_manual() {

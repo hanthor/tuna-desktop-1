@@ -282,6 +282,34 @@ pub fn x11_display_closed() {
     run_detached(x11_closed_calls());
 }
 
+/// systemd's `sd_notify(0, "READY=1")`: `tuna-greeter.service` is
+/// `Type=notify`, as `org.gnome.Shell@gdm.service` is, so the login
+/// session's settings daemon plugins start once the login screen is up.
+/// Nothing happens outside a notify unit (`NOTIFY_SOCKET` unset).
+pub fn notify_ready() {
+    let Some(socket) = std::env::var_os("NOTIFY_SOCKET") else {
+        return;
+    };
+    if let Err(error) = send_notify(&socket, b"READY=1") {
+        eprintln!("tuna-compositor: session services: READY=1: {error}");
+    }
+}
+
+/// One datagram to `NOTIFY_SOCKET`: a path, or `@name` for the abstract
+/// namespace (sd_notify(3)).
+fn send_notify(socket: &std::ffi::OsStr, message: &[u8]) -> std::io::Result<()> {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+    let bytes = socket.as_bytes();
+    let addr = match bytes.strip_prefix(b"@") {
+        Some(name) => SocketAddr::from_abstract_name(name)?,
+        None => SocketAddr::from_pathname(std::path::Path::new(socket))?,
+    };
+    UnixDatagram::unbound()?.send_to_addr(message, &addr)?;
+    Ok(())
+}
+
 /// The session worker. The graphical session starts as soon as activated
 /// services can see the display; it never waits on the shell. On
 /// dbus-daemon a client that activates the GNOME portal before
@@ -463,6 +491,24 @@ pub fn publish(socket: &str, greeter: bool) -> SessionServices {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notify_reaches_path_and_abstract_sockets() {
+        use std::os::linux::net::SocketAddrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notify");
+        let listener = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+        send_notify(path.as_os_str(), b"READY=1").unwrap();
+        let mut buf = [0u8; 16];
+        let n = listener.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"READY=1");
+        let name = format!("tuna-notify-test-{}", std::process::id());
+        let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+        let listener = std::os::unix::net::UnixDatagram::bind_addr(&addr).unwrap();
+        send_notify(std::ffi::OsStr::new(&format!("@{name}")), b"READY=1").unwrap();
+        let n = listener.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"READY=1");
+    }
 
     #[test]
     fn activation_import_names_only_the_hardware_display() {
