@@ -183,6 +183,7 @@ mod wall_clock;
 mod weather;
 mod weather_section;
 mod wellbeing;
+mod welcome;
 mod wifi;
 mod window_menu;
 mod wired;
@@ -4471,6 +4472,28 @@ fn build(app: &adw::Application) {
         if let Some(first) = first {
             first(link);
         }
+    }
+
+    // GNOME's `startup-complete` welcome dialog (main.js
+    // `_handleShowWelcomeScreen`), once the panel is up.
+    {
+        let app = app.clone();
+        let shell = shell.clone();
+        glib::idle_add_local_once(move || {
+            let hide_overview: Rc<dyn Fn()> = Rc::new(move || {
+                if let Some(control) = shell.borrow_mut().control.as_mut() {
+                    if control.model().is_overview_open() {
+                        let _ = control.toggle_overview();
+                    }
+                }
+            });
+            welcome::handle_startup(
+                app.upcast_ref(),
+                settings(SHELL_SCHEMA).as_ref(),
+                shell_dbus::SHELL_VERSION,
+                hide_overview,
+            );
+        });
     }
 
     window.present();

@@ -12,6 +12,8 @@
 #   keyboard and X11 tray gates only.
 #   --grid-hover-only runs panel readiness, G-GRID-HOVER, G-GRID-REORDER,
 #   G-GRID-ON-DEMAND and G-SHELL-STABLE only.
+#   --welcome-only runs panel readiness, G-WELCOME-DIALOG, G-WELCOME-ONCE,
+#   G-WELCOME-TOUR, G-WELCOME-NO-TOUR and G-SHELL-STABLE only (#1196).
 #   --keyboard-routes-only runs panel readiness and the P-A11Y-02 keyboard
 #   route gates (G-PANEL-MENU-KEYS, G-QS-MENU-KEY, G-NOTIFICATION-KEYS,
 #   G-SCREENSHOT-CTRL-C) only.
@@ -531,6 +533,7 @@ DATEMENU_ONLY=0
 SEARCH_LEAK_ONLY=0
 WINDOW_LEAK_ONLY=0
 LOCK_MENU_ONLY=0
+WELCOME_ONLY=0
 GRID_CANCEL_ONLY=0
 GRID_CANCEL_OLD_NEGATIVE=0
 GRID_CANCEL_ADMISSION=""
@@ -551,6 +554,7 @@ while [ $# -gt 0 ]; do
         --search-leak-only) SEARCH_LEAK_ONLY=1; shift ;;
         --window-leak-only) WINDOW_LEAK_ONLY=1; shift ;;
         --lock-menu-only) LOCK_MENU_ONLY=1; shift ;;
+        --welcome-only) WELCOME_ONLY=1; shift ;;
         --display) DISPLAY_ARG="$2"; shift 2 ;;
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
         --help|-h) sed -n '2,33p' "$0"; exit 0 ;;
@@ -562,6 +566,9 @@ if [ "$GRID_HOVER_ONLY" = 1 ] && { [ "$SCREENSHOT_KEYS_ONLY" = 1 ] || [ "$A11Y_F
 fi
 if [ "$DATEMENU_ONLY" = 1 ] && { [ "$INSTALLED_PACKAGE" = 1 ] || [ "$SCREENSHOT_KEYS_ONLY" = 1 ] || [ "$A11Y_FOCUS_ONLY" = 1 ] || [ "$TRAY_ONLY" = 1 ] || [ "$GRID_HOVER_ONLY" = 1 ] || [ "$KEYBOARD_ROUTES_ONLY" = 1 ] || [ "$SEARCH_LEAK_ONLY" = 1 ] || [ "$WINDOW_LEAK_ONLY" = 1 ] || [ "$LOCK_MENU_ONLY" = 1 ] || [ "$GRID_CANCEL_ONLY" = 1 ] || [ "$GRID_CANCEL_OLD_NEGATIVE" = 1 ] || [ -n "$GRID_CANCEL_ADMISSION" ]; }; then
     echo "--datemenu-only cannot be combined with other focused, installed or grid admission flags" >&2; exit 1
+fi
+if [ "$WELCOME_ONLY" = 1 ] && [ $((INSTALLED_PACKAGE + SCREENSHOT_KEYS_ONLY + A11Y_FOCUS_ONLY + NOTIFY_LOCK_ONLY + TRAY_ONLY + GRID_HOVER_ONLY + KEYBOARD_ROUTES_ONLY + DATEMENU_ONLY + SEARCH_LEAK_ONLY + WINDOW_LEAK_ONLY + LOCK_MENU_ONLY + GRID_CANCEL_ONLY)) -gt 0 ]; then
+    echo "--welcome-only cannot be combined with other focused or installed flags" >&2; exit 1
 fi
 if [ "$GRID_CANCEL_ONLY" = 1 ]; then
     if [ "$INSTALLED_PACKAGE" != 0 ] || [ "$SCREENSHOT_KEYS_ONLY" != 0 ] || [ "$A11Y_FOCUS_ONLY" != 0 ] || [ "$KEYBOARD_ROUTES_ONLY" != 0 ] || [ -z "$GRID_CANCEL_ADMISSION" ]; then
@@ -1039,6 +1046,7 @@ pass G-GRID-ON-DEMAND "no grid tiles on the window picker or after close; a held
 . "$ROOT/scripts/lib/tuna-datemenu-proof.sh"
 . "$ROOT/scripts/lib/tuna-search-leak-proof.sh"
 . "$ROOT/scripts/lib/tuna-window-leak-proof.sh"
+. "$ROOT/scripts/lib/tuna-welcome-proof.sh"
 
 # Compositor-side state (overview, focus, previews) for app stages.
 CSTATE="$ARTIFACTS/compositor-state.json"
@@ -1122,6 +1130,7 @@ if ! gsettings list-schemas 2>/dev/null | grep -qx org.gnome.shell; then
     <key name="favorite-apps" type="as"><default>[]</default></key>
     <key name="app-picker-layout" type="aa{sv}"><default>[]</default></key>
     <key name="last-selected-power-profile" type="s"><default>"power-saver"</default></key>
+    <key name="welcome-dialog-last-shown-version" type="s"><default>''</default></key>
   </schema>
   <schema id="org.gnome.shell.keybindings" path="/org/gnome/shell/keybindings/">
     <key name="focus-active-notification" type="as"><default>['&lt;Super&gt;n']</default></key>
@@ -1254,6 +1263,30 @@ fi
 gsettings reset org.gnome.desktop.calendar week-start-day
 gsettings reset org.gnome.desktop.calendar show-weekdate
 gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled false
+# GNOME's welcome dialog (#1196) opens on a fresh session; every other
+# slice starts as if it had been shown, and --welcome-only starts fresh
+# with gnome-tour (a stub that records its launch) installed.
+if [ "$WELCOME_ONLY" = 1 ]; then
+    tour_share="$ARTIFACTS/tour-share"
+    mkdir -p "$tour_share/applications"
+    cat >"$tour_share/gnome-tour-stub" <<STUB
+#!/bin/sh
+echo launched >"$ARTIFACTS/tour-launched"
+STUB
+    chmod +x "$tour_share/gnome-tour-stub"
+    cat >"$tour_share/applications/org.gnome.Tour.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Tour
+Exec=$tour_share/gnome-tour-stub
+NoDisplay=true
+DESKTOP
+    XDG_DATA_DIRS="$tour_share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+    export XDG_DATA_DIRS
+    gsettings reset org.gnome.shell welcome-dialog-last-shown-version
+else
+    gsettings set org.gnome.shell welcome-dialog-last-shown-version "'99999'"
+fi
 # Candidate and thumbnail pixel gates assume GNOME's blue accent; pin it so
 # a vendor default (orange on Ubuntu) cannot move the highlight (#566).
 # Hosts without the key fall back to libadwaita's built-in blue.
@@ -1481,7 +1514,7 @@ MEDIA_SOURCE=0
 if [ "$INSTALLED_PACKAGE" = 0 ] && [ "$SCREENSHOT_KEYS_ONLY" = 0 ] &&
    [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$KEYBOARD_ROUTES_ONLY" = 0 ] &&
    [ "$GRID_CANCEL_ONLY" = 0 ] && [ "$DATEMENU_ONLY" = 0 ] &&
-   [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ "$LOCK_MENU_ONLY" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ] &&
+   [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ "$LOCK_MENU_ONLY" = 0 ] && [ "$WELCOME_ONLY" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ] &&
    [ -z "${TUNA_PROOF_SHELL_BIN:-}" ] && [ -z "${TUNA_SHELL_BIN:-}" ] &&
    [ -n "${GITHUB_RUN_ID:-}" ] && [ -n "${GITHUB_RUN_ATTEMPT:-}" ] &&
    [ -n "${GITHUB_SHA:-}" ]; then
@@ -1490,7 +1523,7 @@ if [ "$INSTALLED_PACKAGE" = 0 ] && [ "$SCREENSHOT_KEYS_ONLY" = 0 ] &&
 fi
 if [ "$INSTALLED_PACKAGE" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ]; then
     cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor -p tuna-wallpaper-svg -p tuna-shell-gtk -p tuna-shell-host
-    if [ "$SCREENSHOT_KEYS_ONLY" = 0 ] && [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$GRID_HOVER_ONLY" = 0 ] && [ "$DATEMENU_ONLY" = 0 ] && [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ "$LOCK_MENU_ONLY" = 0 ]; then
+    if [ "$SCREENSHOT_KEYS_ONLY" = 0 ] && [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$GRID_HOVER_ONLY" = 0 ] && [ "$DATEMENU_ONLY" = 0 ] && [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ "$LOCK_MENU_ONLY" = 0 ] && [ "$WELCOME_ONLY" = 0 ]; then
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example icon-probe
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example shortcut-inhibit-client
     fi
@@ -1896,6 +1929,10 @@ if [ "$WINDOW_LEAK_ONLY" = 1 ]; then
     window_leak_proof
     grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
     shell_stable_gate
+    exit 0
+fi
+if [ "$WELCOME_ONLY" = 1 ]; then
+    welcome_proof
     exit 0
 fi
 if [ "$LOCK_MENU_ONLY" = 1 ]; then
