@@ -106,6 +106,7 @@ mod brightness;
 mod brightness_service;
 mod bt_menu;
 mod calendar;
+mod camera_indicator;
 mod captive_portal;
 mod close_dialog;
 mod dash_motion;
@@ -1120,6 +1121,7 @@ fn qs_round(icon: &str, label: &str) -> gtk::Button {
 
 /// The panel's status icons that quick-settings services drive.
 struct PanelIcons {
+    camera: gtk::Image,
     mic: gtk::Image,
     network: gtk::Image,
     location: gtk::Image,
@@ -1767,6 +1769,7 @@ fn quick_settings_popover(
         power_mode,
         power_header: power_menu_ui.header_icon.clone(),
         power_items,
+        panel_camera: icons.camera,
         panel_mic: icons.mic,
         mic,
         mic_mute,
@@ -2205,8 +2208,10 @@ fn build(app: &adw::Application) {
         indicators.append(&image);
         image
     };
-    // Privacy indicators lead (the microphone in use, orange unless
-    // muted).
+    // Privacy indicators lead, as in panel.js (camera, then microphone):
+    // in use, orange unless the microphone is muted.
+    let panel_camera = status_icon(camera_indicator::ICON, false);
+    panel_camera.update_property(&[gtk::accessible::Property::Label(camera_indicator::LABEL)]);
     let panel_mic = status_icon("microphone-sensitivity-medium-symbolic", false);
     panel_mic.update_property(&[gtk::accessible::Property::Label("Microphone in use")]);
     let panel_network = status_icon("network-wired-symbolic", false);
@@ -2371,6 +2376,7 @@ fn build(app: &adw::Application) {
         &power_ui,
         &brightness_controller,
         PanelIcons {
+            camera: panel_camera,
             mic: panel_mic,
             network: panel_network,
             location: panel_location,
