@@ -1,5 +1,10 @@
 //! GNOME's screen-saver API, backed by the compositor's confirmed lock state.
 //! A bus caller can request a lock, but cannot bypass password authentication.
+//!
+//! As in gnome-shell (`screenShield.js` `_lockScreenShown`, `shellDBus.js`
+//! `LockAsync`), the screen saver is active, and `Lock` returns, only once
+//! the lock screen is shown: the compositor's curtain has landed.
+//! gnome-settings-daemon blanks the screen on `ActiveChanged(true)`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -26,7 +31,8 @@ pub struct Service {
 }
 
 impl Service {
-    /// Publish transitions after the control client has received lock state.
+    /// Publish transitions after the control client has received lock state;
+    /// `active` is whether the lock screen is shown.
     pub fn sync(&self, active: bool) {
         let mut since = self.since.borrow_mut();
         if active == since.is_some() {

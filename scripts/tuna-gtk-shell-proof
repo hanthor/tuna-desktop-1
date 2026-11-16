@@ -260,7 +260,9 @@
 #                  with animations off
 #   G-LOCK-SLIDE   the lock curtain lowers on lock and lifts after PAM
 #                  unlocks, fades only under Reduced Motion, instant
-#                  with animations off
+#                  with animations off; the screen saver goes active only
+#                  once the curtain has landed (gnome-settings-daemon
+#                  blanks on ActiveChanged(true))
 #                  (these sample TUNA_ANIMATION_CLOCK at exact delays)
 #   G-LOCK-WITH-MENU-OPEN Super+L with the date menu (then quick
 #                  settings) open closes the menu; the very next typed
@@ -12206,6 +12208,11 @@ if [ -n "$PAM_ON" ]; then
     anim_clock 125
     tvalue lock_curtain 0.25 || fail G-LOCK-SLIDE "the curtain was not at ease-out-quad 75% down 125 ms in"
     scrot "$ARTIFACTS/25a-lock-curtain-125ms.png" >/dev/null
+    # gnome-shell sets the screen saver active only once the curtain has
+    # landed (`_lockScreenShown`): gnome-settings-daemon blanks the
+    # screen on ActiveChanged(true), which mid-slide froze the curtain.
+    screen_active | grep -q false ||
+        fail G-LOCK-SLIDE "the screen saver went active before the curtain landed"
     anim_clock 250
     tsettled lock_curtain "$curtain_started" "$curtain_frames" ||
         fail G-LOCK-SLIDE "the lock curtain did not lower and settle"
