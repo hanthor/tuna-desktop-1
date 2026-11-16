@@ -3,16 +3,19 @@
 The installed-image proof of rows the nested session already passes:
 
   V-CURSOR             P-IN-03  a GTK entry's text cursor shape, cursor-size
-                                48 live, and locate-pointer's ripple at the
+                                48 live (redrawn scaled by 48/24 as Mutter
+                                does), and locate-pointer's ripple at the
                                 pointer after a lone Ctrl tap
   V-APP-POPOVER        P-WM-06  an app's menu popover (an xdg_popup) opens on
                                 a click and an outside click on another
                                 client dismisses it; that press is consumed
   V-WINDOW-BUTTONS     P-WM-05  GTK's own maximize, restore, minimize and
                                 close title buttons; Alt+Tab restores
-  V-MINIMIZE-ANIMATION P-AN-03  Super+H runs GNOME's 400 ms minimize toward
-                                the window's dash icon, frame by frame, and it
-                                finishes; activation runs the restore
+  V-MINIMIZE-ANIMATION P-AN-03  Super+H runs GNOME's 400 ms minimize (times
+                                the session's GNOME_SHELL_SLOWDOWN_FACTOR)
+                                toward the window's dash icon, frame by
+                                frame, and it finishes; activation runs the
+                                restore
   V-TRAY               P-TR-01  a StatusNotifierItem shows in the top bar with
                                 its tooltip, a click opens its menu, and it
                                 leaves when the item exits
@@ -389,7 +392,7 @@ class Gates:
             raise GateError("; ".join(problems))
         theme = sized["scene"]["cursor"].get("image_theme")
         return (f"GTK entry's cursor-shape text drawn from theme {theme}, the other client's default; "
-                f"cursor-size 48 redraws it at 48 px live; a lone Ctrl tap ripples once at the pointer "
+                f"cursor-size 48 redraws it scaled by 48/{before.get('size')} live; a lone Ctrl tap ripples once at the pointer "
                 f"over {len(ripple['samples'])} observed frames and finishes (desktop-gates/cursor-*.json)")
 
     # ---- V-APP-POPOVER --------------------------------------------------
