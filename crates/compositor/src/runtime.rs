@@ -793,6 +793,8 @@ pub struct Runtime {
     /// An Escape press cancelled a client drag; its repeats and release
     /// belong to that cancel, not to the overview or a client.
     dnd_escape_held: bool,
+    /// A client's drag through the overview (#1189).
+    dnd_overview: crate::dnd_overview::DndOverview,
     /// PipeWire, connected on the first screen cast (#61).
     pipewire: Option<crate::screencast::PipeWire>,
     /// Running screen casts.
@@ -1590,6 +1592,7 @@ impl Runtime {
             motion_queue: crate::motion_coalesce::MotionCoalescer::new(),
             osk: osk::RuntimeOsk::default(),
             dnd_escape_held: false,
+            dnd_overview: Default::default(),
             orca: crate::orca::Reader::new(&session.socket_name, a11y_keyboard.clone()),
             a11y_keyboard,
             pipewire: None,
@@ -2220,6 +2223,17 @@ impl Runtime {
     /// breaking Super-combos); only Escape-closes is consumed, so a
     /// closing keypress never double-acts on client UI.
     fn dispatch_manager_input(&mut self, input: ManagerInput) {
+        self.client_dnd_sync();
+        let motion = matches!(input, ManagerInput::Motion { .. });
+        self.route_manager_input(input);
+        // The release or the Escape that ended a drag was routed above.
+        self.client_dnd_sync();
+        if motion {
+            self.client_dnd_motion();
+        }
+    }
+
+    fn route_manager_input(&mut self, input: ManagerInput) {
         if let Some(monitor) = &self.a11y_keyboard {
             monitor.set_locked(self.is_locked());
             if self
@@ -2339,7 +2353,8 @@ impl Runtime {
             return;
         }
         // Mutter's drag grab: Escape cancels a client drag-and-drop and
-        // is consumed, so the overview stays open and the release can
+        // is consumed, so the Escape does not also close the overview
+        // (the cancel does, see `client_dnd_sync`) and the release can
         // no longer drop (a Wayland drag owns the pointer, not the keys).
         if let ManagerInput::Key {
             keycode: ESCAPE_KEYCODE,
@@ -3280,6 +3295,110 @@ impl Runtime {
         }
     }
 
+    /// Activate workspace `ws` from the overview (a neighboring card, a
+    /// thumbnail). GNOME's trailing empty workspace is not in the model
+    /// yet: it sits right after the active (last) one, and stepping onto
+    /// it creates it.
+    fn overview_switch_workspace(&mut self, ws: u32) {
+        if !self.manager.switch_to_workspace(&mut self.state, ws) {
+            // From a thumbnail the active one need not be last.
+            if let Some(&last) = self.manager.model().workspaces().last() {
+                self.manager.switch_to_workspace(&mut self.state, last);
+            }
+            self.manager.switch_relative(&mut self.state, 1);
+        }
+    }
+
+    /// Follow whether a client's drag runs, and what it brings about: an
+    /// overview showing when it ends closes onto the workspace it began
+    /// on (#1189, overview.js `_onDragEnd`).
+    fn client_dnd_sync(&mut self) {
+        let active = !self.is_locked() && self.state.client_dnd_overview_active();
+        let actions = self.dnd_overview.sync(
+            active,
+            self.manager.model().active_workspace(),
+            self.control.overview_open(),
+        );
+        self.apply_dnd_actions(actions);
+    }
+
+    /// What a client's drag is over: the Activities control, and while
+    /// the overview shows its workspace thumbnails and window previews
+    /// (shell surfaces over them, and the search results, take the
+    /// hover as they take a press).
+    fn client_dnd_hover(&self) -> crate::dnd_overview::Hover {
+        let pos = self.manager.pointer_pos();
+        let activities = self.state.overview_activities_at(&self.triggers, pos);
+        let covered = self.overview_search
+            || crate::layer::topmost_layer_at(&self.state, pos.x as i32, pos.y as i32).is_some()
+            || self.manager.popup_at(&self.state, pos).is_some();
+        if !self.control.overview_open() || covered {
+            return crate::dnd_overview::Hover {
+                activities,
+                ..Default::default()
+            };
+        }
+        crate::dnd_overview::Hover::in_overview(&self.overview_layout(), pos, activities)
+    }
+
+    /// The drag moved (after `input` reached the window manager).
+    fn client_dnd_motion(&mut self) {
+        if !self.dnd_overview.active() {
+            return;
+        }
+        let hover = self.client_dnd_hover();
+        let actions = self.dnd_overview.motion(
+            hover,
+            self.manager.model().active_workspace(),
+            Instant::now(),
+        );
+        self.apply_dnd_actions(actions);
+    }
+
+    /// One tick of a client's drag through the overview: notice it, run
+    /// its due timers.
+    fn client_dnd_tick(&mut self) {
+        self.client_dnd_sync();
+        if !self.dnd_overview.active() {
+            return;
+        }
+        let actions = self.dnd_overview.poll(
+            self.client_dnd_hover(),
+            self.control.overview_open(),
+            Instant::now(),
+        );
+        self.apply_dnd_actions(actions);
+    }
+
+    fn apply_dnd_actions(&mut self, actions: Vec<crate::dnd_overview::DndAction>) {
+        use crate::dnd_overview::DndAction;
+        for action in actions {
+            match action {
+                DndAction::OpenOverview => {
+                    // The Activities control is not under a fullscreen
+                    // window, as the corner is not.
+                    if !self.manager.fullscreen_at(self.manager.pointer_pos()) {
+                        self.control.set_overview(true);
+                    }
+                }
+                DndAction::SwitchWorkspace(ws) => self.overview_switch_workspace(ws),
+                DndAction::ActivateWindow(id) => {
+                    // Main.activateWindow: the window's own workspace,
+                    // the window raised and focused, the overview away.
+                    let workspace = self.manager.model().window(id).map(|w| w.workspace);
+                    if let Some(workspace) = workspace {
+                        if workspace != self.manager.model().active_workspace() {
+                            self.manager.switch_to_workspace(&mut self.state, workspace);
+                        }
+                        self.manager.focus(&mut self.state, Some(id));
+                    }
+                    self.control.set_overview(false);
+                }
+                DndAction::CloseOverview => self.control.set_overview(false),
+            }
+        }
+    }
+
     /// A press while the overview is open that no shell surface took:
     /// focus the preview's window, switch to a neighbor card's
     /// workspace, or close the overview (GNOME shape). Returns whether
@@ -3302,18 +3421,7 @@ impl Runtime {
                 // release decides.
                 self.overview_drag = Some((id, pos, false));
             }
-            crate::overview::OverviewHit::Workspace(ws) => {
-                // GNOME's trailing empty workspace is not in the model
-                // yet: it sits right after the active (last) one, and
-                // stepping onto it creates it.
-                if !self.manager.switch_to_workspace(&mut self.state, ws) {
-                    // From a thumbnail the active one need not be last.
-                    if let Some(&last) = self.manager.model().workspaces().last() {
-                        self.manager.switch_to_workspace(&mut self.state, last);
-                    }
-                    self.manager.switch_relative(&mut self.state, 1);
-                }
-            }
+            crate::overview::OverviewHit::Workspace(ws) => self.overview_switch_workspace(ws),
             crate::overview::OverviewHit::Dismiss => self.control.set_overview(false),
         }
         true
@@ -5110,6 +5218,9 @@ impl Runtime {
             // Tablet and stylus settings: the bounded re-read.
             self.tablet_settings.next_deadline(now),
             self.manager.focus_deadline(),
+            // A client's drag resting on the Activities button or a
+            // window preview (#1189).
+            self.dnd_overview.deadline(),
             // Mutter's alive checks: a ping timing out, Wait, re-pings.
             self.manager.alive_deadline(),
             // Window sessions are written 3 s after a change (Mutter).
@@ -5272,6 +5383,7 @@ impl Runtime {
         self.manager.reconcile(&mut self.state);
         self.state.window_sessions_mut().save_if_due(Instant::now());
         self.focus_policy_tick();
+        self.client_dnd_tick();
         self.alive_checks_tick();
         self.tablet_settings_tick();
         self.poll_input_aids();

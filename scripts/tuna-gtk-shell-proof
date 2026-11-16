@@ -24,6 +24,10 @@
 #   --window-leak-only runs panel readiness, G-WINDOW-LEAK (100 libadwaita
 #   windows opened and closed leave the compositor's memory within a fixed
 #   bound of its warm state, #1088) and G-SHELL-STABLE only.
+#   --dnd-overview-only runs panel readiness, G-DND-OVERVIEW (real GTK drags
+#   open the overview from the hot corner and the Activities button, activate
+#   a window preview after 750 ms, and return to the starting workspace on
+#   cancel and drop, #1189) and G-SHELL-STABLE only.
 #   --lock-menu-only runs panel readiness, G-LOCK-WITH-MENU-OPEN and
 #   G-SHELL-STABLE only (needs pam_wrapper).
 #   --grid-cancel-only --grid-cancel-admission FILE is an exact CI comparison slice.
@@ -404,6 +408,18 @@
 #                  overview, and a thumbnail click switches workspace
 #   G-OV-DND       dragging a window's preview onto the next workspace's
 #                  card moves the window there, the overview staying open
+#   G-DND-HOT-CORNER a real GTK drag (--dnd-overview-only, #1189) held over
+#                  the hot corner opens the overview and keeps the drag
+#   G-DND-WINDOW-SWITCH the drag resting 750 ms (GNOME's
+#                  DND_WINDOW_SWITCH_TIMEOUT) on a window preview activates
+#                  and raises that window, where the drop lands
+#   G-DND-ACTIVITIES the drag resting 250 ms on the Activities button
+#                  opens the overview
+#   G-DND-CANCEL-RETURNS / G-DND-DROP-RETURNS a workspace switched by
+#                  hovering a thumbnail returns to the starting workspace,
+#                  the overview closing, when the drag is cancelled
+#                  (Escape) or dropped
+#   G-DND-OVERVIEW all of the above
 #   G-SUSPEND-LOCK Suspend asks logind, and its PrepareForSleep locks
 #                  the session before sleep
 #   G-UNLOCK       GNOME's lock screen: a wrong password is refused and
@@ -528,6 +544,7 @@ KEYBOARD_ROUTES_ONLY=0
 DATEMENU_ONLY=0
 SEARCH_LEAK_ONLY=0
 WINDOW_LEAK_ONLY=0
+DND_OVERVIEW_ONLY=0
 LOCK_MENU_ONLY=0
 GRID_CANCEL_ONLY=0
 GRID_CANCEL_OLD_NEGATIVE=0
@@ -548,10 +565,11 @@ while [ $# -gt 0 ]; do
         --datemenu-only) DATEMENU_ONLY=1; shift ;;
         --search-leak-only) SEARCH_LEAK_ONLY=1; shift ;;
         --window-leak-only) WINDOW_LEAK_ONLY=1; shift ;;
+        --dnd-overview-only) DND_OVERVIEW_ONLY=1; shift ;;
         --lock-menu-only) LOCK_MENU_ONLY=1; shift ;;
         --display) DISPLAY_ARG="$2"; shift 2 ;;
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
-        --help|-h) sed -n '2,33p' "$0"; exit 0 ;;
+        --help|-h) sed -n '2,38p' "$0"; exit 0 ;;
         *) echo "tuna-gtk-shell-proof: unknown argument $1" >&2; exit 1 ;;
     esac
 done
@@ -1037,6 +1055,7 @@ pass G-GRID-ON-DEMAND "no grid tiles on the window picker or after close; a held
 . "$ROOT/scripts/lib/tuna-datemenu-proof.sh"
 . "$ROOT/scripts/lib/tuna-search-leak-proof.sh"
 . "$ROOT/scripts/lib/tuna-window-leak-proof.sh"
+. "$ROOT/scripts/lib/tuna-dnd-overview-proof.sh"
 
 # Compositor-side state (overview, focus, previews) for app stages.
 CSTATE="$ARTIFACTS/compositor-state.json"
@@ -1478,7 +1497,7 @@ MEDIA_SOURCE=0
 if [ "$INSTALLED_PACKAGE" = 0 ] && [ "$SCREENSHOT_KEYS_ONLY" = 0 ] &&
    [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$KEYBOARD_ROUTES_ONLY" = 0 ] &&
    [ "$GRID_CANCEL_ONLY" = 0 ] && [ "$DATEMENU_ONLY" = 0 ] &&
-   [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ "$LOCK_MENU_ONLY" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ] &&
+   [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ "$DND_OVERVIEW_ONLY" = 0 ] && [ "$LOCK_MENU_ONLY" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ] &&
    [ -z "${TUNA_PROOF_SHELL_BIN:-}" ] && [ -z "${TUNA_SHELL_BIN:-}" ] &&
    [ -n "${GITHUB_RUN_ID:-}" ] && [ -n "${GITHUB_RUN_ATTEMPT:-}" ] &&
    [ -n "${GITHUB_SHA:-}" ]; then
@@ -1487,7 +1506,7 @@ if [ "$INSTALLED_PACKAGE" = 0 ] && [ "$SCREENSHOT_KEYS_ONLY" = 0 ] &&
 fi
 if [ "$INSTALLED_PACKAGE" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ]; then
     cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor -p tuna-wallpaper-svg -p tuna-shell-gtk -p tuna-shell-host
-    if [ "$SCREENSHOT_KEYS_ONLY" = 0 ] && [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$GRID_HOVER_ONLY" = 0 ] && [ "$DATEMENU_ONLY" = 0 ] && [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ "$LOCK_MENU_ONLY" = 0 ]; then
+    if [ "$SCREENSHOT_KEYS_ONLY" = 0 ] && [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$GRID_HOVER_ONLY" = 0 ] && [ "$DATEMENU_ONLY" = 0 ] && [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ "$DND_OVERVIEW_ONLY" = 0 ] && [ "$LOCK_MENU_ONLY" = 0 ]; then
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example icon-probe
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example shortcut-inhibit-client
     fi
@@ -1881,6 +1900,16 @@ if [ "$SEARCH_LEAK_ONLY" = 1 ]; then
     # Let the startup cover settle before the first overview.
     sleep 3
     search_leak_proof
+    grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
+    shell_stable_gate
+    exit 0
+fi
+if [ "$DND_OVERVIEW_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "dnd overview desktop ready" ||
+        fail G-DND-OVERVIEW "desktop never became ready"
+    # Let the startup cover settle before the first window.
+    sleep 3
+    dnd_overview_proof
     grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
     shell_stable_gate
     exit 0
@@ -10742,6 +10771,12 @@ window_menu
 xdotool key super+Page_Up
 cstate ".active_workspace == $home_ws and .focused == $moved" "home" ||
     fail G-OV-DND "could not return the window home"
+sleep 1
+
+# GNOME's XDND handling of the overview (#1189): real GTK drags open it from
+# the hot corner and the Activities button, activate a window preview after
+# 750 ms, and return to the starting workspace on cancel and drop.
+dnd_overview_proof
 sleep 1
 
 # Direct callers may not bypass capture consent by calling Shell interfaces.
