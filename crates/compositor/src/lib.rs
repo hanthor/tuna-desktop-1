@@ -1059,16 +1059,29 @@ impl State {
         true
     }
 
-    /// The session locks: GNOME's lock closes every open menu with its
-    /// grab, so `popup_done` goes to each grabbed popup (a GTK popover
-    /// holding its toolkit grab would otherwise keep the lock screen's
-    /// keys in the same client). Nothing is handed the keyboard back:
-    /// it is the lock's until `unlock_input`. Returns whether a
-    /// grab was dismissed.
-    pub fn dismiss_popup_grab_for_lock(&mut self) -> bool {
-        let dismissed = self.dismiss_popup_grab();
+    /// The session locks: GNOME closes its own shell menus (the date
+    /// menu, quick settings), so `popup_done` goes to each grabbed popup
+    /// of the supervised shell, newest first (a GTK popover holding its
+    /// toolkit grab would otherwise keep the lock screen's keys in the
+    /// same client). An application's grab is kept: GNOME's modal stage
+    /// grab revokes Mutter's Wayland popup grab without dismissing it,
+    /// so the lock holds the keyboard meanwhile and `unlock_input`
+    /// hands it back to that popup. Nothing is handed the keyboard back
+    /// here. Returns whether a shell grab was dismissed.
+    pub fn dismiss_shell_popup_grab_for_lock(&mut self) -> bool {
+        let (shell, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.popup_grab)
+            .into_iter()
+            .partition(|popup| {
+                popup.wl_surface().client().is_some_and(|client| {
+                    ClientState::privileged(&client, |data| data.supervised_shell)
+                })
+            });
+        self.popup_grab = kept;
+        for popup in shell.iter().rev() {
+            popup.send_popup_done();
+        }
         self.popup_refocus = false;
-        dismissed
+        !shell.is_empty()
     }
 
     /// Take the "hand keyboard focus back" flag (see `popup_refocus`).
