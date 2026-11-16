@@ -82,7 +82,7 @@ See [capture details](docs/walkthrough/README-media.md) for source revisions and
 
 ## Project status
 
-**Beta prerelease ([v1.0.0-beta.2](docs/releases/v1.0.0-beta.2.md)), not yet a daily driver.** A Smithay compositor supervises a GTK4/libadwaita
+**Beta prerelease ([v1.0.0-beta.3](docs/releases/v1.0.0-beta.3.md)), not yet a daily driver.** A Smithay compositor supervises a GTK4/libadwaita
 shell with overview window previews, app grid and search, quick settings,
 notifications, calendar, keyboard navigation and AT-SPI accessibility. Tuna Desktop
 also includes its session supervisor, shell host and versioned
@@ -111,10 +111,11 @@ requirement traceability.
   toolchain; no MSRV is declared, crates use edition 2021; see the
   [API stability and MSRV policy](docs/api-stability.md)).
 - **System libraries**: libseat, libinput, libudev, GBM, libdrm,
-  libxkbcommon, GTK 4, libadwaita, PipeWire, Wayland and gtk4-layer-shell
-  development files, plus EGL (Mesa llvmpipe is enough) to run a nested
-  session. The [development guide](docs/development.md#prerequisites)
-  has the exact Ubuntu and Arch package lists CI uses.
+  libxkbcommon, GTK 4, libadwaita, libgweather 4, PipeWire, Wayland and
+  gtk4-layer-shell development files, plus EGL (Mesa llvmpipe is enough)
+  to run a nested session. The
+  [development guide](docs/development.md#prerequisites) has the exact
+  Ubuntu and Arch package lists CI uses.
 - **Spektacular CLI** is needed only for spec and plan work, not for
   building or running Tuna Desktop; see the
   [development guide](docs/development.md#spektacular-cli-planning-work-only).
