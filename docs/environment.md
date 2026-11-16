@@ -97,7 +97,8 @@ these emitters (all paths below are under `crates/`):
 | Compositor lock conversation and authentication retirement | `compositor/src/runtime/auth.rs`, `compositor/src/runtime.rs` |
 | `screen reader retired`, `FPRINT-PHASE` receipts | `compositor/src/orca.rs`, `compositor/src/fprintd.rs` |
 | Shell grid, transient, unlock-dialog, switcher fade | `shell-gtk/src/grid_animation.rs`, `transient.rs`, `lock_curtain.rs`, `switcher.rs` |
-| Shell lock/auth, command results, password-submission **markers** (not passwords) | `shell-gtk/src/lock.rs`, `lock_auth.rs` |
+| Shell lock/auth, command results, password-submission **markers** (not passwords) | `shell-gtk/src/lock.rs`, `auth-prompt/src/lib.rs` |
+| Greeter conversation, user list and session start **markers** (not answers) | `greeter/src/main.rs`, `greeter/src/conversation.rs` |
 | Shell keybindings, media-key setup, policy refusals, screenshot-clipboard marker | `shell-gtk/src/main.rs`, `power.rs`, `run_dialog.rs` |
 | Shell audio-recording, wellbeing, end-session diagnostics | `shell-gtk/src/services.rs`, `wellbeing.rs`, `power.rs` |
 | Shell IBus candidate bounds/clicks and applied properties | `shell-gtk/src/ibus_panel.rs`, `ibus_property_menu.rs` |
@@ -202,7 +203,7 @@ uses each one for.
 | `CUPS_SERVER`, `CUPS_DATADIR` | Which CUPS server to talk to, and where the test page lives. | `crates/shell-gtk/src/printers.rs:900-907`, `crates/shell-gtk/src/printers.rs:1985-1991` |
 | `GSK_RENDERER` | When set, the shell keeps the GTK renderer you chose. Otherwise it switches to the cairo renderer when OpenGL is a software rasterizer such as llvmpipe. | `crates/shell-gtk/src/renderer.rs:20-30` |
 | `GNOME_SHELL_SLOWDOWN_FACTOR` | A positive number multiplies every animation duration, as in GNOME Shell. Read when the shell starts. | `crates/shell-control-schema/src/motion.rs:16`, `crates/shell-gtk/src/motion.rs:62` |
-| `GDM_MESSAGE_TIME_MULTIPLIER` | A positive number multiplies how long each lock-screen message stays up, as in GDM. | `crates/shell-gtk/src/lock.rs:295-297`, `crates/shell-gtk/src/lock_auth.rs:93-99` |
+| `GDM_MESSAGE_TIME_MULTIPLIER` | A positive number multiplies how long each lock-screen and login-screen message stays up, as in GDM. | `crates/shell-gtk/src/lock.rs:312-314`, `crates/greeter/src/main.rs`, `crates/auth-prompt/src/lib.rs:97-103` |
 | `GLYCIN_DATA_DIR` | Glycin loader configuration directory, hashed by the SVG wallpaper helper so a loader change invalidates its cache. | `crates/wallpaper-svg/src/provenance.rs:60-67` |
 
 ## Scripts and builds
