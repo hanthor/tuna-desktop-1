@@ -229,13 +229,16 @@ class Guest:
                          ' | grep -E "^tuna-" | grep -v "modifier super" || true').splitlines()
         return lines[-limit:]
 
-    def diagnostics(self, cursor, limit=200):
+    def diagnostics(self, cursor, limit=600):
         """A failed step's whole journal since the step began, the user's
-        processes, sessions and crashes, so the cause survives VM deletion."""
+        processes with their cgroups, each user session's state and process
+        tree, and crashes, so the cause survives VM deletion."""
         code, out, err = self.sh(
             f'echo "@@journal"; journalctl -b --after-cursor={shlex.quote(cursor)} -o short-monotonic --no-pager'
             f' | tail -n {limit}; echo "@@sessions"; loginctl list-sessions --no-legend; '
-            f'echo "@@processes"; ps -u {USER} -o pid=,etimes=,comm= 2>/dev/null; '
+            f'echo "@@session-status"; for s in $(loginctl list-sessions --no-legend | awk \'$3=="{USER}"{{print $1}}\'); do '
+            'loginctl session-status "$s" --no-pager --lines=0; done; '
+            f'echo "@@processes"; ps -u {USER} -o pid=,etimes=,comm=,cgroup= 2>/dev/null; '
             'echo "@@coredumps"; coredumpctl list --no-pager --no-legend 2>/dev/null | tail -n 10', timeout=180)
         sections, name = {'exit': code, 'stderr': err[-400:]}, None
         for line in out.splitlines():
