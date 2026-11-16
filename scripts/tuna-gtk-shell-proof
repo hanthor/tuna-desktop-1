@@ -27,7 +27,7 @@
 #   --lock-menu-only runs panel readiness, G-LOCK-WITH-MENU-OPEN and
 #   G-SHELL-STABLE only (needs pam_wrapper).
 #   --shell-gaps-only runs panel readiness, the GNOME 51 shell-gap gates
-#   (G-BACKGROUND-MENU) and G-SHELL-STABLE only.
+#   (G-BACKGROUND-MENU, G-MONITOR-LABELS) and G-SHELL-STABLE only.
 #   --grid-cancel-only --grid-cancel-admission FILE is an exact CI comparison slice.
 #   --expect-grid-cancel-old-negative is permitted only in that admitted slice.
 #
@@ -1981,12 +1981,71 @@ CONTROL_CENTER
         fail G-BACKGROUND-MENU "Escape left the background menu open"
     pass G-BACKGROUND-MENU "a right click or held press on the wallpaper opens GNOME's menu; its rows open Settings' Background, Display and main pages; Escape closes it; a short click opens nothing"
 }
+# GNOME 51 osdMonitorLabeler.js: Settings (org.gnome.Settings, the probe)
+# asks org.gnome.Shell to label every monitor with its number; the label
+# sits at the top-left of the monitor's work area, goes away on
+# HideMonitorLabels or when its client leaves the bus, and a caller
+# outside the allowlist is refused.
+monitor_labels_proof() {
+    ml_marker="$ARTIFACTS/monitor-labels.marker"
+    ml_probe="$ROOT/scripts/lib/tuna-monitor-labels-probe.py"
+    : >"$ml_marker"
+    ml_wait() {
+        end=$(($(date +%s) + 15))
+        while [ "$(date +%s)" -le "$end" ]; do
+            grep -q "^$1" "$ml_marker" && return 0
+            sleep 0.3
+        done
+        return 1
+    }
+    ml_labels() {
+        cstate "[.layers[] | select(.namespace == \"tuna-monitor-label\")] | length == $1" "monitor labels $1" 10
+    }
+    ml_labels 0 || fail G-MONITOR-LABELS "a label showed before Settings asked"
+    # GNOME's sender allowlist: a caller that is not Settings is refused.
+    "$PY" "$ml_probe" "$ml_marker" --stranger >"$ARTIFACTS/monitor-labels-stranger.log" 2>&1
+    ml_wait "denied org.freedesktop.DBus.Error.AccessDenied" ||
+        fail G-MONITOR-LABELS "a caller outside the allowlist was not refused ($(cat "$ml_marker"))"
+    ml_labels 0 || fail G-MONITOR-LABELS "a refused caller still put labels on screen"
+    : >"$ml_marker"
+    "$PY" "$ml_probe" "$ml_marker" >"$ARTIFACTS/monitor-labels.log" 2>&1 &
+    ml_pid=$!
+    ml_wait shown || fail G-MONITOR-LABELS "ShowMonitorLabels from Settings failed ($(cat "$ml_marker"))"
+    ml_count="$(sed -n 's/^monitors //p' "$ml_marker" | wc -w)"
+    [ "$ml_count" -ge 1 ] || fail G-MONITOR-LABELS "DisplayConfig listed no monitor"
+    ml_labels "$ml_count" ||
+        fail G-MONITOR-LABELS "ShowMonitorLabels did not put one label on each of the $ml_count monitors"
+    cstate "[.layers[] | select(.namespace == \"tuna-monitor-label\")] | all(.rect[0] == 0 and .rect[1] > 0 and .rect[2] < $WIDTH / 2 and .rect[3] < $HEIGHT / 2)" \
+        "label at the corner of the work area" 10 ||
+        fail G-MONITOR-LABELS "a label is not at the top-left of the work area below the panel"
+    "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-monitor-labels.json" 20 ||
+        fail G-MONITOR-LABELS "accessibility dump failed"
+    jq -e 'any(.[]; .role == "label" and .name == "1" and .showing)' "$ARTIFACTS/a11y-monitor-labels.json" >/dev/null ||
+        fail G-MONITOR-LABELS "no label shows the number 1 that Settings sent"
+    scrot "$ARTIFACTS/monitor-labels.png" >/dev/null
+    kill -USR1 "$ml_pid"
+    ml_wait hidden || fail G-MONITOR-LABELS "HideMonitorLabels failed ($(cat "$ml_marker"))"
+    ml_labels 0 || fail G-MONITOR-LABELS "HideMonitorLabels left labels on screen"
+    kill -USR2 "$ml_pid"
+    wait "$ml_pid" 2>/dev/null || true
+    # A client that leaves the bus without hiding them takes them down.
+    : >"$ml_marker"
+    "$PY" "$ml_probe" "$ml_marker" >"$ARTIFACTS/monitor-labels-leave.log" 2>&1 &
+    ml_pid=$!
+    ml_wait shown || fail G-MONITOR-LABELS "a second ShowMonitorLabels failed ($(cat "$ml_marker"))"
+    ml_labels "$ml_count" || fail G-MONITOR-LABELS "the labels did not return for a new Settings"
+    kill -USR2 "$ml_pid"
+    wait "$ml_pid" 2>/dev/null || true
+    ml_labels 0 || fail G-MONITOR-LABELS "the labels stayed after Settings left the bus"
+    pass G-MONITOR-LABELS "ShowMonitorLabels from Settings puts a numbered label at the corner of every monitor's work area; HideMonitorLabels or Settings leaving the bus removes them; a caller outside the allowlist is refused"
+}
 if [ "$SHELL_GAPS_ONLY" = 1 ]; then
     cstate '.active_workspace != null and .locked == false' "shell gaps desktop ready" ||
         fail G-BACKGROUND-MENU "desktop never became ready"
     # Let the startup cover settle before the first click.
     sleep 3
     background_menu_proof
+    monitor_labels_proof
     grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
     shell_stable_gate
     exit 0

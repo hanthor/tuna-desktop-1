@@ -138,6 +138,7 @@ mod lockdown;
 mod logic;
 mod magnifier_sync;
 mod media_keys;
+mod monitor_labels;
 mod motion;
 mod mount_operation;
 mod network_agent;
@@ -565,6 +566,7 @@ struct GnomeShellDbus {
     osd: Rc<osd::OsdUi>,
     overview: Rc<RefCell<overview::OverviewUi>>,
     shell: Rc<RefCell<Shell>>,
+    monitor_labels: Rc<monitor_labels::MonitorLabels>,
 }
 
 impl shell_dbus::ShellActions for GnomeShellDbus {
@@ -578,6 +580,14 @@ impl shell_dbus::ShellActions for GnomeShellDbus {
 
     fn show_applications(&self) {
         overview::OverviewUi::show_apps(&self.overview);
+    }
+
+    fn show_monitor_labels(&self, sender: &str, labels: &[(String, String)]) {
+        self.monitor_labels.show(sender, labels);
+    }
+
+    fn hide_monitor_labels(&self, sender: &str) {
+        self.monitor_labels.hide(sender);
     }
 
     fn overview_active(&self) -> bool {
@@ -3056,6 +3066,7 @@ fn build(app: &adw::Application) {
         osd: osd_ui.clone(),
         overview: overview_ui.clone(),
         shell: shell.clone(),
+        monitor_labels: monitor_labels::MonitorLabels::new(app.upcast_ref()),
     }));
 
     // GNOME's screenshot UI (Print).
