@@ -4,6 +4,7 @@ import json
 import importlib.util
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
@@ -51,10 +52,38 @@ node = result["streams"][0][0]
 size = result["streams"][0][1].get("size")
 reply, fds = bus.call_with_unix_fd_list_sync("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast", "OpenPipeWireRemote", GLib.Variant("(oa{sv})", (session, {})), None, Gio.DBusCallFlags.NONE, 30000, None, None)
 fd = fds.get(reply.unpack()[0])
-source = ["gst-launch-1.0", "-q", "pipewiresrc", "fd=" + str(fd), "path=" + str(node), "num-buffers=1", "!", "videoconvert"]
+head = "pipewiresrc fd=%d path=%s num-buffers=1 ! videoconvert" % (fd, node)
+def gst_has(element):
+    if shutil.which("gst-inspect-1.0"):
+        return subprocess.run(["gst-inspect-1.0", "--exists", element]).returncode == 0
+    # Ubuntu images ship the plugins and the typelib but not gstreamer1.0-tools.
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+    Gst.init(None)
+    return Gst.ElementFactory.find(element) is not None
+def gst_run(*tail):
+    """Run `pipewiresrc ! videoconvert ! TAIL` to EOS with gst-launch, or in-process without it."""
+    if shutil.which("gst-launch-1.0"):
+        subprocess.run(["gst-launch-1.0", "-q"] + head.split() + list(tail), pass_fds=(fd,), check=True, timeout=30)
+        return
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+    Gst.init(None)
+    pipeline = Gst.parse_launch(head + " " + " ".join(tail))
+    try:
+        pipeline.set_state(Gst.State.PLAYING)
+        message = pipeline.get_bus().timed_pop_filtered(30 * Gst.SECOND, Gst.MessageType.EOS | Gst.MessageType.ERROR)
+        if message is None:
+            raise RuntimeError("gst pipeline did not reach EOS in 30 s")
+        if message.type == Gst.MessageType.ERROR:
+            raise RuntimeError("gst pipeline failed: " + str(message.parse_error()))
+    finally:
+        pipeline.set_state(Gst.State.NULL)
 try:
-    if subprocess.run(["gst-inspect-1.0", "--exists", "pngenc"]).returncode == 0:
-        subprocess.run(source + ["!", "pngenc", "!", "filesink", "location=" + str(out)], pass_fds=(fd,), check=True, timeout=30)
+    if gst_has("pngenc"):
+        gst_run("!", "pngenc", "!", "filesink", "location=" + str(out))
     else:
         # Gentoo ships pngenc in an optional plugin package; encode the same
         # single raw frame with GdkPixbuf instead of requiring it.
@@ -63,7 +92,7 @@ try:
         width, height = size
         raw = out.with_suffix(".rgb")
         caps = "video/x-raw,format=RGB,width=%d,height=%d" % (width, height)
-        subprocess.run(source + ["!", caps, "!", "filesink", "location=" + str(raw)], pass_fds=(fd,), check=True, timeout=30)
+        gst_run("!", caps, "!", "filesink", "location=" + str(raw))
         import gi
         gi.require_version("GdkPixbuf", "2.0")
         from gi.repository import GdkPixbuf
