@@ -38,7 +38,7 @@ ROLES = ("main", "bystander", "placed")
 NONCE = re.compile(r"[0-9a-f]{16,32}")
 SCENE_KEYS = ("windows", "focused", "minimized", "stacking", "outputs", "layers", "cursor",
               "pointer_position", "window_lifecycle", "animations_enabled", "overview_open",
-              "locked", "window_outputs", "x11_ready", "x11_display")
+              "locked", "window_outputs", "x11_ready", "x11_display", "animation_slowdown")
 
 
 def nonce(value):
