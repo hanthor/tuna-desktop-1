@@ -98,6 +98,7 @@ pub(crate) fn test_dispatch_guard() -> TestDispatchGuard {
 
 mod accessibility;
 mod anim_clock;
+mod app_integration;
 mod audio_selection;
 mod audio_state;
 mod background_settings;
@@ -107,6 +108,7 @@ mod bt_menu;
 mod calendar;
 mod captive_portal;
 mod close_dialog;
+mod dash_motion;
 mod display_change;
 mod events;
 mod fd_watch;
@@ -128,6 +130,7 @@ mod location;
 mod lock;
 mod lock_auth;
 mod lock_curtain;
+mod lock_notifications;
 mod lock_wiggle;
 mod lockdown;
 mod logic;
@@ -177,10 +180,13 @@ mod transient;
 mod tray;
 mod user_switch;
 mod wall_clock;
+mod weather;
+mod weather_section;
 mod wellbeing;
 mod wifi;
 mod window_menu;
 mod wired;
+mod world_clocks;
 mod ws_dots;
 mod ws_popup;
 mod wwan;
@@ -814,22 +820,51 @@ fn render_pills(shell: &mut Shell) {
     shell.pill_state = wanted;
 }
 
+/// What the date menu draws above and below its calendar column
+/// (style.css): the popup's 6px gap from the panel and from the screen
+/// edge, its 1px border and 6px padding, and the calendar area's 4px
+/// padding, each twice.
+const DATE_MENU_CHROME: i32 = 2 * (6 + 1 + 6 + 4);
+
 /// GNOME 51's date menu: the notification list beside the calendar
 /// column, back on today each time it opens (dateMenu.js).
-fn calendar_popover(notes: &gtk::Box) -> (gtk::Popover, Rc<calendar::CalendarUi>) {
+fn calendar_popover(
+    notes: &gtk::Box,
+    apps: &Rc<live_apps::LiveApps>,
+) -> (gtk::Popover, Rc<calendar::CalendarUi>) {
     let popover = transient::MenuPopover::new_popover();
     popover.add_css_class("tuna-shell-popover");
     popover.add_css_class("tuna-cal");
     popover.set_has_arrow(false);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     row.add_css_class("calendar-area");
-    let cal = calendar::CalendarUi::new(wall_clock::now().date());
+    let cal = calendar::CalendarUi::new(wall_clock::now().date(), apps);
     row.append(notes);
     row.append(&cal.column);
     popover.set_child(Some(&row));
     {
         let cal = cal.clone();
-        popover.connect_show(move |_| cal.reset());
+        popover.connect_show(move |popup| {
+            cal.reset();
+            // Keep the menu on its monitor. GNOME caps a panel menu at
+            // the work area (panelMenu.js `_onOpenStateChanged`), so the
+            // column may take what is left under the panel.
+            let parent = popup.parent();
+            let surface = parent
+                .as_ref()
+                .and_then(|widget| widget.native())
+                .and_then(|native| native.surface());
+            if let Some(monitor) = surface.as_ref().and_then(|surface| {
+                gtk::prelude::WidgetExt::display(popup).monitor_at_surface(surface)
+            }) {
+                let panel_height = parent
+                    .as_ref()
+                    .map_or(tuna_shell_control::PANEL_HEIGHT as i32, |widget| {
+                        widget.height()
+                    });
+                cal.fit_height(monitor.geometry().height() - panel_height - DATE_MENU_CHROME);
+            }
+        });
     }
     {
         let popover = popover.downgrade();
@@ -2146,7 +2181,10 @@ fn build(app: &adw::Application) {
 
     let notify = notify::NotifyUi::new(app.upcast_ref());
     let clock_label = gtk::Label::new(None);
-    let (cal_popover, calendar_ui) = calendar_popover(notify.pane());
+    // Installed apps, kept current: the date menu's Clocks and Weather
+    // cards, the overview and the switcher all follow them.
+    let apps = live_apps::LiveApps::new();
+    let (cal_popover, calendar_ui) = calendar_popover(notify.pane(), &apps);
     // GNOME's calendar events through its calendar server.
     calendar_ui.set_event_source(events::EventSource::new());
     let clock = panel_menu_button(&clock_label, "Date and Time", &cal_popover);
@@ -2287,6 +2325,20 @@ fn build(app: &adw::Application) {
             }),
         )
     };
+    // GNOME's lock screen lists unseen notifications by their policy
+    // (unlockDialog.js NotificationsBox, #348), live while locked.
+    {
+        let notify = notify.clone();
+        lock_ui.set_notifications(Rc::new(move || notify.lock_entries()));
+    }
+    {
+        let lock_ui = Rc::downgrade(&lock_ui);
+        notify.connect_lock_changed(move || {
+            if let Some(lock_ui) = lock_ui.upgrade() {
+                lock_ui.refresh_notifications();
+            }
+        });
+    }
     let brightness_policy_settings =
         settings("org.gnome.settings-daemon.plugins.power").filter(|s| {
             s.settings_schema()
@@ -2701,6 +2753,7 @@ fn build(app: &adw::Application) {
             }
             calendar_ui.set_clock_format(format);
             calendar_ui.set_today(now.date());
+            calendar_ui.clock_tick();
         })
     };
     refresh_clock();
@@ -2752,7 +2805,6 @@ fn build(app: &adw::Application) {
                 .collect()
         }
     };
-    let apps = live_apps::LiveApps::new();
     let dash_apps = favorites.clone();
     let overview_ui = overview::OverviewUi::new(
         app.upcast_ref(),
@@ -4086,6 +4138,9 @@ fn build(app: &adw::Application) {
                 };
                 drop(shell);
                 input_sources.focus(holder);
+                // No banners while locked (GNOME's lock screen session
+                // mode); the lock screen lists what arrives instead.
+                notify.set_locked(locked);
                 if locked {
                     notify.release_focus();
                     release_panel_focus(&panel_focus_window, &panel_focus_held);
