@@ -3,7 +3,14 @@
 # nested session (#1164, docs/greeter.md, ledger P-LK-03).
 #
 # Usage:
-#   scripts/tuna-greeter-proof [--display :N] [--artifacts DIR]
+#   scripts/tuna-greeter-proof [--display :N] [--artifacts DIR] [--orca-only]
+#
+# The default run (gtk-shell CI job) proves every gate below except
+# G-GREETER-ORCA, which it skips and says so. --orca-only runs
+# G-GREETER-READY then G-GREETER-ORCA only: it needs Orca 50 or later
+# (orca-speech CI job, as tuna-orca-speech-proof), since the compositor
+# starts Orca without DISPLAY and Orca 46 dies there. Either mode fails
+# when one of its gates fails.
 #
 # Binaries: $TUNA_PROOF_BIN_DIR when set, else a cargo build of
 # tuna-compositor and tuna-greeter (${CARGO_TARGET_DIR:-target}/debug).
@@ -66,8 +73,9 @@
 #                        compositor's bell and keyboard aids
 #   G-GREETER-LARGE-TEXT Large Text sets text-scaling-factor 1.25 and the
 #                        login screen's text grows
-#   G-GREETER-ORCA       Screen Reader starts the compositor's Orca, which
-#                        speaks (speech-dispatcher log), and stops it
+#   G-GREETER-ORCA       (--orca-only) Screen Reader starts the
+#                        compositor's Orca, which speaks (speech-dispatcher
+#                        log), and stops it
 #   G-GREETER-OSK        Screen Keyboard opens the prompt's keyboard on the
 #                        password entry; its keys type the answer GDM gets
 #   G-GREETER-POWER      quick settings show the battery, the wired
@@ -90,11 +98,13 @@ DISPLAY_ARG=""
 ARTIFACTS="$ROOT/greeter-artifacts"
 WIDTH=1280
 HEIGHT=800
+ORCA_ONLY=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --display) DISPLAY_ARG="$2"; shift 2 ;;
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
-        --help|-h) sed -n '2,81p' "$0"; exit 0 ;;
+        --orca-only) ORCA_ONLY=1; shift ;;
+        --help|-h) sed -n '2,89p' "$0"; exit 0 ;;
         *) echo "tuna-greeter-proof: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -240,10 +250,11 @@ finish() {
         echo "CLEANUP fail $RUN_PRIV remains" >>"$ASSERTIONS"
         FAILED_GATE="${FAILED_GATE:-CLEANUP}"
     fi
-    "$PY" - "$ARTIFACTS" "$ROOT" "$BIN_DIR" "$FAILED_GATE" "$swept" "$COMPOSITOR_STATUS" <<'RECEIPT'
+    "$PY" - "$ARTIFACTS" "$ROOT" "$BIN_DIR" "$FAILED_GATE" "$swept" "$COMPOSITOR_STATUS" "$ORCA_ONLY" <<'RECEIPT'
 import hashlib, json, pathlib, subprocess, sys
 out, root, bins, failed, swept, status = (pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]),
                                           pathlib.Path(sys.argv[3]), sys.argv[4], sys.argv[5].split(), sys.argv[6])
+orca_only = sys.argv[7] == '1'
 def sha(path):
     try:
         return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
@@ -261,6 +272,8 @@ for line in (out / 'assertions.txt').read_text().splitlines():
 state = git('status', '--porcelain', '--untracked-files=no')
 receipt = {
     'proof': 'tuna-greeter-proof', 'issue': 1164, 'ledger': 'P-LK-03',
+    'mode': 'orca-only' if orca_only else 'default',
+    'skipped': [] if orca_only else ['G-GREETER-ORCA: needs Orca 50 or later, run with --orca-only'],
     'result': 'fail' if failed else 'pass', 'failed_gate': failed or None,
     'source': {'head': git('rev-parse', 'HEAD'), 'dirty': bool(state),
                'status_sha256': hashlib.sha256((state or '').encode()).hexdigest()},
@@ -270,9 +283,9 @@ receipt = {
         'scripts/lib/org.gnome.login-screen.gschema.xml')},
     'bin_dir': str(bins), 'gates': gates,
     'compositor_exit_status': int(status) if status.isdigit() else None,
-    'review_screenshots': ['A-1-user-list.png', 'C-1-prompt.png', 'C-2-wrong-password.png',
-                           'F-0-chrome.png', 'F-1-quick-settings.png', 'F-2-a11y-menu.png',
-                           'F-3-end-session.png', 'F-4-osk.png'],
+    'review_screenshots': [] if orca_only else [
+        'A-1-user-list.png', 'C-1-prompt.png', 'C-2-wrong-password.png', 'F-0-chrome.png',
+        'F-1-quick-settings.png', 'F-2-a11y-menu.png', 'F-3-end-session.png', 'F-4-osk.png'],
     'cleanup': {'swept_pids': swept,
                 'leftover_pids': (out / 'leftover-pids.txt').read_text().split()},
     'scope': 'nested winit session on Xvfb; GDM 51 greeter API and AccountsService as a D-Bus '
@@ -410,7 +423,13 @@ type_password() {
 }
 
 # --- environment ------------------------------------------------------
-for tool in Xvfb xdotool ffmpeg jq gdbus dbus-daemon pgrep sha256sum gsettings orca speech-dispatcher; do
+# Orca and speech-dispatcher for G-GREETER-ORCA only; x11grab for the rest.
+if [ "$ORCA_ONLY" = 1 ]; then
+    tools="orca speech-dispatcher"
+else
+    tools="ffmpeg"
+fi
+for tool in Xvfb xdotool jq gdbus dbus-daemon pgrep sha256sum gsettings $tools; do
     command -v "$tool" >/dev/null 2>&1 || fail SETUP "$tool is required"
 done
 
@@ -454,6 +473,12 @@ else
 fi
 for _ in $(seq 1 30); do xdotool getdisplaygeometry >/dev/null 2>&1 && break; sleep 0.5; done
 xdotool getdisplaygeometry >/dev/null 2>&1 || fail SETUP "no X display at $DISPLAY"
+if [ "$ORCA_ONLY" = 1 ]; then
+    # As tuna-orca-speech-proof: Orca initialises its AT-SPI device even
+    # for --version and segfaults without a display, so ask once one exists.
+    orca --version >"$ARTIFACTS/orca-version.txt" 2>&1 || true
+    speech-dispatcher --version >"$ARTIFACTS/speechd-version.txt" 2>&1 || true
+fi
 
 if [ -z "${TUNA_PROOF_BIN_DIR:-}" ]; then
     RUSTUP_HOME="${RUSTUP_HOME:-$ORIG_HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$ORIG_HOME/.cargo}" \
@@ -512,14 +537,16 @@ AddVoice "en" "MALE1" "tuna"
 DefaultVoice "tuna"
 CONF
 printf 'pcm.!default { type null }\nctl.!default { type null }\n' >"$HOME/.asoundrc"
-# The logo (a 120×60 magenta block, easy to find on the screenshot) and
-# the banner file the login-screen keys point at.
-"$PY" - "$FIXTURE/logo.png" <<'LOGO' || fail SETUP "the logo fixture could not be drawn"
+if [ "$ORCA_ONLY" = 0 ]; then
+    # The logo (a 120×60 magenta block, easy to find on the screenshot) and
+    # the banner file the login-screen keys point at.
+    "$PY" - "$FIXTURE/logo.png" <<'LOGO' || fail SETUP "the logo fixture could not be drawn"
 import sys
 from PIL import Image
 Image.new('RGB', (120, 60), (255, 0, 255)).save(sys.argv[1])
 LOGO
-printf 'Banner from a file.' >"$FIXTURE/banner.txt"
+    printf 'Banner from a file.' >"$FIXTURE/banner.txt"
+fi
 
 # The private "system" bus: GDM's and AccountsService's only home here.
 cat >"$RUN_PRIV/system-bus.conf" <<BUSCONF
@@ -593,55 +620,7 @@ done
 [ -n "$WID" ] || fail SETUP "no nested window"
 xdotool windowfocus --sync "$WID"
 
-# --- A: the login screen comes up ---------------------------------------
-CURRENT_GATE=G-GREETER-READY
-cstate '.layers | any(.namespace == "tuna-greeter")' 120 || fail G-GREETER-READY "the greeter's layer never mapped"
-await_greeter "" 10 || fail G-GREETER-READY "no tuna-greeter child of the compositor"
-for _ in $(seq 1 50); do grep -q ' READY=1$' "$NOTIFY_LOG" && break; sleep 0.1; done
-grep -q ' READY=1$' "$NOTIFY_LOG" || fail G-GREETER-READY "no READY=1 on NOTIFY_SOCKET after the greeter mapped"
-grep -qFx "tuna-compositor: greeter mapped; READY=1" "$LOG" ||
-    fail G-GREETER-READY "READY=1 was not sent for the mapped greeter"
-gwait 0 "$(call OpenSession)" 20 || fail G-GREETER-READY "the greeter never asked GDM for its channel"
-gwait 0 '.kind == "connect"' 20 || fail G-GREETER-READY "the greeter never connected to GDM's session server"
-gwait 0 "$(call RegisterSession)" 20 || fail G-GREETER-READY "the greeter did not register its session with GDM"
-gwait 0 "$(call RegisterDisplay)" 20 || fail G-GREETER-READY "the greeter did not register its display with GDM"
-pass G-GREETER-READY "the tuna-greeter layer mapped and READY=1 reached NOTIFY_SOCKET; OpenSession, the peer channel and RegisterSession/RegisterDisplay reached GDM"
-
-CURRENT_GATE=G-GREETER-USER-LIST
-m="$(mark)"
-twait 0 "greeter users names=ada,grace,katherine" 20 >/dev/null ||
-    fail G-GREETER-USER-LIST "the greeter did not list exactly ada, grace and katherine"
-gwait 0 "$(call ListCachedUsers)" 5 || fail G-GREETER-USER-LIST "AccountsService was not asked for its users"
-sleep 1.5
-dump A-1-user-list
-shot A-1-user-list
-for name in "Ada Lovelace" "Grace Hopper" "Katherine Johnson" "Not listed?"; do
-    showing A-1-user-list "$name" || fail G-GREETER-USER-LIST "'$name' is not showing"
-done
-for name in "GDM Greeter" "Locked Account" "Password"; do
-    hidden A-1-user-list "$name" || fail G-GREETER-USER-LIST "'$name' shows on the user list"
-done
-rows="$(jq '[.[] | select(.showing and (.role == "list item") and (.name | IN("Ada Lovelace", "Grace Hopper", "Katherine Johnson")))] | length' "$ARTIFACTS/a11y-A-1-user-list.json")"
-[ "$rows" = 3 ] || fail G-GREETER-USER-LIST "$rows user rows instead of 3"
-pass G-GREETER-USER-LIST "Ada Lovelace, Grace Hopper and Katherine Johnson listed as rows with Not listed?; the system and locked accounts are not (A-1-user-list.png)"
-
-CURRENT_GATE=G-GREETER-NO-SHELL
-namespaces="$(jq -c '[.layers[].namespace] | unique' "$CSTATE")"
-[ "$namespaces" = '["tuna-greeter"]' ] || fail G-GREETER-NO-SHELL "layers other than the greeter's: $namespaces"
-children="$(pgrep -P "$COMPOSITOR_PID" -l | awk '{print $2}' | sort | tr '\n' ' ')"
-case " $children " in *" tuna-shell-gtk "* | *" tuna-shell "*) fail G-GREETER-NO-SHELL "a shell runs: $children" ;; esac
-xdotool key --clearmodifiers super
-sleep 1
-xdotool mousemove --window "$WID" 0 0
-sleep 1.5
-xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
-xdotool key --clearmodifiers super+l
-sleep 1.5
-jq -e '.overview_open == false and .locked == false and ([.layers[].namespace] | unique) == ["tuna-greeter"]' "$CSTATE" >/dev/null ||
-    fail G-GREETER-NO-SHELL "Super, the hot corner or Super+L changed the login screen: $(jq -c '{overview_open, locked, layers: [.layers[].namespace]}' "$CSTATE")"
-pass G-GREETER-NO-SHELL "layers $namespaces only; compositor children: $children; Super, the hot corner and Super+L left overview_open=false and locked=false"
-
-# --- F: the login screen's chrome ----------------------------------------
+# --- helpers of the chrome gates (F) and G-GREETER-ORCA -------------------
 gs() { gsettings "$@" 2>>"$ARTIFACTS/gsettings.err"; }
 # The first showing node named $2 in dump $1: its window-relative bounds.
 bounds() {
@@ -686,6 +665,84 @@ swait() {
 a11y_menu() { dump "$1" --press "Accessibility"; sleep 0.8; }
 a11y_toggle() { dump "$1" --press "$2"; sleep 0.8; }
 
+# --- A: the login screen comes up ---------------------------------------
+CURRENT_GATE=G-GREETER-READY
+cstate '.layers | any(.namespace == "tuna-greeter")' 120 || fail G-GREETER-READY "the greeter's layer never mapped"
+await_greeter "" 10 || fail G-GREETER-READY "no tuna-greeter child of the compositor"
+for _ in $(seq 1 50); do grep -q ' READY=1$' "$NOTIFY_LOG" && break; sleep 0.1; done
+grep -q ' READY=1$' "$NOTIFY_LOG" || fail G-GREETER-READY "no READY=1 on NOTIFY_SOCKET after the greeter mapped"
+grep -qFx "tuna-compositor: greeter mapped; READY=1" "$LOG" ||
+    fail G-GREETER-READY "READY=1 was not sent for the mapped greeter"
+gwait 0 "$(call OpenSession)" 20 || fail G-GREETER-READY "the greeter never asked GDM for its channel"
+gwait 0 '.kind == "connect"' 20 || fail G-GREETER-READY "the greeter never connected to GDM's session server"
+gwait 0 "$(call RegisterSession)" 20 || fail G-GREETER-READY "the greeter did not register its session with GDM"
+gwait 0 "$(call RegisterDisplay)" 20 || fail G-GREETER-READY "the greeter did not register its display with GDM"
+pass G-GREETER-READY "the tuna-greeter layer mapped and READY=1 reached NOTIFY_SOCKET; OpenSession, the peer channel and RegisterSession/RegisterDisplay reached GDM"
+
+# --orca-only: G-GREETER-ORCA on the login screen just brought up.
+if [ "$ORCA_ONLY" = 1 ]; then
+    CURRENT_GATE=G-GREETER-ORCA
+    cstate '.screen_reader_state == "disabled"' 5 || fail G-GREETER-ORCA "a screen reader ran before it was asked for"
+    twait 0 "greeter users names=ada,grace,katherine" 20 >/dev/null ||
+        fail G-GREETER-ORCA "the greeter did not list its users"
+    a11y_menu F-orca-0
+    s="$(smark)"
+    a11y_toggle F-orca-1 "Screen Reader"
+    cstate '.screen_reader_state == "active" and .screen_reader_pid != null' 90 ||
+        fail G-GREETER-ORCA "Screen Reader did not start the compositor's Orca"
+    READER_PID="$(jq -r .screen_reader_pid "$CSTATE")"
+    swait "$s" '^Screen reader on\.$' 60 || fail G-GREETER-ORCA "Orca did not say 'Screen reader on.'"
+    sleep 2
+    s="$(smark)"
+    a11y_menu F-orca-2
+    swait "$s" 'Accessibility|Ada Lovelace|Grace Hopper|Katherine Johnson|Not listed' 30 ||
+        fail G-GREETER-ORCA "Orca did not read the login screen's focus"
+    said="$(tail -n "+$((s + 1))" "$SPOKEN" | grep -E 'Accessibility|Ada Lovelace|Grace Hopper|Katherine Johnson|Not listed' | head -1)"
+    a11y_menu F-orca-3
+    a11y_toggle F-orca-4 "Screen Reader"
+    cstate '.screen_reader_state == "disabled" and .screen_reader_pid == null' 30 ||
+        fail G-GREETER-ORCA "Screen Reader off did not stop Orca"
+    for _ in $(seq 1 50); do kill -0 "$READER_PID" 2>/dev/null || break; sleep 0.1; done
+    kill -0 "$READER_PID" 2>/dev/null && fail G-GREETER-ORCA "Orca (pid $READER_PID) outlived Screen Reader off"
+    pass G-GREETER-ORCA "Screen Reader started the compositor's Orca (pid $READER_PID, $(head -1 "$ARTIFACTS/orca-version.txt")): 'Screen reader on.', then '$said' for the login screen; off stopped it"
+    exit 0
+fi
+
+CURRENT_GATE=G-GREETER-USER-LIST
+m="$(mark)"
+twait 0 "greeter users names=ada,grace,katherine" 20 >/dev/null ||
+    fail G-GREETER-USER-LIST "the greeter did not list exactly ada, grace and katherine"
+gwait 0 "$(call ListCachedUsers)" 5 || fail G-GREETER-USER-LIST "AccountsService was not asked for its users"
+sleep 1.5
+dump A-1-user-list
+shot A-1-user-list
+for name in "Ada Lovelace" "Grace Hopper" "Katherine Johnson" "Not listed?"; do
+    showing A-1-user-list "$name" || fail G-GREETER-USER-LIST "'$name' is not showing"
+done
+for name in "GDM Greeter" "Locked Account" "Password"; do
+    hidden A-1-user-list "$name" || fail G-GREETER-USER-LIST "'$name' shows on the user list"
+done
+rows="$(jq '[.[] | select(.showing and (.role == "list item") and (.name | IN("Ada Lovelace", "Grace Hopper", "Katherine Johnson")))] | length' "$ARTIFACTS/a11y-A-1-user-list.json")"
+[ "$rows" = 3 ] || fail G-GREETER-USER-LIST "$rows user rows instead of 3"
+pass G-GREETER-USER-LIST "Ada Lovelace, Grace Hopper and Katherine Johnson listed as rows with Not listed?; the system and locked accounts are not (A-1-user-list.png)"
+
+CURRENT_GATE=G-GREETER-NO-SHELL
+namespaces="$(jq -c '[.layers[].namespace] | unique' "$CSTATE")"
+[ "$namespaces" = '["tuna-greeter"]' ] || fail G-GREETER-NO-SHELL "layers other than the greeter's: $namespaces"
+children="$(pgrep -P "$COMPOSITOR_PID" -l | awk '{print $2}' | sort | tr '\n' ' ')"
+case " $children " in *" tuna-shell-gtk "* | *" tuna-shell "*) fail G-GREETER-NO-SHELL "a shell runs: $children" ;; esac
+xdotool key --clearmodifiers super
+sleep 1
+xdotool mousemove --window "$WID" 0 0
+sleep 1.5
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+xdotool key --clearmodifiers super+l
+sleep 1.5
+jq -e '.overview_open == false and .locked == false and ([.layers[].namespace] | unique) == ["tuna-greeter"]' "$CSTATE" >/dev/null ||
+    fail G-GREETER-NO-SHELL "Super, the hot corner or Super+L changed the login screen: $(jq -c '{overview_open, locked, layers: [.layers[].namespace]}' "$CSTATE")"
+pass G-GREETER-NO-SHELL "layers $namespaces only; compositor children: $children; Super, the hot corner and Super+L left overview_open=false and locked=false"
+
+# --- F: the login screen's chrome ----------------------------------------
 CURRENT_GATE=G-GREETER-SERVICES
 gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
     --method org.freedesktop.DBus.ListNames >"$ARTIFACTS/session-bus-names.txt" ||
@@ -751,8 +808,10 @@ showing F-input-0 "en" || fail G-GREETER-INPUT-SOURCE "the indicator does not sa
 dump F-input-1 --press "Keyboard"
 sleep 0.8
 dump F-input-1
-showing F-input-1 "English (US)" && showing F-input-1 "German" ||
-    fail G-GREETER-INPUT-SOURCE "the indicator's menu does not list English (US) and German"
+for source in "English (US)" German; do
+    showing F-input-1 "$source" ||
+        fail G-GREETER-INPUT-SOURCE "the indicator's menu does not list English (US) and German"
+done
 checked F-input-1 "English (US)" || fail G-GREETER-INPUT-SOURCE "English (US) is not the current source"
 # The menu is a radio group (as Login Options): the focus starts on a
 # source and moving it selects.
@@ -798,8 +857,9 @@ read -r ax ay aw ah <<EOF
 $(bounds F-a11y-1 Accessibility)
 EOF
 [ -n "$ah" ] || fail G-GREETER-A11Y-MENU "no bounds for the Accessibility button"
-[ "$ax" -gt $((WIDTH / 2)) ] && [ "$ay" -gt $((HEIGHT / 2)) ] ||
+if [ "$ax" -le $((WIDTH / 2)) ] || [ "$ay" -le $((HEIGHT / 2)) ]; then
     fail G-GREETER-A11Y-MENU "the Accessibility button is not at the bottom right ($ax,$ay)"
+fi
 m="$(mark)"
 a11y_toggle F-a11y-hc "High Contrast"
 twait "$m" "greeter a11y high-contrast=true" 10 >/dev/null || fail G-GREETER-A11Y-MENU "High Contrast did not set high-contrast"
@@ -838,33 +898,15 @@ twait "$m" "greeter a11y text-scaling-factor=1.25 dpi=122880" 10 >/dev/null ||
 sleep 1
 dump F-text-2
 after="$(bounds F-text-2 "Ada Lovelace" label | cut -f3)"
-[ -n "$before" ] && [ -n "$after" ] && [ $((after * 100)) -ge $((before * 115)) ] ||
+if [ -z "$before" ] || [ -z "$after" ] || [ $((after * 100)) -lt $((before * 115)) ]; then
     fail G-GREETER-LARGE-TEXT "the text did not grow ($before → $after px)"
+fi
 a11y_toggle F-text-3 "Large Text"
 [ "$(gs get org.gnome.desktop.interface text-scaling-factor)" = 1.0 ] || fail G-GREETER-LARGE-TEXT "Large Text did not reset the scaling"
 pass G-GREETER-LARGE-TEXT "Large Text set text-scaling-factor 1.25 (gtk-xft-dpi 122880): the 'Ada Lovelace' label grew from $before to $after px wide; off reset it"
 
-CURRENT_GATE=G-GREETER-ORCA
-cstate '.screen_reader_state == "disabled"' 5 || fail G-GREETER-ORCA "a screen reader ran before it was asked for"
-s="$(smark)"
-a11y_toggle F-orca-1 "Screen Reader"
-cstate '.screen_reader_state == "active" and .screen_reader_pid != null' 90 ||
-    fail G-GREETER-ORCA "Screen Reader did not start the compositor's Orca"
-READER_PID="$(jq -r .screen_reader_pid "$CSTATE")"
-swait "$s" '^Screen reader on\.$' 60 || fail G-GREETER-ORCA "Orca did not say 'Screen reader on.'"
-sleep 2
-s="$(smark)"
-a11y_menu F-orca-2
-swait "$s" 'Accessibility|Ada Lovelace|Grace Hopper|Katherine Johnson|Not listed' 30 ||
-    fail G-GREETER-ORCA "Orca did not read the login screen's focus"
-said="$(tail -n "+$((s + 1))" "$SPOKEN" | grep -E 'Accessibility|Ada Lovelace|Grace Hopper|Katherine Johnson|Not listed' | head -1)"
-a11y_menu F-orca-3
-a11y_toggle F-orca-4 "Screen Reader"
-cstate '.screen_reader_state == "disabled" and .screen_reader_pid == null' 30 ||
-    fail G-GREETER-ORCA "Screen Reader off did not stop Orca"
-for _ in $(seq 1 50); do kill -0 "$READER_PID" 2>/dev/null || break; sleep 0.1; done
-kill -0 "$READER_PID" 2>/dev/null && fail G-GREETER-ORCA "Orca (pid $READER_PID) outlived Screen Reader off"
-pass G-GREETER-ORCA "Screen Reader started the compositor's Orca (pid $READER_PID): 'Screen reader on.', then '$said' for the login screen; off stopped it"
+# G-GREETER-ORCA needs Orca 50 or later: --orca-only (orca-speech CI job).
+echo "tuna-greeter-proof: G-GREETER-ORCA skipped here: it needs Orca 50 or later and runs with --orca-only"
 
 CURRENT_GATE=G-GREETER-OSK
 m="$(mark)"

@@ -333,14 +333,19 @@ above with GDM 51.1.1's signal order and failure text. GDM 51.1.1's own
 for the greeter and its keys are set with `gsettings`. Users are chosen and
 passwords typed with real X11 keys, and the result is read back through
 AT-SPI, the mock's call log, Orca's speech (speech-dispatcher's generic
-module writing `spoken.log`) and the compositor's state;
-`A-1-user-list.png`, `C-1-prompt.png` and `F-0-chrome.png` are the review
-shots against GNOME 51's login dialog. Gates: `G-GREETER-READY`,
-`-USER-LIST`, `-NO-SHELL`, `-SERVICES`, `-LOGO`, `-INPUT-SOURCE`,
-`-A11Y-MENU`, `-LARGE-TEXT`, `-ORCA`, `-OSK`, `-POWER`, `-NOT-LISTED`,
-`-GIVE-UP`, `-SESSION`, `-WRONG-PASSWORD`, `-PASSWORD`, `-START`,
-`-SUPERVISION`, `-HYGIENE`. Nested only: no real GDM, PAM, gnome-session
-or DRM.
+module writing `spoken.log`, as `scripts/tuna-orca-speech-proof`) and the
+compositor's state; `A-1-user-list.png`, `C-1-prompt.png` and
+`F-0-chrome.png` are the review shots against GNOME 51's login dialog.
+Gates: `G-GREETER-READY`, `-USER-LIST`, `-NO-SHELL`, `-SERVICES`, `-LOGO`,
+`-INPUT-SOURCE`, `-A11Y-MENU`, `-LARGE-TEXT`, `-OSK`, `-POWER`,
+`-NOT-LISTED`, `-GIVE-UP`, `-SESSION`, `-WRONG-PASSWORD`, `-PASSWORD`,
+`-START`, `-SUPERVISION`, `-HYGIENE`. `G-GREETER-ORCA` needs Orca 50 or
+later: the compositor starts Orca without `DISPLAY`, where Ubuntu 24.04's
+Orca 46 dies. The default run skips it and says so;
+`scripts/tuna-greeter-proof --orca-only` (`G-GREETER-READY`, then
+`G-GREETER-ORCA`) runs in the orca-speech CI job on its Orca 50, and the
+parity ledger reads both jobs' assertions. Nested only: no real GDM, PAM,
+gnome-session or DRM.
 
 ## Security model
 
