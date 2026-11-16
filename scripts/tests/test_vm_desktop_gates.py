@@ -57,14 +57,29 @@ class Cursor(unittest.TestCase):
     TEXT = {"kind": "named", "name": "text", "source": "client", "size": 48,
             "image": [48, 48], "logical": [48, 48], "image_theme": "Adwaita"}
 
-    def test_client_shape_at_the_theme_size(self):
+    def test_client_shape(self):
         self.assertTrue(gates.cursor_shows(self.TEXT, "text"))
-        self.assertTrue(gates.cursor_shows(self.TEXT, "text", 48))
-        self.assertFalse(gates.cursor_shows(self.TEXT, "text", 24))
-        self.assertFalse(gates.cursor_shows({**self.TEXT, "image": [24, 24]}, "text", 48))
         self.assertFalse(gates.cursor_shows({**self.TEXT, "kind": "surface"}, "text"))
         self.assertFalse(gates.cursor_shows({**self.TEXT, "name": "default"}, "text"))
         self.assertFalse(gates.cursor_shows(None, "text"))
+
+    def test_cursor_size_rescales_from_the_previous_size(self):
+        xcursor24 = {**self.TEXT, "size": 24, "image": [24, 24], "logical": [24, 24]}
+        self.assertTrue(gates.cursor_rescaled(xcursor24, self.TEXT, "text", 48))
+        # Adwaita's scalable text cursor on the installed Marlin session
+        # (#1153 marlin-vm): a 32 px canvas at nominal 24 draws 64 at size 48.
+        svg24 = {**self.TEXT, "size": 24, "image": [32, 32], "logical": [32.0, 32.0]}
+        svg48 = {**self.TEXT, "size": 48, "image": [64, 64], "logical": [64.0, 64.0]}
+        self.assertTrue(gates.cursor_rescaled(svg24, svg48, "text", 48))
+        cases = {"size not applied": {**svg48, "size": 24},
+                 "not redrawn": {**svg48, "logical": [32.0, 32.0]},
+                 "wrong scale": {**svg48, "logical": [48.0, 48.0]},
+                 "other shape": {**svg48, "name": "default"},
+                 "server-drawn": {**svg48, "source": "compositor"}}
+        for name, after in cases.items():
+            with self.subTest(name):
+                self.assertFalse(gates.cursor_rescaled(svg24, after, "text", 48))
+        self.assertFalse(gates.cursor_rescaled(None, svg48, "text", 48))
 
     def ripple(self, frames=((1, [400.0, 300.0]), (2, [400.0, 300.0])), count=4, active=False):
         samples = [{"enabled": True, "active": True, "count": 4, "frames": f, "at": at} for f, at in frames]
@@ -111,6 +126,17 @@ class Minimize(unittest.TestCase):
         # An earlier minimize of the same window (before the baseline) is not this one.
         self.assertTrue(gates.transition_problems(self.watch(history=()), 7, "minimize"))
 
+    def test_the_session_slow_down_factor_scales_the_400_ms(self):
+        # TunaOS images export GNOME_SHELL_SLOWDOWN_FACTOR=0.8; GNOME's
+        # adjustAnimationTime then runs the minimize for 320 ms.
+        fast = self.watch(duration=320)
+        fast["scene"]["animation_slowdown"] = 0.8
+        self.assertEqual(gates.transition_problems(fast, 7, "minimize"), [])
+        wrong = self.watch(duration=400)
+        wrong["scene"]["animation_slowdown"] = 0.8
+        self.assertTrue(gates.transition_problems(wrong, 7, "minimize"))
+        self.assertTrue(gates.transition_problems(self.watch(duration=320), 7, "minimize"))
+
     def test_restore_runs_and_ends_shown(self):
         good = self.watch("unminimize", history=("started",), minimized=False)
         self.assertEqual(gates.transition_problems(good, 7, "unminimize"), [])
@@ -145,10 +171,19 @@ class Tray(unittest.TestCase):
     def test_item_point_is_the_top_bar_origin_plus_window_extents(self):
         item = {"name": gates.TRAY_TITLE, "showing": True, "toplevel": "Top Bar", "extents": [1000, 2, 28, 28]}
         self.assertEqual(gates.tray_point({"nodes": [item]}, scene()), (1014, 16))
-        for nodes in ([], [{**item, "showing": False}], [item, item], [{**item, "extents": [1000, 2, 0, 0]}]):
+        other = {**item, "extents": [900, 2, 28, 28]}
+        for nodes in ([], [{**item, "showing": False}], [item, other], [{**item, "extents": [1000, 2, 0, 0]}]):
             with self.subTest(nodes=nodes):
                 self.assertIsNone(gates.tray_point({"nodes": nodes}, scene()))
         self.assertIsNone(gates.tray_point({"nodes": [item]}, scene(layers=[])))
+
+    def test_gtk_menu_button_reports_one_item_twice_and_the_inner_one_is_clicked(self):
+        # Measured on the installed Marlin session (#1153 marlin-vm): the
+        # MenuButton's outer button and its inner toggle button share the name.
+        outer = {"name": gates.TRAY_TITLE, "role": "button", "showing": True, "toplevel": "Top Bar",
+                 "extents": [1124, 0, 48, 32]}
+        inner = {**outer, "role": "toggle button", "extents": [1127, 3, 42, 26]}
+        self.assertEqual(gates.tray_point({"nodes": [outer, inner]}, scene()), (1148, 16))
 
 
 class MultiOutput(unittest.TestCase):

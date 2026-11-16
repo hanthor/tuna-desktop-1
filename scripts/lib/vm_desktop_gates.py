@@ -95,16 +95,28 @@ def work_area(scene):
     return [output[0], output[1] + bar[3], output[2], output[3] - bar[3]]
 
 
-def cursor_shows(cursor, name, size=None):
-    """The compositor draws the client's requested named shape (cursor-shape-v1),
-    at the theme size `size` when given."""
+def cursor_shows(cursor, name):
+    """The compositor draws the client's requested named shape (cursor-shape-v1)."""
     if not isinstance(cursor, dict):
         return False
-    shown = cursor.get("kind") == "named" and cursor.get("name") == name and cursor.get("source") == "client"
-    if size is not None:
-        shown = (shown and cursor.get("size") == size and cursor.get("image") == [size, size]
-                 and cursor.get("logical") == [size, size])
-    return shown
+    return cursor.get("kind") == "named" and cursor.get("name") == name and cursor.get("source") == "client"
+
+
+def cursor_rescaled(before, after, name, size):
+    """`cursor-size` changed to `size` redraws the shape scaled by size/old,
+    as Mutter does. The drawn logical size need not equal the theme size: a
+    scalable (SVG) theme's canvas may be larger than its nominal size, as
+    Adwaita's text cursor is (a 32 px canvas at nominal 24), so compare the
+    drawn size with the one before the change (within a pixel of rounding)."""
+    if not (cursor_shows(before, name) and cursor_shows(after, name)) or after.get("size") != size:
+        return False
+    old, new = before.get("size"), after.get("logical")
+    was = before.get("logical")
+    if not (isinstance(old, int) and old > 0 and isinstance(was, list) and isinstance(new, list)
+            and len(was) == 2 and len(new) == 2):
+        return False
+    k = size / old
+    return all(abs(n - w * k) <= 1 for n, w in zip(new, was)) and new != was
 
 
 def ripple_problems(watch, pointer):
@@ -127,12 +139,24 @@ def ripple_problems(watch, pointer):
     return problems
 
 
+def minimize_ms(scene):
+    """GNOME's 400 ms minimize as the session runs it: St's adjustAnimationTime
+    multiplies it by GNOME_SHELL_SLOWDOWN_FACTOR, which the compositor reports
+    as `animation_slowdown` (TunaOS images set 0.8)."""
+    factor = scene.get("animation_slowdown")
+    if not isinstance(factor, (int, float)) or factor <= 0:
+        factor = 1.0
+    return round(MINIMIZE_MS * factor)
+
+
 def transition_problems(watch, window, effect):
     """GNOME's minimize (or its restore) for `window`, started by the lane's
     own input: history records it, at least two distinct in-flight frames were
-    observed, it ran the 400 ms duration, and it ended."""
+    observed, it ran the 400 ms duration scaled by the session's slow-down
+    factor, and it ended."""
     problems = []
     scene = watch.get("scene") or {}
+    expected = minimize_ms(scene)
     life = scene.get("window_lifecycle") or {}
     since = watch.get("baseline_at_ms")
     rows = [h for h in life.get("history") or [] if h.get("window") == window
@@ -142,15 +166,15 @@ def transition_problems(watch, window, effect):
     samples = watch.get("samples") or []
     if len(samples) < 2:
         problems.append(f"{len(samples)} in-flight {effect} frame(s) observed, not at least two")
-    if any(s.get("duration_ms") != MINIMIZE_MS for s in samples):
-        problems.append(f"{effect} durations {sorted({s.get('duration_ms') for s in samples})}, not {MINIMIZE_MS} ms")
+    if any(s.get("duration_ms") != expected for s in samples):
+        problems.append(f"{effect} durations {sorted({s.get('duration_ms') for s in samples})}, not {expected} ms")
     entry = "minimizing" if effect == "minimize" else "restoring"
     if any(run.get("window") == window for run in life.get(entry) or []):
         problems.append(f"the {effect} never finished")
     if effect == "minimize":
         completed = [h for h in rows if h.get("outcome") == "completed"]
-        if not completed or any(h.get("duration_ms") != MINIMIZE_MS for h in completed):
-            problems.append(f"no {MINIMIZE_MS} ms minimize completed: {rows}")
+        if not completed or any(h.get("duration_ms") != expected for h in completed):
+            problems.append(f"no {expected} ms minimize completed: {rows}")
         if window not in (scene.get("minimized") or []):
             problems.append("the window is not minimized afterwards")
         alphas = [s.get("alpha") for s in samples]
@@ -202,14 +226,27 @@ def tray_nodes(observed, name):
     return [n for n in observed.get("nodes") or [] if n.get("name") == name]
 
 
+def contains(outer, inner):
+    ox, oy, ow, oh = outer
+    ix, iy, iw, ih = inner
+    return ox <= ix and oy <= iy and ix + iw <= ox + ow and iy + ih <= oy + oh
+
+
 def tray_point(observed, scene):
     """The item's centre on screen: the top bar layer's origin plus the
-    button's window-relative AT-SPI extents (Wayland exposes no global ones)."""
-    items = [n for n in tray_nodes(observed, TRAY_TITLE) if n.get("showing")]
+    button's window-relative AT-SPI extents (Wayland exposes no global ones).
+    GTK's MenuButton exposes the item twice under one name (the outer
+    `button` and its inner `toggle button`); those nest and count as one
+    item, clicked at the innermost. Two items that don't nest are refused."""
+    items = [n for n in tray_nodes(observed, TRAY_TITLE)
+             if n.get("showing") and len(n.get("extents") or ()) == 4]
     bar = top_bar(scene, primary_output(scene))
-    if len(items) != 1 or bar is None:
+    if not items or bar is None:
         return None
-    x, y, w, h = items[0]["extents"]
+    inner = min(items, key=lambda n: n["extents"][2] * n["extents"][3])
+    if not all(contains(n["extents"], inner["extents"]) for n in items):
+        return None
+    x, y, w, h = inner["extents"]
     point = (bar[0] + x + w // 2, bar[1] + y + h // 2)
     return point if w > 0 and h > 0 and inside(point, bar) else None
 
@@ -335,12 +372,12 @@ class Gates:
         self.wait(lambda v: cursor_shows(v["scene"]["cursor"], "default"), 10,
                   "leaving the entry for another client never drew its default shape")
         self.move(*entry)
-        self.wait(lambda v: cursor_shows(v["scene"]["cursor"], "text"), 10,
-                  "returning to the entry never drew the text shape again")
+        before = self.wait(lambda v: cursor_shows(v["scene"]["cursor"], "text"), 10,
+                           "returning to the entry never drew the text shape again")["scene"]["cursor"]
         self.guest("gates-settings", "set", "48", "false")
-        sized = self.wait(lambda v: cursor_shows(v["scene"]["cursor"], "text", 48), 10,
-                          "cursor-size 48 did not redraw the text shape at 48 px")
-        self.save("cursor-48.json", sized["scene"]["cursor"])
+        sized = self.wait(lambda v: cursor_rescaled(before, v["scene"]["cursor"], "text", 48), 10,
+                          f"cursor-size 48 did not redraw the text shape scaled from {before.get('size')} px")
+        self.save("cursor-48.json", {"before": before, "after": sized["scene"]["cursor"]})
         self.guest("gates-settings", "set", original["cursor-size"], "true")
         located = self.wait(lambda v: ((v["scene"]["cursor"] or {}).get("locate_pointer") or {}).get("enabled") is True
                             and not v["scene"]["cursor"]["locate_pointer"].get("active"), 10,
