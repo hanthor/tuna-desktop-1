@@ -10,9 +10,11 @@ delivery tier (nested developer preview) is explicitly "not a secure
 daily-driver session" ([architecture](architecture.md#delivery-tiers)). The
 [ADR register](adr/README.md#decision-register) still lists the same-UID
 threat model, trusted lock/portal identity and the production lock/auth and
-portal/capture grant lifecycle as open 1.0 release blockers. Everything
-below describes what the code on `main` does today. Planned behaviour is
-labelled **target**.
+portal/capture grant lifecycle as 1.0 release blockers.
+[ADR 0010](adr/0010-same-uid-trusted-identity.md) and
+[ADR 0011](adr/0011-lock-auth-and-capture-grant-lifecycle.md) propose them;
+the owner has not decided. Everything below describes what the code on
+`main` does today. Planned behaviour is labelled **target**.
 
 ## What is protected
 
@@ -218,7 +220,10 @@ refuse locked frames. Full detail and the qualification evidence:
   listener 250 ms and is retried, instead of ending the event loop and the
   session (#1071, `security_listener.rs`;
   `crates/compositor/tests/security_context_accept.rs`).
-- Input-method v2 is open to any client, as on GNOME (`protocols.rs:165-166`).
+- Input-method v2 is visible and bindable only to the compositor's IBus
+  bridge, like the virtual keyboard (`protocols.rs`, `_input_method`).
+  Evidence: `crates/compositor/tests/input_protocols.rs`
+  (`ordinary_and_spoofed_clients_cannot_discover_or_force_bind_privileged_input_managers`).
 
 ### Session-bus interfaces
 
@@ -337,8 +342,12 @@ quality:
 - Requirements R6 (session/lock), R11 (extension boundary) and R14
   (capture/privileged surfaces) with their security cases
   ([requirements](requirements.md)).
-- The open ADR register rows for same-UID identity and the production
-  lock/auth and portal/capture lifecycle
+- The ADR register rows for same-UID identity and the production
+  lock/auth and portal/capture lifecycle, proposed in
+  [ADR 0010](adr/0010-same-uid-trusted-identity.md) and
+  [ADR 0011](adr/0011-lock-auth-and-capture-grant-lifecycle.md) (#1162) and
+  awaiting the owner's decision. Their residual risks, including the gaps
+  they record, are part of the gate 4 review
   ([ADR register](adr/README.md#decision-register)).
 
 The `portal-security` and `remote-security` CI lanes run the packaged
