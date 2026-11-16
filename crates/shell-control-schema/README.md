@@ -51,6 +51,11 @@ before decoding.
   lock). The shell answers `CommandKind::RespondCloseDialog { window,
   response }` with `CloseDialogResponse::ForceClose` or `Wait`. Texts are
   bounded by `MAX_TITLE_LEN`, sides by `MAX_CLOSE_DIALOG_SIDE`.
+- Shell bus identity (0.51): `CommandKind::DeclareBusName { unique_name }`
+  (peers >=51 only) names the shell's session-bus connection. The
+  compositor admits D-Bus capture and Introspect calls as the shell only
+  from names the supervised shell's pidfd-pinned control session declared,
+  and denies the command from any other session (ADR 0010).
 - Messages: `Message`, `StateOp`, `CommandKind`, `CommandStatus`,
   `ErrorKind`.
 - State types: `WindowInfo`, `WorkspaceInfo`, `OutputInfo`, `PreviewInfo`,

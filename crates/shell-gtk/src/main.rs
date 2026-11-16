@@ -2164,6 +2164,28 @@ fn build(app: &adw::Application) {
     }));
     render_pills(&mut shell.borrow_mut());
     orca::start(shell.clone());
+    // The compositor knows the shell on the session bus only by the unique
+    // name of GIO's shared session connection (the one every shell D-Bus
+    // call and the org.gnome.Shell name use), declared over the pinned
+    // control socket and again after every redial (ADR 0010).
+    {
+        let shell = shell.clone();
+        gio::bus_get(
+            gio::BusType::Session,
+            None::<&gio::Cancellable>,
+            move |conn| {
+                let Some(name) = conn.ok().and_then(|conn| conn.unique_name()) else {
+                    eprintln!("tuna-shell-gtk: no session bus name to declare");
+                    return;
+                };
+                if let Some(control) = shell.borrow_mut().control.as_mut() {
+                    if let Err(e) = control.declare_bus_name(name.to_string()) {
+                        eprintln!("tuna-shell-gtk: declaring the session bus name failed: {e}");
+                    }
+                }
+            },
+        );
+    }
 
     // The compositor toggles the overview on presses over the
     // Activities control (ACTIVITIES_WIDTH_PX); sending a toggle here
