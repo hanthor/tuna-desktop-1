@@ -919,7 +919,12 @@ fn switch_primary(state: &DisplayState, candidates: &[usize]) -> Option<usize> {
                 .find(|&i| state.monitors[i].spec.connector == *connector)
         });
     system
-        .or_else(|| candidates.iter().copied().find(|&i| state.monitors[i].builtin))
+        .or_else(|| {
+            candidates
+                .iter()
+                .copied()
+                .find(|&i| state.monitors[i].builtin)
+        })
         .or_else(|| {
             let area = |i: usize| {
                 let mode = &state.monitors[i].modes[state.monitors[i].preferred];
@@ -2092,7 +2097,11 @@ mod tests {
                     )
                 })
                 .collect(),
-            config.disabled.iter().map(|s| s.connector.clone()).collect(),
+            config
+                .disabled
+                .iter()
+                .map(|s| s.connector.clone())
+                .collect(),
         ))
     }
 
@@ -2127,7 +2136,11 @@ mod tests {
             Some((
                 vec![
                     ((0, 0), true, vec![shown("eDP-1", "1920x1080@60.000")]),
-                    ((1920, 0), false, vec![shown("HDMI-A-1", "2560x1440@60.000")]),
+                    (
+                        (1920, 0),
+                        false,
+                        vec![shown("HDMI-A-1", "2560x1440@60.000")]
+                    ),
                 ],
                 vec![]
             ))
@@ -2164,10 +2177,7 @@ mod tests {
         let mut off = state.clone();
         off.monitors[1].current = None;
         off.logical.truncate(1);
-        assert_eq!(
-            switched(&off, SwitchConfig::AllLinear).unwrap().0.len(),
-            2
-        );
+        assert_eq!(switched(&off, SwitchConfig::AllLinear).unwrap().0.len(), 2);
     }
 
     #[test]

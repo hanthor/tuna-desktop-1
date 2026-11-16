@@ -846,10 +846,22 @@ mod service_tests {
     #[test]
     fn power_mode_click_returns_to_the_last_non_balanced_profile() {
         // Balanced -> the key's value; any other profile -> balanced.
-        assert_eq!(power_mode_after_click("balanced", "performance"), "performance");
-        assert_eq!(power_mode_after_click("balanced", LAST_SELECTED_DEFAULT), "power-saver");
-        assert_eq!(power_mode_after_click("performance", "performance"), "balanced");
-        assert_eq!(power_mode_after_click("power-saver", "performance"), "balanced");
+        assert_eq!(
+            power_mode_after_click("balanced", "performance"),
+            "performance"
+        );
+        assert_eq!(
+            power_mode_after_click("balanced", LAST_SELECTED_DEFAULT),
+            "power-saver"
+        );
+        assert_eq!(
+            power_mode_after_click("performance", "performance"),
+            "balanced"
+        );
+        assert_eq!(
+            power_mode_after_click("power-saver", "performance"),
+            "balanced"
+        );
         // Only checked (non-balanced) profiles are remembered.
         assert_eq!(power_mode_remembered("performance"), Some("performance"));
         assert_eq!(power_mode_remembered("power-saver"), Some("power-saver"));

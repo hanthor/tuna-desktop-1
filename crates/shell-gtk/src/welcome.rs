@@ -61,7 +61,8 @@ fn version_number(part: &str) -> Option<f64> {
 /// on dotted parts; a missing part reads 0 and an unreadable one (NaN)
 /// compares equal to everything.
 pub fn version_compare(version1: &str, version2: &str) -> Ordering {
-    let (v1, v2): (Vec<&str>, Vec<&str>) = (version1.split('.').collect(), version2.split('.').collect());
+    let (v1, v2): (Vec<&str>, Vec<&str>) =
+        (version1.split('.').collect(), version2.split('.').collect());
     for i in 0..v1.len().max(v2.len()) {
         let a = version_number(v1.get(i).copied().unwrap_or("0"));
         let b = version_number(v2.get(i).copied().unwrap_or("0"));
@@ -162,7 +163,12 @@ pub fn handle_startup(
     // Open first, as GNOME does: the key is written whether or not the
     // dialog could open.
     if let Some(tour) = tour_entry() {
-        WelcomeDialog::open(app, &tour, &title(&os_name(&os_release(), shell_version)), hide_overview);
+        WelcomeDialog::open(
+            app,
+            &tour,
+            &title(&os_name(&os_release(), shell_version)),
+            hide_overview,
+        );
     }
     if let Err(error) = settings.set_string(KEY, shell_version) {
         eprintln!("tuna-shell-gtk: {KEY} not saved: {error}");
@@ -304,7 +310,10 @@ mod tests {
     fn os_name_follows_os_info() {
         let pretty = "NAME=\"Tuna\"\nVERSION=\"1\"\nPRETTY_NAME=\"Tuna OS Marlin\"\n";
         assert_eq!(os_name(pretty, "51.0"), "Tuna OS Marlin");
-        assert_eq!(os_name("NAME=Fedora\nVERSION=\"43 (Workstation)\"\n", "51.0"), "Fedora 43 (Workstation)");
+        assert_eq!(
+            os_name("NAME=Fedora\nVERSION=\"43 (Workstation)\"\n", "51.0"),
+            "Fedora 43 (Workstation)"
+        );
         assert_eq!(os_name("NAME='Arch Linux'\n", "51.0"), "Arch Linux");
         assert_eq!(os_name("", "51.1"), "GNOME 51");
         assert_eq!(title("Tuna OS Marlin"), "Welcome to Tuna OS Marlin");

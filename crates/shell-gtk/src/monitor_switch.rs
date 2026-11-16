@@ -276,7 +276,8 @@ impl MonitorSwitchPopup {
         let selected = initial_selection(monitors.current, shown.len());
         *self.items.borrow_mut() = shown;
         self.open.set(true);
-        self.mask.set(gtk::gdk::ModifierType::from_bits_truncate(mask));
+        self.mask
+            .set(gtk::gdk::ModifierType::from_bits_truncate(mask));
         self.select(selected);
         // Held for the keyboard but invisible for POPUP_DELAY, so a quick
         // tap never flashes it.
@@ -417,7 +418,8 @@ impl MonitorSwitchPopup {
         let group = gio::SimpleActionGroup::new();
         group.add_action(&finish);
         group.add_action(&modifiers);
-        self.window.insert_action_group("monitor-switch", Some(&group));
+        self.window
+            .insert_action_group("monitor-switch", Some(&group));
     }
 }
 
@@ -449,14 +451,26 @@ mod tests {
     fn the_choice_after_the_one_in_effect_starts_selected() {
         // `(get_switch_config() + 1) % items.length`, UNKNOWN being 4.
         assert_eq!(initial_selection(None, 4), 1);
-        assert_eq!(initial_selection(Some(MonitorSwitchConfig::AllMirror), 4), 1);
-        assert_eq!(initial_selection(Some(MonitorSwitchConfig::AllLinear), 4), 2);
+        assert_eq!(
+            initial_selection(Some(MonitorSwitchConfig::AllMirror), 4),
+            1
+        );
+        assert_eq!(
+            initial_selection(Some(MonitorSwitchConfig::AllLinear), 4),
+            2
+        );
         assert_eq!(initial_selection(Some(MonitorSwitchConfig::External), 4), 3);
         assert_eq!(initial_selection(Some(MonitorSwitchConfig::Builtin), 4), 0);
         // Without a panel the list is two long and wraps sooner.
         assert_eq!(initial_selection(None, 2), 1);
-        assert_eq!(initial_selection(Some(MonitorSwitchConfig::AllMirror), 2), 1);
-        assert_eq!(initial_selection(Some(MonitorSwitchConfig::AllLinear), 2), 0);
+        assert_eq!(
+            initial_selection(Some(MonitorSwitchConfig::AllMirror), 2),
+            1
+        );
+        assert_eq!(
+            initial_selection(Some(MonitorSwitchConfig::AllLinear), 2),
+            0
+        );
         assert_eq!(step(3, 4, false), 0);
         assert_eq!(step(0, 4, true), 3);
     }

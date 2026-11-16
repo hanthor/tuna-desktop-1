@@ -4263,23 +4263,25 @@ mod monitor_switch_wire_tests {
     fn monitor_switch_follows_the_close_dialog_and_roundtrips() {
         let tag = |bytes: &[u8]| bytes[0];
         let mut buffer = [0_u8; 64];
-        let hide = tag(postcard::to_slice(&Message::HideCloseDialog { window: 1 }, &mut buffer).unwrap());
+        let hide =
+            tag(postcard::to_slice(&Message::HideCloseDialog { window: 1 }, &mut buffer).unwrap());
         let state = Message::MonitorSwitch {
             can_switch: true,
             has_builtin: true,
             current: Some(MonitorSwitchConfig::External),
         };
-        assert_eq!(tag(postcard::to_slice(&state, &mut buffer).unwrap()), hide + 1);
-        let respond = tag(
-            postcard::to_slice(
-                &CommandKind::RespondCloseDialog {
-                    window: 1,
-                    response: CloseDialogResponse::Wait,
-                },
-                &mut buffer,
-            )
-            .unwrap(),
+        assert_eq!(
+            tag(postcard::to_slice(&state, &mut buffer).unwrap()),
+            hide + 1
         );
+        let respond = tag(postcard::to_slice(
+            &CommandKind::RespondCloseDialog {
+                window: 1,
+                response: CloseDialogResponse::Wait,
+            },
+            &mut buffer,
+        )
+        .unwrap());
         for config in [
             MonitorSwitchConfig::AllMirror,
             MonitorSwitchConfig::AllLinear,
@@ -4287,7 +4289,10 @@ mod monitor_switch_wire_tests {
             MonitorSwitchConfig::Builtin,
         ] {
             let kind = CommandKind::SwitchMonitor { config };
-            assert_eq!(tag(postcard::to_slice(&kind, &mut buffer).unwrap()), respond + 1);
+            assert_eq!(
+                tag(postcard::to_slice(&kind, &mut buffer).unwrap()),
+                respond + 1
+            );
             let command = Message::Command { id: 3, kind };
             assert_eq!(decode_frame(&encode_frame(&command)).unwrap(), command);
         }
