@@ -171,6 +171,7 @@ pub mod spring;
 pub mod state;
 mod state_snapshot;
 pub mod supervise;
+mod suspend;
 pub mod tablet;
 pub mod tablet_actions;
 pub(crate) mod tablet_settings;
@@ -1057,6 +1058,18 @@ impl State {
         }
         self.popup_refocus = true;
         true
+    }
+
+    /// The session locks: GNOME's lock closes every open menu with its
+    /// grab, so `popup_done` goes to each grabbed popup (a GTK popover
+    /// holding its toolkit grab would otherwise keep the lock screen's
+    /// keys in the same client). Nothing is handed the keyboard back:
+    /// it is the lock's until `unlock_input`. Returns whether a
+    /// grab was dismissed.
+    pub fn dismiss_popup_grab_for_lock(&mut self) -> bool {
+        let dismissed = self.dismiss_popup_grab();
+        self.popup_refocus = false;
+        dismissed
     }
 
     /// Take the "hand keyboard focus back" flag (see `popup_refocus`).

@@ -1902,6 +1902,9 @@ impl Runtime {
         // swipeTracker.js `_updateTouchpadGesture`/`_endTouchpadGesture`).
         self.interrupt_shell_swipe(crate::state::system_millis() as u32);
         self.control.set_overview(false);
+        // GNOME's lock closes the open menus and their grabs: a shell
+        // menu left open behind the lock kept the lock screen's keys.
+        self.state.dismiss_popup_grab_for_lock();
         // The shield covers GNOME's switcher popup and its window clones;
         // no window image may draw over the lock.
         self.switcher_thumbnails.clear();
@@ -2080,9 +2083,10 @@ impl Runtime {
         // The lock held the keyboard (`hold_lock_focus`): quarantine
         // lock-origin holds, then hand it back to the session's owner
         // without raising, as GNOME's unlock returns focus to the
-        // focused window: to a popup grab that outlived the lock first.
-        // A second `restore_keyboard_owner` here would raise that window
-        // and take the keyboard from a grabbing popup.
+        // focused window. The lock dismissed every popup grab
+        // (`dismiss_popup_grab_for_lock`), so only one taken while locked
+        // is returned to. A second `restore_keyboard_owner` here would
+        // raise that window and take the keyboard from a grabbing popup.
         self.manager.unlock_input(&mut self.state);
         self.overlay.hide();
     }
@@ -2923,7 +2927,8 @@ impl Runtime {
             .map(|(name, cost)| (name.clone(), cost.to_json()))
             .collect::<serde_json::Map<_, _>>()
             .into();
-        // Windows whose frame callbacks run at the hidden rate.
+        // Windows whose frame callbacks run at the hidden rate, or not at
+        // all once suspended.
         let clones_shown = self.overview_motion.progress() > 0.0
             || !self.switcher_thumbnails.is_empty()
             || !self.casts.is_empty();
@@ -2939,6 +2944,8 @@ impl Runtime {
             .map(|w| w.id)
             .filter(|id| !shown.contains(id))
             .collect::<Vec<_>>());
+        // Windows in Mutter's suspend state (xdg_toplevel `suspended`).
+        doc["suspended_windows"] = serde_json::json!(self.manager.suspended_windows());
         doc["wallpaper_diagnostics"] = if self.is_locked() {
             serde_json::Value::Null
         } else {
@@ -5099,6 +5106,8 @@ impl Runtime {
             self.state.protocols.idle_notifier.next_deadline(),
             self.orca.next_deadline(),
             self.manager.workspace_lease_deadline(),
+            // Mutter's 3 s from hidden to suspended (#503).
+            self.manager.suspend_deadline(),
             // The wallpaper is looked at again only as it is drawn: while
             // the display power-save mode is not on nothing is (#355), and
             // a past-due look-again would wake the loop every display frame
@@ -6348,6 +6357,12 @@ impl Runtime {
         // scene hides: their frame callbacks keep full rate then.
         let clones_shown =
             overview.is_some() || !self.switcher_thumbnails.is_empty() || !self.casts.is_empty();
+        // Mutter's suspend state (#503): a window this frame is about to
+        // show (a workspace slide or the overview starting, unminimized,
+        // unlocked) resumes before the frame draws it. Culling is the
+        // last frame's; the update after drawing catches what it changed.
+        let shown = shown_ids(&self.manager, &self.frame_costs, clones_shown, locked);
+        self.manager.update_suspended(&shown, Instant::now());
         // The pointer is the compositor's to draw (#342): hidden while
         // locked or blanked, as the software pointer always was.
         let cursor_shown = !locked && blank_alpha < 1.0;
@@ -6383,13 +6398,7 @@ impl Runtime {
         // Hidden windows' frame callbacks wait for the hidden beat; by
         // themselves they never make an unchanged output repaint. While
         // locked every window is hidden (#1122).
-        let throttled = throttled_surfaces(
-            &self.state,
-            &hidden_surfaces(
-                &self.manager,
-                &shown_ids(&self.manager, &self.frame_costs, clones_shown, locked),
-            ),
-        );
+        let throttled = throttled_surfaces(&self.state, &hidden_surfaces(&self.manager, &shown));
         // DisplayConfig PowerSaveMode (#355): the scene advanced above as
         // Mutter's stage does, but nothing is scanned out; frames complete
         // on the slow dummy page flip instead.
@@ -7123,7 +7132,9 @@ impl Runtime {
             }
         };
         let shown = shown_ids(&self.manager, &self.frame_costs, clones_shown, locked);
-        let throttled = throttled_surfaces(&self.state, &hidden_surfaces(&self.manager, &shown));
+        self.manager.update_suspended(&shown, Instant::now());
+        let hidden = hidden_surfaces(&self.manager, &shown);
+        let throttled = throttled_surfaces(&self.state, &hidden);
         if queued {
             // A pending page flip is not another rendered frame.
             // Granting callbacks on every client dispatch here would
@@ -7140,13 +7151,21 @@ impl Runtime {
     /// [`HIDDEN_FRAME_INTERVAL`](crate::occlusion::HIDDEN_FRAME_INTERVAL),
     /// without a scanout (#503). Mutter sends an obscured surface none;
     /// the slow beat keeps clients live that wait on a callback before
-    /// acting on anything.
+    /// acting on anything, until they are told they are suspended: like
+    /// Mutter's, those get none until they resume (a configure they still
+    /// have to acknowledge keeps them at full rate meanwhile).
     fn hidden_frame_beat(
         &mut self,
         throttled: &[smithay::reexports::wayland_server::protocol::wl_surface::WlSurface],
     ) {
         let now = Instant::now();
-        self.hidden_waiting = crate::frame_timing::pending_callbacks(throttled);
+        let suspended = self.manager.told_suspended_surfaces();
+        let throttled: Vec<_> = throttled
+            .iter()
+            .filter(|surface| !suspended.contains(surface))
+            .cloned()
+            .collect();
+        self.hidden_waiting = crate::frame_timing::pending_callbacks(&throttled);
         if !self.hidden_waiting
             || self.hidden_beat.is_some_and(|last| {
                 now.saturating_duration_since(last) < crate::occlusion::HIDDEN_FRAME_INTERVAL
@@ -7158,7 +7177,7 @@ impl Runtime {
             return;
         };
         let time = Duration::from(self.state.presentation_now());
-        for surface in throttled {
+        for surface in &throttled {
             send_frames_surface_tree(surface, &output, time, Some(Duration::ZERO), |_, _| {
                 Some(output.clone())
             });
