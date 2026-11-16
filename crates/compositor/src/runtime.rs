@@ -3108,6 +3108,14 @@ impl Runtime {
         doc["magnifier"] = self.magnifier.diagnostics();
         doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());
         doc["screen_reader_state"] = serde_json::json!(self.orca.state());
+        // The bell policy the session's settings set (GNOME's Visual
+        // Alerts and audible bell).
+        let bell = self.state.protocols.bell.policy();
+        doc["bell"] = serde_json::json!({
+            "visual": bell.visual,
+            "audible": bell.audible,
+            "frame_flash": bell.frame_flash,
+        });
         // Shell supervision (#203's crash-loop stress): the supervised
         // shell's PID, restarts spent from its budget, and whether the
         // compositor's recovery overlay is up.
