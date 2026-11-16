@@ -83,19 +83,21 @@ fn string_hint(hints: &HashMap<String, zbus::OwnedVariant>, key: &str) -> String
         .unwrap_or_default()
 }
 
-/// The sound a notification asks for: `sound-name` or `sound-file`,
-/// nothing when `suppress-sound` is set.
+/// The sound a notification asks for, as notificationDaemon.js 51 reads
+/// it (`new MessageTray.Sound(soundFile, hints['sound-name'])`):
+/// `sound-name` and `sound-file`, the name winning when both are set.
+/// GNOME reads no `suppress-sound`; it only plays what a sender names.
 fn sound_hints(hints: &HashMap<String, zbus::OwnedVariant>) -> Sound {
-    let suppressed = hint_value(hints, "suppress-sound")
-        .and_then(|v| bool::try_from(v).ok())
-        .unwrap_or(false);
-    if suppressed {
-        return Sound::default();
-    }
     Sound {
         name: string_hint(hints, "sound-name"),
         file: string_hint(hints, "sound-file"),
     }
+}
+
+/// `x-gnome-privacy-scope` is `system` (notificationDaemon.js: anything
+/// else, or nothing, is the user scope).
+fn system_scope_hint(hints: &HashMap<String, zbus::OwnedVariant>) -> bool {
+    string_hint(hints, "x-gnome-privacy-scope") == "system"
 }
 
 /// Run after a wire call changed the center (on a zbus thread).
@@ -149,6 +151,7 @@ impl Notifications {
             replaces_id: (replaces_id != 0).then_some(replaces_id as u64),
             desktop_entry: string_hint(&hints, "desktop-entry"),
             sound: sound_hints(&hints),
+            system_scope: system_scope_hint(&hints),
         };
         let center = self.center.clone();
         let file = move || {
@@ -177,9 +180,15 @@ impl Notifications {
         self.changed();
     }
 
-    /// Server capabilities: banner actions plus queue persistence.
+    /// Server capabilities: banner actions, queue persistence and, as
+    /// notificationDaemon.js 51 lists it, `sound` (banners play their
+    /// `sound-name` or `sound-file`).
     fn get_capabilities(&self) -> Vec<String> {
-        vec!["actions".to_owned(), "persistence".to_owned()]
+        vec![
+            "actions".to_owned(),
+            "persistence".to_owned(),
+            "sound".to_owned(),
+        ]
     }
 
     /// Mandatory in the notification spec; libnotify asks for it before
@@ -453,19 +462,32 @@ mod tests {
             ("urgency", Variant::U8(2)),
             ("desktop-entry", Variant::from("tuna-proof-notes")),
             ("sound-name", Variant::from("message-new-instant")),
+            ("sound-file", Variant::from("/usr/share/sounds/proof.oga")),
             ("suppress-sound", Variant::Bool(true)),
+            ("x-gnome-privacy-scope", Variant::from("system")),
         ]);
         assert_eq!(urgency_hint(&hints), Urgency::Critical);
         assert_eq!(string_hint(&hints, "desktop-entry"), "tuna-proof-notes");
-        // Suppressed wins over a named sound, as on the bus.
-        assert!(sound_hints(&hints).is_empty());
+        // GNOME 51 reads both sound hints and no suppress-sound.
+        let sound = sound_hints(&hints);
+        assert_eq!(
+            (sound.name.as_str(), sound.file.as_str()),
+            ("message-new-instant", "/usr/share/sounds/proof.oga")
+        );
+        assert!(system_scope_hint(&hints));
 
         let hints = wrapped_hints(&[("sound-name", Variant::from("message-new-instant"))]);
         assert_eq!(sound_hints(&hints).name, "message-new-instant");
+        assert!(sound_hints(&hints).file.is_empty());
 
-        let hints = wrapped_hints(&[("urgency", Variant::U8(0))]);
+        let hints = wrapped_hints(&[
+            ("urgency", Variant::U8(0)),
+            ("x-gnome-privacy-scope", Variant::from("user")),
+        ]);
         assert_eq!(urgency_hint(&hints), Urgency::Low);
         assert_eq!(string_hint(&hints, "desktop-entry"), "");
+        assert!(sound_hints(&hints).is_empty());
+        assert!(!system_scope_hint(&hints));
     }
 
     /// Live stubs over a private session bus: a stub client speaks
@@ -630,7 +652,14 @@ mod tests {
             let caps: Vec<String> =
                 zbus::block_on(proxy.call::<&str, _, Vec<String>>("GetCapabilities", &()))
                     .expect("stub GetCapabilities reaches the intake");
-            assert_eq!(caps, vec!["actions".to_owned(), "persistence".to_owned()]);
+            assert_eq!(
+                caps,
+                vec![
+                    "actions".to_owned(),
+                    "persistence".to_owned(),
+                    "sound".to_owned()
+                ]
+            );
 
             let info: (String, String, String, String) =
                 zbus::block_on(proxy.call("GetServerInformation", &()))
