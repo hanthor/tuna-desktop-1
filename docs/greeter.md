@@ -221,21 +221,126 @@ logind) → fade out → `StartSessionWhenReady(service, true)`.
   signals of a peer-to-peer channel), `conversation.rs` (GDM's UserVerifier
   as the machine's `Host`), `accounts.rs` (AccountsService list),
   `sessions.rs` (libgdm's session enumeration), `main.rs` (layer-shell
-  window, pages, Login Options).
+  window, pages, Login Options). The chrome around the prompt
+  (`chrome.rs`): `input.rs` (input settings and the keyboard indicator),
+  `quick.rs` and `power.rs` (quick settings, power menu, end-session
+  dialog), `branding.rs` (banner and logo), `a11y.rs` (accessibility menu
+  and its effects), `control.rs` (the compositor's control socket),
+  `i18n.rs` (gnome-shell's catalogs). `build.rs` bundles the icons the
+  greeter draws (the accessibility menu's, shared with the shell, and
+  gnome-control-center's `org.gnome.Settings-accessibility-symbolic`).
+- `crates/osk` (`tuna-osk`): GNOME's on-screen keyboard, shared with the
+  shell; the login screen uses its `PromptKeyboard`, which edits only the
+  prompt. `tuna_shell_control::gsettings` (feature `gio`) and
+  `tuna_magnifier::gsettings` (feature `gio`) read GNOME's input and
+  magnifier settings for both the shell and the greeter.
+
+## Services at the login screen
+
+GNOME 51's login screen is `gnome-shell --mode=gdm` on Mutter. In
+`--greeter` mode the compositor serves only what that has
+(`crates/compositor/src/login_services.rs`); a refused service gets no bus
+name and no object, and each refusal is logged once at startup
+(`G-GREETER-SERVICES`).
+
+| Service | Login screen | Why (GNOME 51 source) |
+|---|---|---|
+| `org.gnome.Mutter.DisplayConfig`, `IdleMonitor`, `ServiceChannel`, `ColorManager`, `org.freedesktop.a11y.Manager` (KeyboardMonitor) | served | Mutter 51.1 serves them in every mode |
+| `org.gnome.Shell.Introspect`, `org.gnome.Shell.Screenshot` | served | gnome-shell keeps them, restricted to allowed callers (the compositor has equivalent caller checks) |
+| `org.gnome.Mutter.ScreenCast`, `RemoteDesktop`, `InputCapture` | refused | gnome-shell inhibits remote access in a mode without `allowScreencast` (`main.js`); the `gdm` mode has none |
+| `org.gnome.SettingsDaemon.Color` | refused | GDM's login session starts no colour plugin |
+| `org.gnome.SessionManager` | refused | gnome-session (`--session gnome-login`) owns it |
+| `tuna-ibus-bridge` | not started | the login screen's sources are XKB layouts (deviation below) |
+
+What the greeter itself reads, on the system bus unless noted:
+
+| Service | For | GNOME 51 equivalent |
+|---|---|---|
+| GDM (`org.gnome.DisplayManager`), AccountsService | the user list and the conversations | `loginDialog.js`, libgdm |
+| logind `CanSuspend`/`CanReboot`/`CanPowerOff`, `Suspend`/`Reboot`/`PowerOff` | the power menu and end-session dialog | `systemActions.js` through gnome-session |
+| localed `X11Layout`/`X11Variant`/`X11Options` | the input sources | `keyboard.js` `InputSourceSystemSettings` |
+| UPower `DisplayDevice` | the battery | `status/system.js` `PowerToggle` |
+| NetworkManager | the network indicator and row | `status/network.js` |
+| the compositor's control socket (`TUNA_CONTROL_SOCKET`) | `SetScreenReader`, `SetInputSettings`, `SwitchInputSource` | Mutter in-process |
+| `$XDG_RUNTIME_DIR/tuna-magnifier.json` | Zoom | gnome-shell's magnifier in-process |
+
+## The login screen's chrome
+
+- **Panel** (`gdm` mode: `dwellClick`, `keyboard`, `quickSettings` at the
+  right, the clock in the middle). The keyboard indicator ("Keyboard")
+  shows the current source's short name, hides with fewer than two
+  sources and lists them by their xkeyboard-config names; choosing one
+  switches the compositor's layout. Quick settings ("System") show the
+  battery (percentage and `battery-level-N` icon, the panel's power icon
+  without a battery), the primary network connection, and the power
+  button ("Power Off Menu": Suspend, Restart…, Power Off…).
+  `disable-restart-buttons` hides all three, live, as `systemActions.js`
+  does at the login screen. Restart… and Power Off… open
+  `endSessionDialog.js`'s dialog: title, 60-second countdown (tens until
+  the last ten), Cancel and the action, also taken when the count ends.
+- **Accessibility menu** (the bottom-right group, after Login Options,
+  `loginDialog.js` `A11yMenuButton`): two columns of GNOME's toggles in its
+  order — High Contrast, Zoom, Large Text, Screen Reader, Screen Keyboard,
+  Visual Alerts, Sticky Keys, Slow Keys, Bounce Keys, Mouse Keys — bound to
+  their keys (the greeter user's, kept across boots by GDM). Their
+  effects: Screen Reader → the compositor's trusted Orca
+  (`SetScreenReader`); Zoom → the compositor's magnifier (the snapshot the
+  shell also publishes); Screen Keyboard → the prompt's keyboard over the
+  login screen; Large Text → `text-scaling-factor` 1.25 and the greeter's
+  `gtk-xft-dpi`; High Contrast → the greeter's high-contrast style; Visual
+  Alerts and the keyboard aids → the compositor (`SetInputSettings`).
+- **Banner and logo** follow `org.gnome.login-screen` live: the banner
+  shows `banner-message-text`, or with `banner-message-source` `file` the
+  contents of `banner-message-path` (re-read when it changes); the logo is
+  `logo` at its natural size at the bottom centre.
+- **Strings** are gnome-shell's msgids through gettext in gnome-shell's
+  own domain (`i18n.rs`), so GNOME's catalogs translate them; the catalog
+  dir is the first `XDG_DATA_DIRS` entry with a `gnome-shell.mo`.
+
+### Deviations from GDM 51's login screen
+
+- **Input sources:** GNOME's login screen uses localed's layouts only. The
+  greeter uses the greeter user's `org.gnome.desktop.input-sources
+  sources` when set and localed's otherwise, so a source chosen for the
+  login screen stays across boots (GDM keeps the greeter user's
+  settings). IBus engines are never used at the login screen (GNOME
+  starts ibus-daemon there, but no IBus source is ever active).
+- **Power:** GNOME asks gnome-session (`CanShutdown`, `Shutdown`, …), which
+  asks logind; the greeter asks logind directly, with interactive
+  authorization, as the login session has no inhibitors or other sessions
+  of its own to show. Power actions exist on hardware only
+  (`TUNA_SESSION_KIND=hardware`): a nested login screen's logind is the
+  host's.
+- **Quick settings:** the network row shows the primary connection only
+  (no device toggles, Wi-Fi list or VPN); no volume, brightness,
+  Bluetooth or dwell-click indicator yet.
+- **Large Text and High Contrast** restyle the login screen itself (its
+  own `gtk-xft-dpi` and high-contrast style); in GNOME, St and Mutter
+  follow the keys globally. The login screen has no other clients.
+- **Keyboard-toggled aids:** turning Sticky or Slow Keys on with the
+  keyboard switches them in the compositor, but the greeter does not show
+  GNOME's `kbdA11yDialog` or write the key back yet.
 
 ## Proof
 
 `scripts/tuna-greeter-proof` (gtk-shell CI job) runs the real
-`tuna-compositor --greeter` nested on Xvfb with the real `tuna-greeter`;
-GDM's daemon and AccountsService are `scripts/lib/tuna-gdm-mock.py` on a
-private system bus, serving the API above with GDM 51.1.1's signal order and
-failure text. Users are chosen and passwords typed with real X11 keys, and
-the result is read back through AT-SPI, the mock's call log and the
-compositor's state; `A-1-user-list.png` and `C-1-prompt.png` are the review
+`tuna-compositor --greeter --screen-reader` nested on Xvfb with the real
+`tuna-greeter`; GDM's daemon, AccountsService, logind's power calls,
+localed (`us,de`), UPower (a 57 % battery) and NetworkManager (wired) are
+`scripts/lib/tuna-gdm-mock.py` on a private system bus, serving the API
+above with GDM 51.1.1's signal order and failure text. GDM 51.1.1's own
+`org.gnome.login-screen` schema (`scripts/lib`, unmodified) is installed
+for the greeter and its keys are set with `gsettings`. Users are chosen and
+passwords typed with real X11 keys, and the result is read back through
+AT-SPI, the mock's call log, Orca's speech (speech-dispatcher's generic
+module writing `spoken.log`) and the compositor's state;
+`A-1-user-list.png`, `C-1-prompt.png` and `F-0-chrome.png` are the review
 shots against GNOME 51's login dialog. Gates: `G-GREETER-READY`,
-`-USER-LIST`, `-NO-SHELL`, `-NOT-LISTED`, `-GIVE-UP`, `-SESSION`,
-`-WRONG-PASSWORD`, `-PASSWORD`, `-START`, `-SUPERVISION`, `-HYGIENE`.
-Nested only: no real GDM, PAM, gnome-session or DRM.
+`-USER-LIST`, `-NO-SHELL`, `-SERVICES`, `-LOGO`, `-INPUT-SOURCE`,
+`-A11Y-MENU`, `-LARGE-TEXT`, `-ORCA`, `-OSK`, `-POWER`, `-NOT-LISTED`,
+`-GIVE-UP`, `-SESSION`, `-WRONG-PASSWORD`, `-PASSWORD`, `-START`,
+`-SUPERVISION`, `-HYGIENE`. Nested only: no real GDM, PAM, gnome-session
+or DRM.
 
 ## Security model
 
@@ -281,11 +386,14 @@ Nested only: no real GDM, PAM, gnome-session or DRM.
 | `StartSessionWhenReady` after `SessionOpened` | yes | yes | G-GREETER-START |
 | No overview, lock or panel layers; greeter supervised | yes (`gdm` mode) | yes | G-GREETER-NO-SHELL, G-GREETER-SUPERVISION |
 | Register session/display with GDM | yes | yes | G-GREETER-READY (mock GDM); V-GDM-LOGIN once packaged |
-| Banner, logo, `disable-user-list`, `disable-restart-buttons` | yes | read when the schema is installed | none yet |
+| Banner (text and file), logo, `disable-restart-buttons` | yes | yes, followed live | G-GREETER-LOGO, G-GREETER-POWER; cargo: `branding::tests::*` |
+| `disable-user-list` | yes | read at startup | — |
 | Wiggle, fades | yes | no | — |
 | Fingerprint (re-auth only in 51), smartcard, switchable auth, ChoiceList, CustomJSON web login | yes | no | #1164 |
-| Accessibility menu, Orca, OSK, input sources before login | yes | AT-SPI tree only | #1164 |
-| Quick settings (power, volume, network) | yes | power actions on hardware only | — |
+| Accessibility menu (bottom right, GNOME's ten toggles in order) and their effects: Orca, OSK, Zoom, Large Text, High Contrast, Visual Alerts, keyboard aids | yes | yes | G-GREETER-A11Y-MENU, G-GREETER-ORCA, G-GREETER-OSK, G-GREETER-LARGE-TEXT; cargo: `a11y::tests::*` |
+| Input sources before login (indicator, switching) | yes (localed) | yes (greeter user's sources, else localed's) | G-GREETER-INPUT-SOURCE; cargo: `input::tests::*` |
+| Quick settings: battery, network, Suspend/Restart…/Power Off…, end-session dialog | yes | yes (hardware only; primary connection only; no volume) | G-GREETER-POWER; cargo: `power::tests::*`, `quick::tests::*` |
+| Only the `gdm` mode's services | yes | yes | G-GREETER-SERVICES; cargo: `login_services::tests::*` |
 | Timed/auto login, conflicting session dialog, realmd hint | yes | no | — |
-| Translations | yes | no | — |
+| Translations (gnome-shell's catalogs and msgids) | yes | yes | cargo: `i18n::tests::*` (no translated proof run: the CI hosts have no `gnome-shell.mo`) |
 | Greeter on every variant, `org.gnome.Shell@gdm.service` gone | — | no packaging yet | V-GREETER-LIST, V-GDM-LOGIN, V-GDM-FALLBACK |

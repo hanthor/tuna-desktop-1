@@ -22,6 +22,19 @@ and AccountsService's (data/org.freedesktop.Accounts{,.User}.xml):
       Greeter: SelectSession(s), StartSessionWhenReady(s, b)
   /org/freedesktop/Accounts  ListCachedUsers() -> ao; users' properties
 
+The login screen's system services, as the greeter's chrome reads them:
+
+  org.freedesktop.login1 /org/freedesktop/login1 (Manager): CanSuspend,
+      CanReboot, CanPowerOff -> 'yes'; Suspend(b), Reboot(b), PowerOff(b)
+      recorded and otherwise ignored
+  org.freedesktop.locale1 /org/freedesktop/locale1: X11Layout, X11Variant,
+      X11Options, X11Model (--localed-layout, --localed-variant)
+  org.freedesktop.UPower .../devices/DisplayDevice: a discharging battery at
+      --battery percent (IsPresent, Percentage, State, IconName)
+  org.freedesktop.NetworkManager: connected (State 70, Connectivity 4) on
+      the wired connection "Wired connection 1" (PrimaryConnection,
+      PrimaryConnectionType; the active connection's Id and Type)
+
 The gdm-password conversation is pam_unix's through GDM's worker:
 BeginVerificationForUser emits ConversationStarted, completes, then
 DefaultLanguageNameChanged/DefaultSessionNameChanged (the user's saved
@@ -61,6 +74,18 @@ ACCOUNTS_NAME = "org.freedesktop.Accounts"
 ACCOUNTS_PATH = "/org/freedesktop/Accounts"
 ACCOUNTS_IFACE = "org.freedesktop.Accounts"
 USER_IFACE = "org.freedesktop.Accounts.User"
+LOGIND_NAME = "org.freedesktop.login1"
+LOGIND_PATH = "/org/freedesktop/login1"
+LOGIND_MANAGER = "org.freedesktop.login1.Manager"
+LOCALED_NAME = "org.freedesktop.locale1"
+LOCALED_PATH = "/org/freedesktop/locale1"
+UPOWER_NAME = "org.freedesktop.UPower"
+UPOWER_DEVICE_PATH = "/org/freedesktop/UPower/devices/DisplayDevice"
+UPOWER_DEVICE = "org.freedesktop.UPower.Device"
+NM_NAME = "org.freedesktop.NetworkManager"
+NM_PATH = "/org/freedesktop/NetworkManager"
+NM_ACTIVE_PATH = "/org/freedesktop/NetworkManager/ActiveConnection/1"
+NM_ACTIVE = "org.freedesktop.NetworkManager.Connection.Active"
 PAM_PROMPT = "Password: "
 # gdm-session-worker.c get_friendly_error_message for gdm-password.
 PASSWORD_FAILED = "Sorry, password authentication didn’t work. Please try again."
@@ -152,6 +177,49 @@ ACCOUNTS_XML = f"""
     <property name="Locked" type="b" access="read"/>
     <property name="XSession" type="s" access="read"/>
     <property name="Session" type="s" access="read"/>
+  </interface>
+</node>
+"""
+
+# The power half of logind's Manager (the greeter's quick settings).
+LOGIND_POWER_XML = f"""
+<node>
+  <interface name="{LOGIND_MANAGER}">
+    <method name="CanSuspend"><arg name="result" direction="out" type="s"/></method>
+    <method name="CanReboot"><arg name="result" direction="out" type="s"/></method>
+    <method name="CanPowerOff"><arg name="result" direction="out" type="s"/></method>
+    <method name="Suspend"><arg name="interactive" direction="in" type="b"/></method>
+    <method name="Reboot"><arg name="interactive" direction="in" type="b"/></method>
+    <method name="PowerOff"><arg name="interactive" direction="in" type="b"/></method>
+  </interface>
+</node>
+"""
+
+SYSTEM_XML = f"""
+<node>
+  <interface name="{LOCALED_NAME}">
+    <property name="X11Layout" type="s" access="read"/>
+    <property name="X11Variant" type="s" access="read"/>
+    <property name="X11Options" type="s" access="read"/>
+    <property name="X11Model" type="s" access="read"/>
+  </interface>
+  <interface name="{UPOWER_DEVICE}">
+    <property name="Type" type="u" access="read"/>
+    <property name="IsPresent" type="b" access="read"/>
+    <property name="Percentage" type="d" access="read"/>
+    <property name="State" type="u" access="read"/>
+    <property name="IconName" type="s" access="read"/>
+    <property name="ChargeThresholdEnabled" type="b" access="read"/>
+  </interface>
+  <interface name="{NM_NAME}">
+    <property name="State" type="u" access="read"/>
+    <property name="Connectivity" type="u" access="read"/>
+    <property name="PrimaryConnection" type="o" access="read"/>
+    <property name="PrimaryConnectionType" type="s" access="read"/>
+  </interface>
+  <interface name="{NM_ACTIVE}">
+    <property name="Id" type="s" access="read"/>
+    <property name="Type" type="s" access="read"/>
   </interface>
 </node>
 """
@@ -306,8 +374,74 @@ class Peer:
         self.conversations.clear()
 
 
+class LogindPower:
+    """logind's power actions: always available, recorded, never taken."""
+
+    AVAILABILITY = {"CanSuspend", "CanReboot", "CanPowerOff"}
+    ACTIONS = {"Suspend", "Reboot", "PowerOff"}
+
+    def __init__(self, mock):
+        self.mock = mock
+        self.node = Gio.DBusNodeInfo.new_for_xml(LOGIND_POWER_XML)
+
+    def handle(self, _iface, member, args):
+        if member in self.AVAILABILITY:
+            return GLib.Variant("(s)", ("yes",))
+        if member in self.ACTIONS:
+            return {"interactive": bool(args[0])}
+        raise Refused("org.freedesktop.DBus.Error.UnknownMethod", member)
+
+    def export(self, bus):
+        bus.register_object(
+            LOGIND_PATH, self.node.lookup_interface(LOGIND_MANAGER),
+            lambda _c, sender, _p, iface, member, params, inv:
+                self.mock.dispatch(sender, iface, member, params, inv, self.handle),
+            None, None)
+
+
+class SystemServices:
+    """localed, UPower's display device and NetworkManager, read-only."""
+
+    def __init__(self, layout, variant, battery):
+        self.node = Gio.DBusNodeInfo.new_for_xml(SYSTEM_XML)
+        self.values = {
+            LOCALED_NAME: {
+                "X11Layout": GLib.Variant("s", layout),
+                "X11Variant": GLib.Variant("s", variant),
+                "X11Options": GLib.Variant("s", ""),
+                "X11Model": GLib.Variant("s", "pc105"),
+            },
+            UPOWER_DEVICE: {
+                "Type": GLib.Variant("u", 2),  # battery
+                "IsPresent": GLib.Variant("b", True),
+                "Percentage": GLib.Variant("d", float(battery)),
+                "State": GLib.Variant("u", 2),  # discharging
+                "IconName": GLib.Variant("s", "battery-good-symbolic"),
+                "ChargeThresholdEnabled": GLib.Variant("b", False),
+            },
+            NM_NAME: {
+                "State": GLib.Variant("u", 70),  # CONNECTED_GLOBAL
+                "Connectivity": GLib.Variant("u", 4),  # FULL
+                "PrimaryConnection": GLib.Variant("o", NM_ACTIVE_PATH),
+                "PrimaryConnectionType": GLib.Variant("s", "802-3-ethernet"),
+            },
+            NM_ACTIVE: {
+                "Id": GLib.Variant("s", "Wired connection 1"),
+                "Type": GLib.Variant("s", "802-3-ethernet"),
+            },
+        }
+
+    def export(self, bus):
+        for path, iface in ((LOCALED_PATH, LOCALED_NAME), (UPOWER_DEVICE_PATH, UPOWER_DEVICE),
+                            (NM_PATH, NM_NAME), (NM_ACTIVE_PATH, NM_ACTIVE)):
+            bus.register_object(path, self.node.lookup_interface(iface), None,
+                                lambda _c, _s, _p, iface, prop: self.values[iface].get(prop),
+                                None)
+
+
 class Mock:
-    def __init__(self, bus, log, users, secrets, sessions, fallback, server_dir):
+    def __init__(self, bus, log, users, secrets, sessions, fallback, server_dir,
+                 localed=("us", ""), battery=57.0):
         self.bus = bus
         self.log = log
         self.users = users
@@ -315,6 +449,8 @@ class Mock:
         self.sessions = sessions
         self.fallback_session = fallback
         self.peers = []
+        self.localed = localed
+        self.battery = battery
         self.session_ids = 41
         self.manager_node = Gio.DBusNodeInfo.new_for_xml(MANAGER_XML)
         self.session_node = Gio.DBusNodeInfo.new_for_xml(SESSION_XML)
@@ -436,7 +572,9 @@ class Mock:
             self.bus.register_object(self.user_path(entry),
                                      self.accounts_node.lookup_interface(USER_IFACE),
                                      None, self.user_property, None)
-        for name in (GDM_NAME, ACCOUNTS_NAME):
+        LogindPower(self).export(self.bus)
+        SystemServices(*self.localed, self.battery).export(self.bus)
+        for name in (GDM_NAME, ACCOUNTS_NAME, LOGIND_NAME, LOCALED_NAME, UPOWER_NAME, NM_NAME):
             reply = self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus",
                                        "org.freedesktop.DBus", "RequestName",
                                        GLib.Variant("(su)", (name, 4)),  # DO_NOT_QUEUE
@@ -458,6 +596,12 @@ def main():
                         help="session ids GDM finds installed")
     parser.add_argument("--fallback-session", default="tuna",
                         help="GDM's FallbackSession (TunaOS sets tuna)")
+    parser.add_argument("--localed-layout", default="us",
+                        help="localed's X11Layout (the login screen's sources)")
+    parser.add_argument("--localed-variant", default="",
+                        help="localed's X11Variant")
+    parser.add_argument("--battery", type=float, default=57.0,
+                        help="the display device's charge, percent")
     args = parser.parse_args()
 
     with open(args.users, encoding="utf-8") as stream:
@@ -475,7 +619,8 @@ def main():
         None, None)
     log = Log(args.log)
     mock = Mock(conn, log, users, secrets, set(args.sessions.split(",")),
-                args.fallback_session, args.server_dir)
+                args.fallback_session, args.server_dir,
+                localed=(args.localed_layout, args.localed_variant), battery=args.battery)
     try:
         mock.export()
     except RuntimeError as error:
