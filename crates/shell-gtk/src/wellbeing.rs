@@ -34,6 +34,10 @@
 //! - Polling, not watches. GNOME uses idle watches and exact timers; the shell
 //!   drives [`ScreenTimeTracker::poll`] (every ~30 s) and [`BreakService::poll`]
 //!   (every ~2 s) from GLib timeouts, so edges fire within one poll period.
+//!   Clock steps are likewise found by polling rather than GNOME's kernel
+//!   time-change source: each poll compares a millisecond wall-minus-monotonic
+//!   offset and only a change of [`CLOCK_STEP_THRESHOLD_MS`] or more shifts
+//!   history, so ticks at different sub-second phases never do.
 //! - `format_time_span` uses integer floors for both the number and the plural
 //!   form. GNOME's float counts can render "1 minutes" for 90 s; that quirk is
 //!   not reproduced.
@@ -548,8 +552,39 @@ pub struct ScreenTimePoll {
 /// treated as suspend/inactive rather than an NTP-style clock step.
 pub const SUSPEND_GAP_SECONDS: i64 = 120;
 
-/// Screen-time recording and daily limits. Poll with wall time, monotonic time
-/// (seconds on any steady base) and whether the user is currently active.
+/// Smallest change of the wall-minus-monotonic offset treated as a clock
+/// step. GNOME only re-reads the offset when the kernel reports a
+/// discontinuous `CLOCK_REALTIME` change (`Shell.time_change_source_new`),
+/// so poll-to-poll jitter never reaches `_adjustAllTimes` there. This tracker
+/// polls, and `CLOCK_REALTIME` and `CLOCK_MONOTONIC` slew together, so a
+/// precise offset only moves on a step or suspend; jitter between the two
+/// back-to-back reads is microseconds. History stores whole seconds, so a
+/// shift below one second is not representable anyway.
+pub const CLOCK_STEP_THRESHOLD_MS: i64 = 1000;
+
+/// One back-to-back reading of the wall and monotonic clocks, in
+/// milliseconds (wall since the Unix epoch, monotonic on any steady base).
+/// Sub-second precision keeps `wall - mono` stable between polls that land at
+/// different points within a second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockSample {
+    pub wall_ms: i64,
+    pub mono_ms: i64,
+}
+
+impl ClockSample {
+    /// Wall time in whole Unix seconds, the history's resolution.
+    pub fn wall_secs(self) -> i64 {
+        self.wall_ms.div_euclid(1000)
+    }
+
+    fn offset_ms(self) -> i64 {
+        self.wall_ms - self.mono_ms
+    }
+}
+
+/// Screen-time recording and daily limits. Poll with a [`ClockSample`] and
+/// whether the user is currently active.
 /// Parental-controls session limits are out of scope (no malcontent
 /// integration); only the wellbeing daily limit is evaluated.
 #[derive(Debug)]
@@ -559,8 +594,9 @@ pub struct ScreenTimeTracker {
     user_state: UserState,
     state: TimeLimitsState,
     last_state_change: i64,
-    clock_offset: i64,
-    last_poll: Option<(i64, i64)>,
+    /// Wall-minus-monotonic offset (ms) the stored wall times agree with.
+    clock_offset_ms: i64,
+    last_poll: Option<ClockSample>,
     /// The resident limit notification, while it lives
     /// (`TimeLimitsNotificationSource._notification`).
     limit_notice: Option<LimitNotice>,
@@ -576,7 +612,7 @@ impl ScreenTimeTracker {
             user_state: UserState::Active,
             state: TimeLimitsState::Disabled,
             last_state_change: 0,
-            clock_offset: 0,
+            clock_offset_ms: 0,
             last_poll: None,
             limit_notice: None,
             grayscale_on: false,
@@ -641,7 +677,8 @@ impl ScreenTimeTracker {
 
     /// One poll step. `active` is the compositor-idle verdict (idle time below
     /// the session `idle-delay`).
-    pub fn poll(&mut self, now_wall: i64, now_mono: i64, active: bool) -> ScreenTimePoll {
+    pub fn poll(&mut self, now: ClockSample, active: bool) -> ScreenTimePoll {
+        let now_wall = now.wall_secs();
         let mut events = Vec::new();
         let mut loaded = None;
 
@@ -679,8 +716,8 @@ impl ScreenTimeTracker {
             if needs_startup_edge {
                 self.push_clamped(UserState::Inactive, UserState::Active, now_wall);
             }
-            self.clock_offset = now_wall - now_mono;
-            self.last_poll = Some((now_wall, now_mono));
+            self.clock_offset_ms = now.offset_ms();
+            self.last_poll = Some(now);
             events.push(ScreenTimeEvent::StateChanged(TimeLimitsState::Active));
             let stored = self.store.store(now_wall);
             self.update_limit_state(now_wall, &mut events);
@@ -694,28 +731,32 @@ impl ScreenTimeTracker {
 
         // Suspend gap vs. clock step, from the wall/monotonic comparison.
         let mut dirty = false;
-        if let Some((last_wall, last_mono)) = self.last_poll {
-            let wall_elapsed = now_wall - last_wall;
-            let mono_elapsed = now_mono - last_mono;
-            if wall_elapsed > 0 && wall_elapsed - mono_elapsed > SUSPEND_GAP_SECONDS {
+        if let Some(last) = self.last_poll {
+            let wall_elapsed_ms = now.wall_ms - last.wall_ms;
+            let mono_elapsed_ms = now.mono_ms - last.mono_ms;
+            if wall_elapsed_ms > 0 && wall_elapsed_ms - mono_elapsed_ms > SUSPEND_GAP_SECONDS * 1000
+            {
                 // Suspend (or hibernate): the gap counts as inactive,
                 // backdated to the last poll, as PreparingForSleep does.
                 if self.user_state == UserState::Active {
-                    self.push_clamped(UserState::Active, UserState::Inactive, last_wall);
+                    self.push_clamped(UserState::Active, UserState::Inactive, last.wall_secs());
                     self.user_state = UserState::Inactive;
                     dirty = true;
                 }
-                self.clock_offset = now_wall - now_mono;
+                self.clock_offset_ms = now.offset_ms();
             } else {
-                let offset = now_wall - now_mono;
-                if offset != self.clock_offset {
-                    self.adjust_all_times(offset - self.clock_offset);
-                    self.clock_offset = offset;
+                let delta_ms = now.offset_ms() - self.clock_offset_ms;
+                if delta_ms.abs() >= CLOCK_STEP_THRESHOLD_MS {
+                    // Round to the history's whole seconds; the sub-second
+                    // remainder stays pending in the baseline.
+                    let delta_secs = (delta_ms + 500).div_euclid(1000);
+                    self.adjust_all_times(delta_secs);
+                    self.clock_offset_ms += delta_secs * 1000;
                     dirty = true;
                 }
             }
         }
-        self.last_poll = Some((now_wall, now_mono));
+        self.last_poll = Some(now);
 
         let new_state = if active {
             UserState::Active
@@ -1833,7 +1874,8 @@ pub fn wall_now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Monotonic clock in seconds on a per-process base, for suspend detection.
+/// Monotonic clock on a per-process base, for suspend and clock-step
+/// detection.
 #[derive(Debug, Clone)]
 pub struct MonoClock {
     base: std::time::Instant,
@@ -1846,8 +1888,17 @@ impl MonoClock {
         }
     }
 
-    pub fn now(&self) -> i64 {
-        self.base.elapsed().as_secs() as i64
+    /// Read the wall and monotonic clocks back to back, at millisecond
+    /// precision, so their difference only moves on a clock step or suspend.
+    pub fn sample(&self) -> ClockSample {
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let mono = self.base.elapsed();
+        ClockSample {
+            wall_ms: i64::try_from(wall.as_millis()).unwrap_or(i64::MAX),
+            mono_ms: i64::try_from(mono.as_millis()).unwrap_or(i64::MAX),
+        }
     }
 }
 
@@ -2186,10 +2237,9 @@ fn screen_tick(rt: &Rc<RefCell<Runtime>>) {
     }
     let (hooks, mut effect, mut limit_notice, events) = {
         let mut r = rt.borrow_mut();
-        let now_wall = wall_now();
-        let mono_now = r.mono.now();
+        let now = r.mono.sample();
         let active = is_user_active(idle_time(), session_idle_delay());
-        let poll = r.tracker.poll(now_wall, mono_now, active);
+        let poll = r.tracker.poll(now, active);
         if let Err(e) = &poll.stored {
             eprintln!("tuna-shell-gtk: wellbeing: history store failed: {e}");
         }
@@ -2408,6 +2458,14 @@ mod tests {
         }
     }
 
+    /// A clock sample at whole wall and monotonic seconds.
+    fn at(wall: i64, mono: i64) -> ClockSample {
+        ClockSample {
+            wall_ms: wall * 1000,
+            mono_ms: mono * 1000,
+        }
+    }
+
     #[test]
     fn history_round_trip_matches_gnome_field_names() {
         let ts = vec![
@@ -2574,12 +2632,12 @@ mod tests {
     fn tracker_records_startup_idle_and_shutdown_edges() {
         let dir = tempfile::tempdir().unwrap();
         let mut tracker = tracker_in(dir.path());
-        let poll = tracker.poll(T0, 1000, true);
+        let poll = tracker.poll(at(T0, 1000), true);
         assert!(poll.stored.is_ok());
         assert_eq!(tracker.state(), TimeLimitsState::Active);
         // Idle edge then back to active.
-        tracker.poll(T0 + 30, 1030, false);
-        tracker.poll(T0 + 60, 1060, true);
+        tracker.poll(at(T0 + 30, 1030), false);
+        tracker.poll(at(T0 + 60, 1060), true);
         let ts = tracker.store().transitions().to_vec();
         assert_eq!(
             ts,
@@ -2601,13 +2659,13 @@ mod tests {
     fn disabling_history_deletes_the_file_and_stops_recording() {
         let dir = tempfile::tempdir().unwrap();
         let mut tracker = tracker_in(dir.path());
-        tracker.poll(T0, 1000, true);
+        tracker.poll(at(T0, 1000), true);
         assert!(dir.path().join("session-active-history.json").exists());
         tracker.set_settings(ScreenTimeSettings {
             history_enabled: false,
             ..Default::default()
         });
-        let poll = tracker.poll(T0 + 30, 1030, true);
+        let poll = tracker.poll(at(T0 + 30, 1030), true);
         assert!(poll.stored.is_ok());
         assert_eq!(tracker.state(), TimeLimitsState::Disabled);
         assert!(!dir.path().join("session-active-history.json").exists());
@@ -2621,9 +2679,9 @@ mod tests {
     fn suspend_gap_is_backdated_to_inactive() {
         let dir = tempfile::tempdir().unwrap();
         let mut tracker = tracker_in(dir.path());
-        tracker.poll(T0, 1000, true);
+        tracker.poll(at(T0, 1000), true);
         // Wall jumps 10 min with no monotonic advance: suspend.
-        tracker.poll(T0 + 600, 1030, true);
+        tracker.poll(at(T0 + 600, 1030), true);
         assert_eq!(tracker.user_state(), UserState::Active);
         // The suspend lands in the startup second, so the startup edge and
         // the backdated close cancel out; only the resume edge survives.
@@ -2637,14 +2695,128 @@ mod tests {
     fn small_clock_step_adjusts_stored_times() {
         let dir = tempfile::tempdir().unwrap();
         let mut tracker = tracker_in(dir.path());
-        tracker.poll(T0, 1000, true);
-        tracker.poll(T0 + 30, 1030, false);
+        tracker.poll(at(T0, 1000), true);
+        tracker.poll(at(T0 + 30, 1030), false);
         // Wall jumps 60 s with no monotonic advance: below the suspend
         // threshold, so every stored time shifts forward 60 s.
-        tracker.poll(T0 + 90, 1030, false);
+        tracker.poll(at(T0 + 90, 1030), false);
         let ts = tracker.store().transitions().to_vec();
         assert_eq!(ts[0].wall_time_secs, T0 + 60);
         assert_eq!(ts[1].wall_time_secs, T0 + 90);
+    }
+
+    #[test]
+    fn sub_second_poll_jitter_never_shifts_history() {
+        // The beta.3 upgrade regression: the monotonic base starts with the
+        // process, 850 ms into a wall second. The startup tick lands late in
+        // a wall second while scheduled ticks land 50 ms in, so floored
+        // whole-second readings disagreed on `wall - mono` by one and every
+        // stored entry moved by a second with no clock step at all.
+        let dir = tempfile::tempdir().unwrap();
+        let mut tracker = tracker_in(dir.path());
+        let sample = |mono_ms: i64| ClockSample {
+            wall_ms: T0 * 1000 + 850 + mono_ms,
+            mono_ms,
+        };
+        // Startup at wall .950, then a scheduled tick at wall .050.
+        tracker.poll(sample(100), true);
+        tracker.poll(sample(29_200), false);
+        let before = tracker.store().transitions().to_vec();
+        assert_eq!(
+            before,
+            vec![
+                tr(UserState::Inactive, UserState::Active, T0),
+                tr(UserState::Active, UserState::Inactive, T0 + 30),
+            ]
+        );
+        // Scheduled ticks at .050 and settings-triggered ticks at any phase.
+        for mono_ms in [59_200, 61_149, 62_150, 75_549, 89_200, 90_148, 119_200] {
+            tracker.poll(sample(mono_ms), false);
+            assert_eq!(
+                tracker.store().transitions(),
+                before.as_slice(),
+                "tick at mono {mono_ms} ms"
+            );
+        }
+    }
+
+    #[test]
+    fn real_clock_step_of_n_seconds_still_shifts_history() {
+        for step in [1_i64, -1, 2, 7, -45, 119] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut tracker = tracker_in(dir.path());
+            // Startup mid-second, as the beta.3 startup tick did.
+            tracker.poll(
+                ClockSample {
+                    wall_ms: T0 * 1000 + 950,
+                    mono_ms: 1_000_000,
+                },
+                true,
+            );
+            tracker.poll(
+                ClockSample {
+                    wall_ms: (T0 + 30) * 1000 + 50,
+                    mono_ms: 1_029_100,
+                },
+                false,
+            );
+            // Wall steps by `step` seconds between two scheduled ticks.
+            tracker.poll(
+                ClockSample {
+                    wall_ms: (T0 + 60 + step) * 1000 + 50,
+                    mono_ms: 1_059_100,
+                },
+                false,
+            );
+            assert_eq!(
+                tracker.store().transitions(),
+                &[
+                    tr(UserState::Inactive, UserState::Active, T0 + step),
+                    tr(UserState::Active, UserState::Inactive, T0 + 30 + step),
+                ],
+                "step {step}"
+            );
+            let on_disk = std::fs::read_to_string(dir.path().join("session-active-history.json"));
+            assert_eq!(
+                parse_history(&on_disk.unwrap()).unwrap(),
+                tracker.store().transitions(),
+                "step {step} is persisted"
+            );
+            // The baseline moved with the step: later ticks do not re-apply it.
+            tracker.poll(
+                ClockSample {
+                    wall_ms: (T0 + 90 + step) * 1000 + 50,
+                    mono_ms: 1_089_100,
+                },
+                false,
+            );
+            assert_eq!(tracker.store().transitions()[0].wall_time_secs, T0 + step);
+        }
+    }
+
+    #[test]
+    fn sub_threshold_steps_accumulate_into_one_whole_second_shift() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tracker = tracker_in(dir.path());
+        tracker.poll(at(T0, 1000), true);
+        // Two 600 ms steps: the first is below the threshold, the second
+        // brings the pending offset change to 1.2 s, applied as one second.
+        tracker.poll(
+            ClockSample {
+                wall_ms: (T0 + 30) * 1000 + 600,
+                mono_ms: 1_030_000,
+            },
+            true,
+        );
+        assert_eq!(tracker.store().transitions()[0].wall_time_secs, T0);
+        tracker.poll(
+            ClockSample {
+                wall_ms: (T0 + 61) * 1000 + 200,
+                mono_ms: 1_060_000,
+            },
+            true,
+        );
+        assert_eq!(tracker.store().transitions()[0].wall_time_secs, T0 + 1);
     }
 
     fn limit_tracker(dir: &std::path::Path, today: i64, limit: i64) -> ScreenTimeTracker {
@@ -2677,10 +2849,10 @@ mod tests {
         let (today, tomorrow) = start_of_today(T0);
         let mut tracker = limit_tracker(dir.path(), today, T0 - today + 900);
         // 15 min left: GNOME schedules the warning, it posts nothing yet.
-        assert!(!upcoming(&tracker.poll(T0, 1000, true).events));
-        assert!(!upcoming(&tracker.poll(T0 + 299, 1299, true).events));
+        assert!(!upcoming(&tracker.poll(at(T0, 1000), true).events));
+        assert!(!upcoming(&tracker.poll(at(T0 + 299, 1299), true).events));
         // Exactly 600 s left (`Math.ceil(remainingSecs) === timeoutLimit`).
-        let poll = tracker.poll(T0 + 300, 1300, true);
+        let poll = tracker.poll(at(T0 + 300, 1300), true);
         assert!(
             poll.events.contains(&ScreenTimeEvent::LimitUpcoming {
                 remaining_secs: LIMIT_UPCOMING_NOTIFICATION_SECONDS
@@ -2689,10 +2861,10 @@ mod tests {
             poll.events
         );
         // Any other remaining time posts nothing, re-polls included.
-        assert!(!upcoming(&tracker.poll(T0 + 300, 1300, true).events));
-        assert!(!upcoming(&tracker.poll(T0 + 301, 1301, true).events));
+        assert!(!upcoming(&tracker.poll(at(T0 + 300, 1300), true).events));
+        assert!(!upcoming(&tracker.poll(at(T0 + 301, 1301), true).events));
         assert_eq!(tracker.state(), TimeLimitsState::Active);
-        let poll = tracker.poll(T0 + 900, 1900, true);
+        let poll = tracker.poll(at(T0 + 900, 1900), true);
         assert!(poll.events.contains(&ScreenTimeEvent::LimitReached));
         assert!(poll
             .events
@@ -2700,11 +2872,11 @@ mod tests {
         assert!(!poll.events.contains(&ScreenTimeEvent::LimitNoticeCleared));
         assert_eq!(tracker.state(), TimeLimitsState::LimitReached);
         // Reaching the limit twice must not re-fire the one-shot notices.
-        let poll = tracker.poll(T0 + 950, 1950, true);
+        let poll = tracker.poll(at(T0 + 950, 1950), true);
         assert!(!poll.events.contains(&ScreenTimeEvent::LimitReached));
         // After 03:00 the next day the limit resets to Active and, with
         // over 10 min left again, GNOME destroys the notification.
-        let poll = tracker.poll(tomorrow + 10, 1950 + (tomorrow + 10 - (T0 + 950)), true);
+        let poll = tracker.poll(at(tomorrow + 10, 1950 + (tomorrow + 10 - (T0 + 950))), true);
         assert_eq!(tracker.state(), TimeLimitsState::Active);
         assert!(poll
             .events
@@ -2720,9 +2892,9 @@ mod tests {
         let (today, _) = start_of_today(T0);
         let mut tracker = limit_tracker(dir.path(), today, T0 - today + 120);
         for (wall, mono) in [(T0, 1000), (T0 + 60, 1060), (T0 + 119, 1119)] {
-            assert!(!upcoming(&tracker.poll(wall, mono, true).events));
+            assert!(!upcoming(&tracker.poll(at(wall, mono), true).events));
         }
-        let poll = tracker.poll(T0 + 120, 1120, true);
+        let poll = tracker.poll(at(T0 + 120, 1120), true);
         assert!(poll.events.contains(&ScreenTimeEvent::LimitReached));
         assert!(!upcoming(&poll.events));
     }
@@ -2732,29 +2904,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (today, _) = start_of_today(T0);
         let mut tracker = limit_tracker(dir.path(), today, T0 - today + 10);
-        tracker.poll(T0, 1000, true);
-        let poll = tracker.poll(T0 + 10, 1010, true);
+        tracker.poll(at(T0, 1000), true);
+        let poll = tracker.poll(at(T0 + 10, 1010), true);
         assert!(poll.events.contains(&ScreenTimeEvent::LimitReached));
         let mut settings = tracker.settings();
         settings.daily_limit_enabled = false;
         tracker.set_settings(settings);
-        let poll = tracker.poll(T0 + 11, 1011, true);
+        let poll = tracker.poll(at(T0 + 11, 1011), true);
         assert_eq!(tracker.state(), TimeLimitsState::Active);
         assert!(poll.events.contains(&ScreenTimeEvent::LimitNoticeCleared));
         // Removed once; nothing more to remove.
-        let poll = tracker.poll(T0 + 12, 1012, true);
+        let poll = tracker.poll(at(T0 + 12, 1012), true);
         assert!(!poll.events.contains(&ScreenTimeEvent::LimitNoticeCleared));
         // Disabling history destroys the source too.
         settings.daily_limit_enabled = true;
         tracker.set_settings(settings);
         assert!(tracker
-            .poll(T0 + 13, 1013, true)
+            .poll(at(T0 + 13, 1013), true)
             .events
             .contains(&ScreenTimeEvent::LimitReached));
         settings.history_enabled = false;
         tracker.set_settings(settings);
         assert!(tracker
-            .poll(T0 + 14, 1014, true)
+            .poll(at(T0 + 14, 1014), true)
             .events
             .contains(&ScreenTimeEvent::LimitNoticeCleared));
     }
@@ -2765,7 +2937,7 @@ mod tests {
         let path = dir.path().join("session-active-history.json");
         std::fs::write(&path, r#"[{"oldState":0}]"#).unwrap();
         let mut tracker = tracker_in(dir.path());
-        let poll = tracker.poll(T0, 1000, true);
+        let poll = tracker.poll(at(T0, 1000), true);
         assert!(matches!(poll.loaded, Some(Err(HistoryError::Corrupt(_)))));
         // The tracker starts clean (startup edge only); the store then
         // replaces the corrupt bytes atomically with valid history.
@@ -2986,7 +3158,7 @@ mod tests {
             },
             HistoryStore::new(dir.path().join("session-active-history.json")),
         );
-        tracker.poll(T0, 1000, true);
+        tracker.poll(at(T0, 1000), true);
         assert_eq!(tracker.daily_limit_time(T0), T0 + 60);
         assert_eq!(tracker.settings().daily_limit_secs, T0 - today + 60);
 
@@ -3013,7 +3185,9 @@ mod tests {
         assert!(history_path().ends_with("gnome-shell/session-active-history.json"));
         assert!(wall_now() > 1_700_000_000);
         let mono = MonoClock::start();
-        assert!(mono.now() >= 0);
+        let first = mono.sample();
+        assert!(first.wall_secs() > 1_700_000_000);
+        assert!(mono.sample().mono_ms >= first.mono_ms);
         // Bogus schemas never crash; wellbeing falls back to compiled defaults.
         assert!(!settings_schema_available("org.tuna.does.not.exist"));
         assert!(open_settings("org.tuna.does.not.exist").is_none());
@@ -3564,23 +3738,25 @@ mod tests {
     fn fresh_short_limit_gets_a_deadline_before_the_background_sample() {
         let dir = tempfile::tempdir().unwrap();
         let mut tracker = tracker_in(dir.path());
-        tracker.poll(T0, 1000, true);
+        tracker.poll(at(T0, 1000), true);
         tracker.set_settings(ScreenTimeSettings {
             daily_limit_enabled: true,
             daily_limit_secs: 10,
             grayscale: true,
             ..ScreenTimeSettings::default()
         });
-        tracker.poll(T0, 1000, true);
+        tracker.poll(at(T0, 1000), true);
         assert_eq!(tracker.next_check_delay(T0), Duration::from_secs(10));
-        let before = tracker.poll(T0 + 9, 1009, true);
+        let before = tracker.poll(at(T0 + 9, 1009), true);
         assert!(!before.events.contains(&ScreenTimeEvent::LimitReached));
         assert_eq!(tracker.next_check_delay(T0 + 9), Duration::from_secs(1));
-        let at = tracker.poll(T0 + 10, 1010, true);
-        assert!(at.events.contains(&ScreenTimeEvent::LimitReached));
-        assert!(at.events.contains(&ScreenTimeEvent::GrayscaleChanged(true)));
+        let reached = tracker.poll(at(T0 + 10, 1010), true);
+        assert!(reached.events.contains(&ScreenTimeEvent::LimitReached));
+        assert!(reached
+            .events
+            .contains(&ScreenTimeEvent::GrayscaleChanged(true)));
         assert!(!tracker
-            .poll(T0 + 11, 1011, true)
+            .poll(at(T0 + 11, 1011), true)
             .events
             .contains(&ScreenTimeEvent::LimitReached));
     }
@@ -3595,27 +3771,27 @@ mod tests {
             ..ScreenTimeSettings::default()
         };
         tracker.set_settings(settings);
-        tracker.poll(T0, 1000, true);
+        tracker.poll(at(T0, 1000), true);
         assert_eq!(tracker.next_check_delay(T0), Duration::from_secs(10));
         settings.daily_limit_secs = 300;
         tracker.set_settings(settings);
-        tracker.poll(T0, 1000, true);
+        tracker.poll(at(T0, 1000), true);
         assert_eq!(tracker.next_check_delay(T0), SCREEN_TIME_POLL);
         settings.daily_limit_secs = 3;
         tracker.set_settings(settings);
-        tracker.poll(T0, 1000, true);
+        tracker.poll(at(T0, 1000), true);
         assert_eq!(tracker.next_check_delay(T0), Duration::from_secs(3));
-        tracker.poll(T0 + 1, 1001, false);
+        tracker.poll(at(T0 + 1, 1001), false);
         assert_eq!(tracker.next_check_delay(T0 + 1), SCREEN_TIME_POLL);
-        tracker.poll(T0 + 20, 1020, true);
+        tracker.poll(at(T0 + 20, 1020), true);
         assert_eq!(tracker.next_check_delay(T0 + 20), Duration::from_secs(2));
         settings.daily_limit_enabled = false;
         tracker.set_settings(settings);
-        tracker.poll(T0 + 20, 1020, true);
+        tracker.poll(at(T0 + 20, 1020), true);
         assert_eq!(tracker.next_check_delay(T0 + 20), SCREEN_TIME_POLL);
         settings.history_enabled = false;
         tracker.set_settings(settings);
-        tracker.poll(T0 + 20, 1020, true);
+        tracker.poll(at(T0 + 20, 1020), true);
         assert_eq!(tracker.next_check_delay(T0 + 20), SCREEN_TIME_POLL);
     }
 
@@ -3628,20 +3804,20 @@ mod tests {
             daily_limit_secs: LIMIT_UPCOMING_NOTIFICATION_SECONDS + 5,
             ..ScreenTimeSettings::default()
         });
-        tracker.poll(T0, 1000, true);
+        tracker.poll(at(T0, 1000), true);
         assert_eq!(tracker.next_check_delay(T0), Duration::from_secs(5));
-        let warning = tracker.poll(T0 + 5, 1005, true);
+        let warning = tracker.poll(at(T0 + 5, 1005), true);
         assert!(warning.events.iter().any(|event| matches!(event,
             ScreenTimeEvent::LimitUpcoming { remaining_secs } if *remaining_secs == LIMIT_UPCOMING_NOTIFICATION_SECONDS)));
         assert_eq!(tracker.next_check_delay(T0 + 5), SCREEN_TIME_POLL);
         let (_, tomorrow) = start_of_today(T0);
-        tracker.poll(tomorrow - 2, 1000 + (tomorrow - 2 - T0), true);
+        tracker.poll(at(tomorrow - 2, 1000 + (tomorrow - 2 - T0)), true);
         assert_eq!(tracker.state(), TimeLimitsState::LimitReached);
         assert_eq!(
             tracker.next_check_delay(tomorrow - 2),
             Duration::from_secs(2)
         );
-        tracker.poll(tomorrow, 1000 + (tomorrow - T0), true);
+        tracker.poll(at(tomorrow, 1000 + (tomorrow - T0)), true);
         assert_eq!(tracker.state(), TimeLimitsState::Active);
         assert_eq!(tracker.next_check_delay(tomorrow), Duration::from_secs(5));
     }
@@ -3713,7 +3889,7 @@ mod tests {
             HistoryStore::new(dir.path().join("session-active-history.json")),
         );
         let mut effect = EffectState::default();
-        let poll = tracker.poll(T0, 1000, true);
+        let poll = tracker.poll(at(T0, 1000), true);
         assert!(poll.stored.is_ok());
         assert_eq!(tracker.state(), TimeLimitsState::Disabled);
         dispatch_screen_time(&hooks, &mut effect, &mut None, &poll.events);
