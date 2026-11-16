@@ -126,15 +126,27 @@ elif mode == "disconnect":
 else:
     call("org.freedesktop.portal.Session", "Close", None, session)
 revoked_at = time.monotonic()
+def capture_node_present():
+    """(present, evidence) for the granted node: pw-dump when installed, else `wpctl inspect` (Fedora ships pw-dump only in pipewire-utils)."""
+    if shutil.which("pw-dump"):
+        raw_dump = subprocess.check_output(["pw-dump", "--no-colors"], timeout=1)
+        out.with_suffix(".pw-dump.txt").write_bytes(raw_dump)
+        nodes = dump_module.dump_objects(raw_dump)
+        return any(item.get("id") == node and item.get("type") == "PipeWire:Interface:Node" for item in nodes), nodes
+    probe = subprocess.run(["wpctl", "inspect", str(node)], capture_output=True, text=True, timeout=1)
+    first = probe.stdout.splitlines()[0] if probe.stdout else ""
+    if probe.returncode == 0 and first.startswith("id %d, type PipeWire:Interface:Node" % node):
+        return True, {"method": "wpctl inspect", "node": node, "present": True, "output": first}
+    if probe.returncode != 0 and "not found" in probe.stderr:
+        return False, {"method": "wpctl inspect", "node": node, "present": False, "stderr": probe.stderr.strip()}
+    raise RuntimeError("wpctl inspect gave no verdict on node %d (exit %d): %s%s" % (node, probe.returncode, probe.stdout[:200], probe.stderr[:200]))
 deadline = time.monotonic() + 2
 while time.monotonic() < deadline:
-    raw_dump = subprocess.check_output(["pw-dump", "--no-colors"], timeout=1)
-    out.with_suffix(".pw-dump.txt").write_bytes(raw_dump)
-    nodes = dump_module.dump_objects(raw_dump)
+    present, evidence = capture_node_present()
     if time.monotonic() >= deadline:
         raise RuntimeError("PipeWire withdrawal exceeded two seconds")
-    if not any(item.get("id") == node and item.get("type") == "PipeWire:Interface:Node" for item in nodes):
-        out.with_suffix(".revoked.json").write_text(json.dumps(nodes, indent=2))
+    if not present:
+        out.with_suffix(".revoked.json").write_text(json.dumps(evidence, indent=2))
         print("grant consumed frame from node " + str(node) + "; " + ("lock" if mode == "revoke" else "backend disconnect" if mode == "backend-disconnect" else "client disconnect" if mode == "disconnect" else "Close") + " removed PipeWire node in " + str(round(time.monotonic() - revoked_at, 3)) + "s")
         break
     time.sleep(.05)
