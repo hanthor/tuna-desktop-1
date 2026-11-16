@@ -23,6 +23,8 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import os
+import shutil
 import re
 import secrets
 import shlex
@@ -108,6 +110,21 @@ def compare_frames(frame, other):
     red, green, blue = diff.split()
     changed = a.width * a.height - ImageChops.lighter(ImageChops.lighter(red, green), blue).histogram()[0]
     return {'identical': False, 'diff_bbox': box, 'diff_fraction': round(changed / (a.width * a.height), 5)}
+
+
+def bootc_plugin():
+    """The corral-bootc plugin `corral bootc create` runs, resolved as Corral
+    resolves it (CORRAL_PLUGIN_DIR, else the XDG plugin dir, else PATH). It,
+    not the corral binary, writes the disk and provisions the account."""
+    plugins = os.environ.get('CORRAL_PLUGIN_DIR') or str(
+        Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local' / 'share') / 'corral' / 'plugins')
+    path = Path(plugins) / 'corral-bootc'
+    if not os.access(path, os.X_OK):
+        found = shutil.which('corral-bootc')
+        path = Path(found) if found else None
+    if path is None:
+        return {'path': None}
+    return {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
 def qemu_version(identity, vm):
@@ -393,14 +410,15 @@ def provision(args, guest, receipt, identity):
                 '--context', identity.scope['corral_context_alias'],
                 '--user', USER, '--password-stdin', '--tag', 'purpose=tuna-corral-journey']
         argv += ['--node', args.node] if args.node else []
+        plugin = bootc_plugin()
         try:
             result = run(argv, timeout=3600, input=PASSWORD + '\n', check=False)
         except subprocess.TimeoutExpired as error:
-            receipt['provision'] = {'argv': argv, 'timeout': 3600,
+            receipt['provision'] = {'argv': argv, 'bootc_plugin': plugin, 'timeout': 3600,
                                     'stdout': error.stdout.decode() if isinstance(error.stdout, bytes) else error.stdout,
                                     'stderr': error.stderr.decode() if isinstance(error.stderr, bytes) else error.stderr}
             raise
-        receipt['provision'] = {'argv': argv, 'exit': result.returncode,
+        receipt['provision'] = {'argv': argv, 'bootc_plugin': plugin, 'exit': result.returncode,
                                 'stdout': result.stdout, 'stderr': result.stderr}
         # Resolve immediately after create, including failures which left a VM.
         # Never replace failed resolution with a bare-name selector.

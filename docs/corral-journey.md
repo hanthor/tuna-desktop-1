@@ -16,7 +16,10 @@ console frames for each step.
    `tuna-test` account (password `tuna`, the VM lane's public fixture
    account) in the installed system with `--user` and
    `--password-stdin`. The image itself is not changed. The run stops if
-   the booted image differs from the requested digest.
+   the booted image differs from the requested digest. The
+   `corral-bootc` plugin, not the `corral` binary, builds the disk, so
+   the receipt records its path and SHA-256 under
+   `provision.bootc_plugin` (`CORRAL_PLUGIN_DIR` selects another build).
 2. `corral wait` holds the run until the boot is complete, GDM is
    active, its greeter session is on seat0, and the screen is painted.
    `corral info --json` gives the VM facts for the manifest.
