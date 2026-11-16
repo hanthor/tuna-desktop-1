@@ -4208,9 +4208,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tuna-osk"
+version = "0.1.0"
+dependencies = [
+ "gio",
+ "glib",
+ "glib-build-tools",
+ "gtk4",
+ "roxmltree",
+ "serde_json",
+]
+
+[[package]]
 name = "tuna-shell-control"
 version = "0.1.0"
 dependencies = [
+ "gio",
  "postcard",
  "serde",
 ]
@@ -4239,6 +4252,7 @@ dependencies = [
  "tuna-auth-prompt",
  "tuna-backlight",
  "tuna-magnifier",
+ "tuna-osk",
  "tuna-shell-control",
  "tuna-shell-host",
  "unicode-segmentation",

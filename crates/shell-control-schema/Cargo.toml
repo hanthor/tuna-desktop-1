@@ -9,3 +9,9 @@ license.workspace = true
 [dependencies]
 postcard.workspace = true
 serde = { version = "1", features = ["derive"] }
+# GNOME's input settings read from GSettings (`gsettings`), for the
+# shell and the login screen.
+gio = { workspace = true, optional = true }
+
+[features]
+gio = ["dep:gio"]
