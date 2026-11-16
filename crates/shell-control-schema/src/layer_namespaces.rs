@@ -72,3 +72,6 @@ pub const CLOSE_DIALOG_NAMESPACE: &str = "tuna-close-dialog";
 /// GTK monitor-number label over each screen while Settings › Displays is
 /// open (gnome-shell's OsdMonitorLabeler); takes no input.
 pub const MONITOR_LABEL_NAMESPACE: &str = "tuna-monitor-label";
+/// GTK keyring prompt surface (gnome-shell's KeyringDialog: the system
+/// prompter's passwords and confirmations for gnome-keyring and gcr clients).
+pub const KEYRING_PROMPT_NAMESPACE: &str = "tuna-keyring-prompt";

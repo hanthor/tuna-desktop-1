@@ -266,6 +266,7 @@ Options a proof script reads from your environment:
 | `TUNA_VISUAL_BIN_DIR`, `TUNA_PARITY_BIN_DIR` | `scripts/tuna-visual-capture:632`, `scripts/tuna-parity-capture:159-162` | The same as `TUNA_PROOF_BIN_DIR`, for those two scripts. |
 | `TUNA_STUB_SERVICES` | `scripts/lib/tuna-service-stubs.py:38`, `:587` | Comma-separated system services to stub: `nm`, `bluez`, `ppd`, `logind`, `polkit`, `gdm`. |
 | `TUNA_POLKIT_TEST_PASSWORD` | `scripts/lib/tuna-polkit-helper-stub.py:8-18` | Password the stub polkit helper accepts (default `tuna-proof`). |
+| `TUNA_PROOF_DBUS_MONITOR` | `scripts/lib/tuna-keyring-prompter-probe.py` | The `dbus-monitor` program the keyring prompter proof's eavesdropper runs (default `dbus-monitor` from `PATH`). |
 | `TUNA_REQUIRE_IBUS`, `TUNA_REQUIRE_WAYLAND_INFO`, `TUNA_REQUIRE_GSD_MEDIA_KEYS` | `scripts/tuna-gtk-shell-proof` | `1` fails the matching stage when its tool is missing instead of skipping it. |
 | `TUNA_WALKTHROUGH_REPO_ROOT` | `scripts/tuna-walkthrough:393` | Repository the walkthrough freshness check reads. |
 | `TUNA_TRACE_WORK_DEADLINE` | `scripts/lib/perf_operation_budget.py:44-48` | Deadline handed from a performance script to its helpers. |

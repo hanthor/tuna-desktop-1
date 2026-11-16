@@ -127,6 +127,9 @@ mod introspect_forward;
 mod kbd_a11y;
 mod kbd_backlight;
 mod keybindings;
+mod keyring_dialog;
+mod keyring_exchange;
+mod keyring_prompter;
 mod live_apps;
 mod location;
 mod lock;
@@ -3098,6 +3101,9 @@ fn build(app: &adw::Application) {
     polkit::start(app.upcast_ref());
     // GNOME's NetworkManager secret agent (Wi-Fi passwords).
     network_agent::start(app.upcast_ref());
+    // GNOME's keyring system prompter (components/keyring.js): password
+    // prompts for gnome-keyring and gcr clients.
+    let keyring_prompter = keyring_prompter::start(app.upcast_ref());
     // GNOME's captive-portal sign-in through its portal helper (#1042).
     captive_portal::start(notify.clone());
     // GNOME's automount and autorun components (#361); off until the
@@ -4231,6 +4237,9 @@ fn build(app: &adw::Application) {
                 }
                 // Thunderbolt devices enrol only in an unlocked session.
                 thunderbolt.sync_lock(authoritative_lock);
+                // The keyring's prompts work only in an unlocked session
+                // (keyring.js `enable`/`disable` by session mode).
+                keyring_prompter.sync_lock(authoritative_lock);
                 screensaver.sync(locked);
                 // The session keyboard never shows over the lock screen.
                 osk.set_locked(locked);
