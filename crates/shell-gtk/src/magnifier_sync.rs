@@ -9,6 +9,7 @@
 //! `magnifier`, `magnifier-zoom-in` and `magnifier-zoom-out`) write the
 //! same keys through [`toggle`] and [`zoom`].
 
+use gio::prelude::*;
 use tuna_magnifier::gsettings::{has_key, APPLICATIONS_SCHEMA, MAGNIFIER_SCHEMA};
 
 /// Publish the magnifier snapshot now and on every key change, for the
