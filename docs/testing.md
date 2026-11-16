@@ -215,6 +215,15 @@ without the unrelated earlier gates. It adds no target motion or timing
 relaxation. CI runs this slice with its freshly built compositor and shell;
 the no-post-start-motion wire tests establish the precise protocol ordering.
 
+`scripts/tuna-gtk-shell-proof --datemenu-only --artifacts DIR` runs the date
+menu's gates alone, the same functions the full GTK proof calls
+(`scripts/lib/tuna-datemenu-proof.sh`): `G-CAL-OPEN`, `G-CAL-EVENTS`,
+`G-CAL-PREFS`, `G-CAL-LAUNCH`, `G-DATEMENU-WORLD-CLOCKS` and
+`G-DATEMENU-WEATHER`, then the calendar tree's accessibility golden and
+`G-SHELL-STABLE`. It takes about two minutes, one of them waiting for the
+wall clock's next minute to see the world clocks tick. The Weather card is
+fed from `TUNA_WEATHER_FIXTURE`, so the slice needs no network.
+
 `scripts/tuna-gtk-shell-proof --search-leak-only --artifacts DIR` runs
 G-SEARCH-LEAK (#1084): after five warm-up searches, 50 overview searches
 with results (`TUNA_SEARCH_LEAK_SEARCHES` sets the count), each typed with
@@ -794,6 +803,25 @@ The first rejected image pair is retained as `*-not-ready.{png,ppm}`; the
 receipt records capture attempts. Window identity/geometry drift, malformed
 images and QMP failures remain terminal. A retry never qualifies pixels from
 the rejected frame or claims presentation latency.
+
+The distribution matrix leg then boots the same disk once more with
+`scripts/tuna-vm-lane --app-integration` into
+`vm-lane-artifacts/app-integration/`. That boot gives virtio-vga a second,
+initially disconnected scanout (`max_outputs=2`) and exposes QEMU's D-Bus
+display (`-display dbus`) on a private bus, so the lane can plug, resize and
+unplug the second head with `org.qemu.Display1.Console.SetUIInfo`, which is
+real DRM connector hotplug in the guest. Guest fixtures
+(`packaging/marlin/vm-lane/tuna-vm-picker`, `tuna-vm-introspect-watch`,
+`tuna-vm-sandbox-client` packaged as the Flatpak `org.tuna.VmSandbox` in a
+local repository, and the root probe `tuna-vm-app-integration`, reached
+through `tuna-vm-lifecycle app-*`) only launch clients and read state; every
+click and key is QEMU input.
+
+| ID | What it asserts |
+|---|---|
+| `V-PICKER` | For an X11 (`GDK_BACKEND=x11`) and a native Wayland GTK 4 caller, each opening the installed GNOME FileChooser portal (Nautilus) through its own parent handle: the caller is allocated its requested 1100x700; for OpenFile and SaveFile, cancel (Escape) and accept (type-ahead and Enter), the dialog maps as the focused transient child of the caller, horizontally centred on it; a click on the exposed parent is blocked; the portal answers 1 with no URI or 0 with the chosen file (SaveFile's file is then written by the caller); focus returns to the caller and a real key and click reach it; an unrelated bystander app receives nothing |
+| `V-INTROSPECT-SCREEN` | A session-bus client subscribed to Introspect `PropertiesChanged` sees `ScreenSize` equal the union of Mutter `GetCurrentState` logical monitors initially (1280x800), after hotplugging a 1024x768 second head, after rotating it 90° through `ApplyMonitorsConfig`, and after unplugging it, with no notification that repeats an unchanged size |
+| `V-INTROSPECT-SANDBOX` | After installing the local Flatpak, xdg-desktop-portal-gnome's `Background.GetAppState` omits an unsandboxed client claiming the app ID `org.tuna.VmSandbox`, reports the Flatpak-sandboxed one as running or active, and drops it after it exits |
 
 The artifact (`marlin-vm`) holds `serial.log`, `tuna-lines.log` (every
 `tuna-*` line), the boot frames, `V-OVERVIEW.png` (the login overview),
