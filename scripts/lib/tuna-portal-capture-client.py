@@ -139,6 +139,9 @@ def capture_node_present():
         return True, {"method": "wpctl inspect", "node": node, "present": True, "output": first}
     if probe.returncode != 0 and "not found" in probe.stderr:
         return False, {"method": "wpctl inspect", "node": node, "present": False, "stderr": probe.stderr.strip()}
+    if probe.returncode == 0 and first.startswith("id %d, type PipeWire:Interface:" % node):
+        # PipeWire reuses the freed id (often for this very wpctl client): the granted Node is gone.
+        return False, {"method": "wpctl inspect", "node": node, "present": False, "reused_by": first}
     raise RuntimeError("wpctl inspect gave no verdict on node %d (exit %d): %s%s" % (node, probe.returncode, probe.stdout[:200], probe.stderr[:200]))
 deadline = time.monotonic() + 2
 while time.monotonic() < deadline:
