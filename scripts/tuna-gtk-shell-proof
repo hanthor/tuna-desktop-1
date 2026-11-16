@@ -132,6 +132,9 @@
 #   G-QS-PRINTERS-ABSENT with no print server the menu says so (no hang)
 #   G-QS-BLUETOOTH   the Bluetooth tile powers the BlueZ adapter off
 #   G-QS-POWER       the Power Mode tile switches to power saver
+#   G-QS-POWER-LAST  the tile toggles between balanced and the last selected
+#                    non-balanced profile (org.gnome.shell
+#                    last-selected-power-profile, #1197)
 #   G-QS-DARK        the Dark Style tile writes GNOME's color-scheme key
 #   G-QS-EXTERNAL-SYNC  Dark Style / Night Light follow keys written by gsettings
 #   G-QS-DIM-OPAQUE  an open toggle menu dims the grid; the panel stays opaque
@@ -1118,6 +1121,7 @@ if ! gsettings list-schemas 2>/dev/null | grep -qx org.gnome.shell; then
   <schema id="org.gnome.shell" path="/org/gnome/shell/">
     <key name="favorite-apps" type="as"><default>[]</default></key>
     <key name="app-picker-layout" type="aa{sv}"><default>[]</default></key>
+    <key name="last-selected-power-profile" type="s"><default>"power-saver"</default></key>
   </schema>
   <schema id="org.gnome.shell.keybindings" path="/org/gnome/shell/keybindings/">
     <key name="focus-active-notification" type="as"><default>['&lt;Super&gt;n']</default></key>
@@ -4731,6 +4735,47 @@ sysprop org.freedesktop.UPower.PowerProfiles /org/freedesktop/UPower/PowerProfil
     org.freedesktop.UPower.PowerProfiles ActiveProfile | grep -q power-saver ||
     fail G-QS-POWER "power-profiles-daemon did not switch to power-saver"
 pass G-QS-POWER "the Power Mode tile switches to power saver"
+
+# GNOME's Power Mode tile returns to the last non-balanced profile
+# (powerProfiles.js LAST_PROFILE_KEY), not always to power saver.
+power_active() {
+    sysprop org.freedesktop.UPower.PowerProfiles /org/freedesktop/UPower/PowerProfiles \
+        org.freedesktop.UPower.PowerProfiles ActiveProfile
+}
+power_wait() {
+    for _ in $(seq 1 30); do power_active | grep -q "'$1'" && return 0; sleep 0.2; done
+    return 1
+}
+power_wait power-saver || fail G-QS-POWER-LAST "the daemon is not on power-saver"
+[ "$(gsettings get org.gnome.shell last-selected-power-profile)" = "'power-saver'" ] ||
+    fail G-QS-POWER-LAST "an active non-balanced profile was not remembered"
+# A profile picked elsewhere (powerprofilesctl, the Settings app) is
+# remembered once the shell sees it.
+gdbus call --system --dest org.freedesktop.UPower.PowerProfiles \
+    --object-path /org/freedesktop/UPower/PowerProfiles \
+    --method org.freedesktop.DBus.Properties.Set org.freedesktop.UPower.PowerProfiles \
+    ActiveProfile "<'performance'>" >/dev/null 2>>"$ARTIFACTS/stubs.log" ||
+    fail G-QS-POWER-LAST "could not select performance"
+for _ in $(seq 1 30); do
+    [ "$(gsettings get org.gnome.shell last-selected-power-profile)" = "'performance'" ] && break
+    sleep 0.2
+done
+[ "$(gsettings get org.gnome.shell last-selected-power-profile)" = "'performance'" ] ||
+    fail G-QS-POWER-LAST "performance was not remembered"
+qs_press "Power Mode" power-last-off || fail G-QS-POWER-LAST "could not press Power Mode"
+power_wait balanced || fail G-QS-POWER-LAST "the tile did not return to balanced"
+[ "$(gsettings get org.gnome.shell last-selected-power-profile)" = "'performance'" ] ||
+    fail G-QS-POWER-LAST "balanced overwrote the remembered profile"
+qs_press "Power Mode" power-last-on || fail G-QS-POWER-LAST "could not press Power Mode again"
+power_wait performance || fail G-QS-POWER-LAST "the tile did not go back to performance, the last selected profile"
+# Leave the daemon on power saver, as G-QS-POWER did, for later gates.
+gdbus call --system --dest org.freedesktop.UPower.PowerProfiles \
+    --object-path /org/freedesktop/UPower/PowerProfiles \
+    --method org.freedesktop.DBus.Properties.Set org.freedesktop.UPower.PowerProfiles \
+    ActiveProfile "<'power-saver'>" >/dev/null 2>>"$ARTIFACTS/stubs.log" ||
+    fail G-QS-POWER-LAST "could not restore power-saver"
+power_wait power-saver || fail G-QS-POWER-LAST "the daemon did not return to power-saver"
+pass G-QS-POWER-LAST "the Power Mode tile toggles between balanced and org.gnome.shell last-selected-power-profile, which follows the active non-balanced profile"
 
 qs_press "Dark Style" dark || fail G-QS-DARK "could not press Dark Style"
 scheme="$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null)"
