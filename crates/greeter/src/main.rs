@@ -302,6 +302,7 @@ impl Greeter {
         let chrome = chrome::Chrome::new(&window, &overlay, column.upcast_ref(), &entry);
         panel.set_end_widget(Some(&chrome.panel_end()));
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        buttons.set_valign(gtk::Align::Center);
         buttons.append(&options);
         buttons.append(&chrome.a11y);
         let bottom = gtk::CenterBox::new();
