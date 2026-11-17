@@ -4130,7 +4130,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "tempfile",
- "tuna-shell-control",
+ "tuna-output",
 ]
 
 [[package]]
@@ -4160,6 +4160,7 @@ dependencies = [
  "smithay",
  "tempfile",
  "tuna-magnifier",
+ "tuna-output",
  "tuna-shell-control",
  "tuna-wallpaper",
  "udev",
@@ -4186,11 +4187,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tuna-output"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tuna-shell-control"
 version = "0.1.0"
 dependencies = [
  "postcard",
  "serde",
+ "tuna-output",
 ]
 
 [[package]]
@@ -4216,6 +4227,7 @@ dependencies = [
  "tempfile",
  "tuna-backlight",
  "tuna-magnifier",
+ "tuna-output",
  "tuna-shell-control",
  "tuna-shell-host",
  "unicode-segmentation",
@@ -4237,6 +4249,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tuna-compositor",
+ "tuna-output",
  "tuna-shell-control",
  "wayland-client",
  "wayland-protocols",
