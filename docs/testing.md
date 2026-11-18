@@ -215,6 +215,27 @@ without the unrelated earlier gates. It adds no target motion or timing
 relaxation. CI runs this slice with its freshly built compositor and shell;
 the no-post-start-motion wire tests establish the precise protocol ordering.
 
+`scripts/tuna-gtk-shell-proof --datemenu-only --artifacts DIR` runs the date
+menu's gates alone, the same functions the full GTK proof calls
+(`scripts/lib/tuna-datemenu-proof.sh`): `G-CAL-OPEN`, `G-CAL-EVENTS`,
+`G-CAL-PREFS`, `G-CAL-LAUNCH`, `G-DATEMENU-WORLD-CLOCKS` and
+`G-DATEMENU-WEATHER`, then the calendar tree's accessibility golden and
+`G-SHELL-STABLE`. It takes about two minutes, one of them waiting for the
+wall clock's next minute to see the world clocks tick. The Weather card is
+fed from `TUNA_WEATHER_FIXTURE`, so the slice needs no network.
+
+`scripts/tuna-gtk-shell-proof --search-leak-only --artifacts DIR` runs
+G-SEARCH-LEAK (#1084): after five warm-up searches, 50 overview searches
+with results (`TUNA_SEARCH_LEAK_SEARCHES` sets the count), each typed with
+real keys and closed with Escape, must leave the shell's
+`memfd:gdk-wayland` mappings and the shell's and compositor's open
+descriptors exactly where they were. `scripts/lib/tuna-resource-sample.py`
+reads them from `/proc` and leaves `search-leak-{before,after}.json` in the
+artifacts. The compositor side is `cargo test -p tuna-compositor --test
+buffer_release`: an uploaded `wl_shm` buffer comes back with
+`wl_buffer.release` at once, as Mutter's do, and its pool closes once the
+client destroys it and the surface moves on to another buffer.
+
 Every build uses its own checkout's `target/` (an inherited
 `CARGO_TARGET_DIR` is ignored; set `TUNA_TARGET_DIR` to choose one) and no
 incremental state, with half the host's CPUs as jobs. Builds from every
@@ -529,6 +550,28 @@ rm -rf gtk-shell-artifacts
 TUNA_REQUIRE_PAM_WRAPPER=1 scripts/tuna-gtk-shell-proof --artifacts gtk-shell-artifacts
 ```
 
+`--notify-lock-only` stops after panel readiness and runs just the
+lock-screen notification, notification sound and disabled-app restore
+gates (G-NOTIFY-LOCK, G-NOTIFY-LOCK-PIXELS, G-NOTIFY-LOCK-LIVE,
+G-NOTIFY-SOUND, G-NOTIFY-RESTORE); it needs pam_wrapper to unlock. The
+proof's `canberra-gtk-play` stand-in records every event sound the shell
+asks for in `canberra-calls`.
+The restore gate opens the real message-tray binding after retaining the
+long-word redaction-test notifications in history. Card text must wrap at
+character boundaries when needed, and collapsed groups must measure only
+their visible page horizontally, so hidden expanded content cannot force
+the date popup wider than the nested output.
+
+The full GTK proof's media callback barrier waits at most 25 seconds:
+one key can execute four serialized `wpctl` subprocesses with five-second
+production timeouts, plus callback dispatch. It still requires accepted
+tokens to finish successfully and the actual scheduler to be idle; a
+fixture volume write alone never proves completion.
+The power-save proof admits both dim and undim after live idle-brightness
+writes finish: only the explicit pending-transaction reply waits, for at
+most ten seconds. Other errors still fail immediately, and exact backlight
+readbacks remain required before blanking and fixture teardown.
+
 `scripts/tuna-drm-smoke` loads a kernel module and starts seatd as root.
 Run it in a VM or a disposable machine rather than your desktop session.
 The Ubuntu setup helper first checks whether vkms is already installed for
@@ -731,6 +774,25 @@ receipt records capture attempts. Window identity/geometry drift, malformed
 images and QMP failures remain terminal. A retry never qualifies pixels from
 the rejected frame or claims presentation latency.
 
+The distribution matrix leg then boots the same disk once more with
+`scripts/tuna-vm-lane --app-integration` into
+`vm-lane-artifacts/app-integration/`. That boot gives virtio-vga a second,
+initially disconnected scanout (`max_outputs=2`) and exposes QEMU's D-Bus
+display (`-display dbus`) on a private bus, so the lane can plug, resize and
+unplug the second head with `org.qemu.Display1.Console.SetUIInfo`, which is
+real DRM connector hotplug in the guest. Guest fixtures
+(`packaging/marlin/vm-lane/tuna-vm-picker`, `tuna-vm-introspect-watch`,
+`tuna-vm-sandbox-client` packaged as the Flatpak `org.tuna.VmSandbox` in a
+local repository, and the root probe `tuna-vm-app-integration`, reached
+through `tuna-vm-lifecycle app-*`) only launch clients and read state; every
+click and key is QEMU input.
+
+| ID | What it asserts |
+|---|---|
+| `V-PICKER` | For an X11 (`GDK_BACKEND=x11`) and a native Wayland GTK 4 caller, each opening the installed GNOME FileChooser portal (Nautilus) through its own parent handle: the caller is allocated its requested 1100x700; for OpenFile and SaveFile, cancel (Escape) and accept (type-ahead and Enter), the dialog maps as the focused transient child of the caller, horizontally centred on it; a click on the exposed parent is blocked; the portal answers 1 with no URI or 0 with the chosen file (SaveFile's file is then written by the caller); focus returns to the caller and a real key and click reach it; an unrelated bystander app receives nothing |
+| `V-INTROSPECT-SCREEN` | A session-bus client subscribed to Introspect `PropertiesChanged` sees `ScreenSize` equal the union of Mutter `GetCurrentState` logical monitors initially (1280x800), after hotplugging a 1024x768 second head, after rotating it 90° through `ApplyMonitorsConfig`, and after unplugging it, with no notification that repeats an unchanged size |
+| `V-INTROSPECT-SANDBOX` | After installing the local Flatpak, xdg-desktop-portal-gnome's `Background.GetAppState` omits an unsandboxed client claiming the app ID `org.tuna.VmSandbox`, reports the Flatpak-sandboxed one as running or active, and drops it after it exits |
+
 The artifact (`marlin-vm`) holds `serial.log`, `tuna-lines.log` (every
 `tuna-*` line), the boot frames, `V-OVERVIEW.png` (the login overview),
 `V-SESSION.png` (the desktop), and `manifest.json`.
@@ -903,7 +965,10 @@ behind opaque surfaces (`culled_windows`). Both cover the whole output, so
 a frame that repaints only the panel or the cursor still lists the windows
 it leaves on screen as drawn. `throttled_windows` lists the windows
 whose frame callbacks run at the hidden rate (about 1 Hz): off the scene
-or wholly culled, unless the overview, the switcher or a cast shows them.
+or wholly culled, unless the overview, the switcher or a cast shows them;
+every window while locked. After 3 s hidden a window is suspended
+(`suspended_windows`, the xdg_toplevel `suspended` state) and a client
+told so gets no frame callbacks until it shows again.
 Proof `G-OCCLUSION-CULL` fullscreens an opaque window over another and
 requires the lower one to be culled and throttled, then drawn at full
 rate again once the upper window's translucent shadow returns.

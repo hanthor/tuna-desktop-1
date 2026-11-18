@@ -122,26 +122,139 @@ struct CardCache {
     margin: i32,
 }
 
+impl CardCache {
+    fn new(key: CardKey, card: &tuna_wallpaper::Card) -> Self {
+        // What the card names opaque (#503): the backdrop is not painted
+        // under it, and drawn pixel for pixel it is drawn without blending.
+        let opaque = card
+            .opaque
+            .iter()
+            .map(|&[x, y, w, h]| {
+                Rectangle::new((x as i32, y as i32).into(), (w as i32, h as i32).into())
+            })
+            .collect();
+        Self {
+            key,
+            buffer: MemoryRenderBuffer::from_slice(
+                &card.pixels,
+                Fourcc::Argb8888,
+                (card.width as i32, card.height as i32),
+                1,
+                Transform::Normal,
+                Some(opaque),
+            ),
+            margin: card.margin as i32,
+        }
+    }
+
+    /// The size of the content this card was rendered with.
+    fn rendered(&self) -> Size<i32, Physical> {
+        (self.key.2, self.key.3).into()
+    }
+
+    /// The card drawn with its content over `card`.
+    fn element(
+        &self,
+        renderer: &mut GlesRenderer,
+        card: Rectangle<i32, Physical>,
+        alpha: f32,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let rendered = self.rendered();
+        let (location, size) = card_placement(card, rendered, self.margin);
+        // Left to itself Smithay takes a source rectangle of the drawn
+        // size from the buffer's top-left corner: a transition frame
+        // would show the settled picture unscaled, cropped or clamped at
+        // its edge (#1106). The whole buffer is scaled into the card, as
+        // GNOME allocates the workspace background to the workspace.
+        let whole = Rectangle::from_size(
+            (
+                f64::from(rendered.w + 2 * self.margin),
+                f64::from(rendered.h + 2 * self.margin),
+            )
+                .into(),
+        );
+        MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            location,
+            &self.buffer,
+            Some(alpha),
+            Some(whole),
+            size,
+            Kind::Unspecified,
+        )
+        .ok()
+    }
+}
+
+/// The render a transition frame scales to its card, as its place in
+/// `cards`: the largest one cached of the picture `key` shows. A card
+/// shrinking to a small settled size (the app grid's) is then scaled
+/// down from the size it left, not blown up from the one it is heading
+/// for.
+fn largest_render(cards: &[CardCache], key: &CardKey) -> Option<usize> {
+    let (uri, output, _, _, top, color) = key;
+    cards
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            c.key.0 == *uri && c.key.1 == *output && c.key.4 == *top && c.key.5 == *color
+        })
+        .max_by_key(|(_, c)| (i64::from(c.key.2) * i64::from(c.key.3), c.key.2))
+        .map(|(index, _)| index)
+}
+
+/// Marks the render at `index` drawn or asked for now, by moving it to
+/// the back; returns its new place. The cache gives up the render at its
+/// front, the one unused longest, so which renders it holds follows from
+/// what was drawn and not from the order the workers happened to finish
+/// in: a transition frame scales the largest of them, and at a
+/// fractional scale one layout alone has more sizes than the cache.
+fn touch(cards: &mut Vec<CardCache>, index: usize) -> usize {
+    let card = cards.remove(index);
+    cards.push(card);
+    cards.len() - 1
+}
+
+/// Adds a finished render; full, the cache gives up the one unused
+/// longest ([`touch`]).
+fn cache_card(cards: &mut Vec<CardCache>, card: CardCache) {
+    if cards.len() >= MAX_CARDS {
+        cards.remove(0);
+    }
+    cards.push(card);
+}
+
 /// Most overview cards cached at once (active and neighbor sizes).
 const MAX_CARDS: usize = 4;
 
-/// Session wallpaper: polls the drop file, decodes on change. One
-/// cache slot per output size (multi-monitor): each output's
+/// The drop file as the compositor last read it.
+#[derive(Debug, Default)]
+enum DropFile {
+    /// Nobody reports its changes: it is read at every refresh.
+    #[default]
+    Unwatched,
+    /// Its directory is watched and it changed since it was last read.
+    Stale,
+    /// Its text since it last changed (`None`: absent or unreadable).
+    Read(Option<String>),
+}
+
+/// Session wallpaper: reads the drop file when it changes, decodes on
+/// change. One cache slot per output size (multi-monitor): each output's
 /// cover-crop is decoded once and reused while its size and the URI
 /// hold. Slots are area-capped individually and count-capped
 /// together, so extra outputs cannot grow memory without bound.
 #[derive(Debug, Default)]
 pub struct Wallpaper {
     wake: crate::wake::Wake,
+    /// The drop file's text, kept between its changes (#503).
+    drop_file: DropFile,
     current_uris: Vec<String>,
     loaded: Vec<Loaded>,
     /// Journey-only observation of the last attempted refresh, not a paint claim.
     refresh_stage: Option<&'static str>,
     identities: Vec<IdentitySnapshot>,
-    identity_pending: Vec<(
-        String,
-        std::sync::mpsc::Receiver<std::sync::Arc<SourceObservation>>,
-    )>,
+    identity_pending: Vec<(String, std::sync::mpsc::Receiver<Observed>)>,
     animation_samples: Vec<AnimationSample>,
     paint_state: Option<serde_json::Value>,
     image_cache: std::sync::Arc<BackgroundCaches>,
@@ -295,6 +408,23 @@ struct Pending {
     result: std::sync::mpsc::Receiver<Option<Vec<u8>>>,
 }
 
+/// The whole buffer when no pixel of `pixels` (`Argb8888`, alpha in each
+/// fourth byte) lets anything through, as every picture GNOME composes
+/// over its background colour is (#503): drawing culls what lies beneath
+/// it, and on a target without a transform draws it without blending,
+/// as Mutter's background actor is drawn.
+fn opaque_region(
+    pixels: &[u8],
+    size: (i32, i32),
+) -> Option<Vec<Rectangle<i32, smithay::utils::Buffer>>> {
+    pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .all(|pixel| pixel[3] == u8::MAX)
+        .then(|| vec![Rectangle::from_size(size.into())])
+}
+
 /// Most cached sizes at once; each slot holds at most
 /// `MAX_WALLPAPER_AREA` pixels, so the cache stays bounded while
 /// covering the common multi-output case.
@@ -305,6 +435,257 @@ struct IdentitySnapshot {
     uri: String,
     value: std::sync::Arc<SourceObservation>,
     observed: std::time::Instant,
+    /// What reports a change to what `value` read (`None`: nothing could
+    /// be watched).
+    watch: Option<SourceWatch>,
+}
+
+impl IdentitySnapshot {
+    /// Observed again on a timer ([`SAFETY_RECHECK`]): a slideshow, or a
+    /// source no complete watch vouches for.
+    fn timed(&self) -> bool {
+        self.value.timeline.is_some() || !self.watch.as_ref().is_some_and(|watch| watch.complete)
+    }
+}
+
+/// One finished observation and the watch on what it read.
+type Observed = (std::sync::Arc<SourceObservation>, Option<SourceWatch>);
+
+/// How long an observation goes unrepeated when no watch vouches for it:
+/// a source on a filesystem inotify does not report every change of (a
+/// network or FUSE mount), one whose watch could not be placed, and a
+/// slideshow, whose pictures follow the clock. Five seconds is GIO's poll
+/// interval for a file it cannot monitor (`gpollfilemonitor.c`,
+/// `POLL_TIME_SECS`), and each repetition reads and hashes every file
+/// the source names, which on a network mount is traffic.
+const SAFETY_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Most inotify watches one source places: the picture's directory, each
+/// symbolic link's on the way to it and the picture itself, for the
+/// source and each slideshow picture.
+const MAX_SOURCE_WATCHES: usize = 64;
+
+/// The inotify watch on what one source observation read (#503), as
+/// GNOME's `background.js` monitors its file with a `Gio.FileMonitor`:
+/// each directory holding the file or a symbolic link on the way to it,
+/// for that name being written, replaced, renamed over, re-permissioned
+/// or removed, and the file itself, for writes through another link to
+/// it. A thread waits on it and wakes the loop once per change; the
+/// next refresh observes the source again.
+#[derive(Debug)]
+struct SourceWatch {
+    changed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Every path read is on a filesystem inotify vouches for, and every
+    /// watch was placed: no timed re-observation is needed.
+    complete: bool,
+    /// Closing it ends the waiting thread.
+    _stop: std::os::unix::net::UnixStream,
+}
+
+impl SourceWatch {
+    /// Whether a change was reported since the last call.
+    fn take_changed(&self) -> bool {
+        self.changed
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    fn pending(&self) -> bool {
+        self.changed.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Watches being placed, on the observation worker, before each path is
+/// read ([`SourceObservation::observe_watched`]).
+struct WatchSet {
+    fd: Option<std::os::fd::OwnedFd>,
+    /// Per watch descriptor, the names in that directory that matter;
+    /// empty for a watch on the file itself.
+    names: Vec<(i32, Vec<OsString>)>,
+    complete: bool,
+}
+
+impl WatchSet {
+    fn new() -> Self {
+        use rustix::fs::inotify;
+        let fd = inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK).ok();
+        Self {
+            complete: fd.is_some(),
+            fd,
+            names: Vec::new(),
+        }
+    }
+
+    fn place(&mut self, path: &std::path::Path, name: Option<&std::ffi::OsStr>) -> bool {
+        use rustix::fs::inotify::{self, WatchFlags};
+        let Some(fd) = &self.fd else {
+            return false;
+        };
+        let mask = if name.is_some() {
+            WatchFlags::CLOSE_WRITE
+                | WatchFlags::MODIFY
+                | WatchFlags::ATTRIB
+                | WatchFlags::CREATE
+                | WatchFlags::DELETE
+                | WatchFlags::MOVED_FROM
+                | WatchFlags::MOVED_TO
+                | WatchFlags::DELETE_SELF
+                | WatchFlags::MOVE_SELF
+                | WatchFlags::ONLYDIR
+        } else {
+            WatchFlags::CLOSE_WRITE
+                | WatchFlags::MODIFY
+                | WatchFlags::ATTRIB
+                | WatchFlags::DELETE_SELF
+                | WatchFlags::MOVE_SELF
+        };
+        let known = self.names.len();
+        if known >= MAX_SOURCE_WATCHES {
+            return false;
+        }
+        let Ok(wd) = inotify::add_watch(fd, path, mask) else {
+            return false;
+        };
+        // A directory watched again returns its descriptor again.
+        let entry = match self.names.iter().position(|(known, _)| *known == wd) {
+            Some(at) => &mut self.names[at].1,
+            None => {
+                self.names.push((wd, Vec::new()));
+                &mut self.names[known].1
+            }
+        };
+        if let Some(name) = name {
+            if !entry.iter().any(|known| known == name) {
+                entry.push(name.to_owned());
+            }
+        }
+        true
+    }
+
+    /// Watch `path`: the directory entry of the path, of every symbolic
+    /// link it resolves through and of the file it ends at, and the file.
+    fn add(&mut self, path: &std::path::Path) {
+        let mut path = path.to_path_buf();
+        // Linux follows at most 40 links.
+        for _ in 0..40 {
+            let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+                self.complete = false;
+                return;
+            };
+            let dir = if dir.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                dir
+            };
+            if !self.place(dir, Some(name)) || !crate::wake::inotify_reliable(dir) {
+                self.complete = false;
+            }
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    let Ok(target) = std::fs::read_link(&path) else {
+                        self.complete = false;
+                        return;
+                    };
+                    path = dir.join(target);
+                }
+                Ok(_) => {
+                    // A missing file is reported by its directory entry.
+                    if !self.place(&path, None) {
+                        self.complete = false;
+                    }
+                    return;
+                }
+                Err(_) => return,
+            }
+        }
+        self.complete = false;
+    }
+
+    /// The loop's handle, and the thread's end of the watch.
+    fn split(self, wake: crate::wake::Wake) -> (Option<SourceWatch>, Option<WatchWaiter>) {
+        let Some(fd) = self.fd else {
+            return (None, None);
+        };
+        let Ok((stop, stopped)) = std::os::unix::net::UnixStream::pair() else {
+            return (None, None);
+        };
+        let changed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        (
+            Some(SourceWatch {
+                changed: changed.clone(),
+                complete: self.complete,
+                _stop: stop,
+            }),
+            Some(WatchWaiter {
+                fd,
+                names: self.names,
+                changed,
+                stopped,
+                wake,
+            }),
+        )
+    }
+}
+
+/// The observation worker's thread, kept to wait on its watch.
+struct WatchWaiter {
+    fd: std::os::fd::OwnedFd,
+    names: Vec<(i32, Vec<OsString>)>,
+    changed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stopped: std::os::unix::net::UnixStream,
+    wake: crate::wake::Wake,
+}
+
+impl WatchWaiter {
+    /// Report changes until the watch's owner drops it, or until the
+    /// watch is lost (a watched directory or file went away, its
+    /// filesystem was unmounted, the queue overflowed): the change is
+    /// reported then, and the re-observation places a new watch.
+    fn run(self) {
+        use rustix::event::{PollFd, PollFlags};
+        use rustix::fs::inotify::{self, ReadFlags};
+        use std::os::unix::ffi::OsStrExt;
+        loop {
+            let mut fds = [
+                PollFd::new(&self.fd, PollFlags::IN),
+                PollFd::new(&self.stopped, PollFlags::IN),
+            ];
+            match crate::wake::poll_fds(&mut fds, None) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return,
+                Ok(_) if !fds[1].revents().is_empty() => return,
+                Ok(_) => {}
+            }
+            let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 4096];
+            let mut events = inotify::Reader::new(&self.fd, &mut buf);
+            let (mut hit, mut lost) = (false, false);
+            while let Ok(event) = events.next() {
+                let flags = event.events();
+                lost |= flags.intersects(
+                    ReadFlags::QUEUE_OVERFLOW
+                        | ReadFlags::IGNORED
+                        | ReadFlags::UNMOUNT
+                        | ReadFlags::DELETE_SELF
+                        | ReadFlags::MOVE_SELF,
+                );
+                hit |= match self.names.iter().find(|(wd, _)| *wd == event.wd()) {
+                    // The file itself.
+                    Some((_, names)) if names.is_empty() => true,
+                    Some((_, names)) => event.file_name().is_some_and(|name| {
+                        names
+                            .iter()
+                            .any(|known| known.as_bytes() == name.to_bytes())
+                    }),
+                    None => false,
+                };
+            }
+            if (hit || lost) && !self.changed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                self.wake.signal();
+            }
+            if lost {
+                return;
+            }
+        }
+    }
 }
 
 type ImageCache = std::sync::Mutex<Vec<(FileIdentity, std::sync::Arc<image::RgbaImage>)>>;
@@ -366,6 +747,35 @@ impl Wallpaper {
     pub(crate) fn set_wake(&self, wake: &crate::wake::Wake) {
         self.wake.connect(wake);
     }
+    /// The drop file's directory is watched: from now on the file is read
+    /// again only after [`drop_changed`](Self::drop_changed), not at
+    /// every refresh.
+    pub(crate) fn watch_drop(&mut self) {
+        self.drop_file = DropFile::Stale;
+    }
+    /// The drop file was written, replaced or removed.
+    pub(crate) fn drop_changed(&mut self) {
+        if !matches!(self.drop_file, DropFile::Unwatched) {
+            self.drop_file = DropFile::Stale;
+        }
+    }
+    /// Whether the picture last asked for is a slideshow: it changes with
+    /// the wall clock, which no event reports, so it is sampled by being
+    /// drawn.
+    pub(crate) fn follows_clock(&self) -> bool {
+        self.animation_samples.iter().any(|sample| {
+            self.current_uris.iter().any(|uri| {
+                sample
+                    .key
+                    .strip_prefix(uri.as_str())
+                    .is_some_and(|rest| rest.starts_with('\n'))
+            })
+        })
+    }
+    /// When a current source is next observed again on a timer: only one
+    /// no watch vouches for, or a slideshow ([`SAFETY_RECHECK`]). A
+    /// watched picture is observed again when its watch reports a change,
+    /// which wakes the loop itself (#503).
     pub(crate) fn maintenance_deadline(&self) -> Option<std::time::Instant> {
         self.identities
             .iter()
@@ -376,16 +786,23 @@ impl Wallpaper {
                     .iter()
                     .any(|(uri, _)| uri == &item.uri)
             })
-            .map(|item| {
-                let deadline = item.observed + std::time::Duration::from_secs(1);
+            .filter_map(|item| {
                 let now = std::time::Instant::now();
+                let deadline = if item.watch.as_ref().is_some_and(SourceWatch::pending) {
+                    // Reported, but refresh has not run since.
+                    now
+                } else if item.timed() {
+                    item.observed + SAFETY_RECHECK
+                } else {
+                    return None;
+                };
                 // An unsupported render size must not spin on a deadline that
                 // refresh could not service: retry one display frame later.
-                if deadline <= now {
+                Some(if deadline <= now {
                     now + std::time::Duration::from_millis(16)
                 } else {
                     deadline
-                }
+                })
             })
             .min()
     }
@@ -472,10 +889,10 @@ impl Wallpaper {
                 Ok(value) => Some(value),
                 Err(std::sync::mpsc::TryRecvError::Empty) => None,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    Some(std::sync::Arc::new(SourceObservation::default()))
+                    Some((std::sync::Arc::new(SourceObservation::default()), None))
                 }
             };
-            if let Some(value) = result {
+            if let Some((value, watch)) = result {
                 let (completed, _) = self.identity_pending.remove(index);
                 self.identities.retain(|snapshot| snapshot.uri != completed);
                 if self.identities.len() >= MAX_WALLPAPER_SLOTS {
@@ -485,6 +902,7 @@ impl Wallpaper {
                     uri: completed,
                     value,
                     observed: std::time::Instant::now(),
+                    watch,
                 });
             } else {
                 index += 1;
@@ -493,7 +911,8 @@ impl Wallpaper {
         let snapshot = self.identities.iter().find(|snapshot| snapshot.uri == uri);
         let value = snapshot.map(|snapshot| snapshot.value.clone());
         let due = snapshot.is_none_or(|snapshot| {
-            snapshot.observed.elapsed() >= std::time::Duration::from_secs(1)
+            snapshot.watch.as_ref().is_some_and(SourceWatch::pending)
+                || (snapshot.timed() && snapshot.observed.elapsed() >= SAFETY_RECHECK)
         });
         if due
             && self.identity_pending.len() < MAX_WALLPAPER_SLOTS
@@ -505,17 +924,34 @@ impl Wallpaper {
             let (send, result) = std::sync::mpsc::channel();
             let path = uri.to_owned();
             let completion = self.wake.completion();
+            let wake = self.wake.clone();
             if std::thread::Builder::new()
                 .name("tuna-wallpaper-identity".into())
                 .spawn(move || {
-                    let _completion = completion;
+                    let completion = completion;
                     // Drop the result sender before the completion wake, including unwind.
                     let result_sender = send;
-                    let observed = std::sync::Arc::new(SourceObservation::observe(&path));
-                    let _ = result_sender.send(observed);
+                    // Watch first: a change while reading is reported.
+                    let mut watch = WatchSet::new();
+                    let observed = std::sync::Arc::new(SourceObservation::observe_watched(
+                        &path,
+                        &mut |path| watch.add(path),
+                    ));
+                    let (handle, waiter) = watch.split(wake);
+                    let _ = result_sender.send((observed, handle));
+                    drop(result_sender);
+                    drop(completion);
+                    // The same thread then waits on the watch.
+                    if let Some(waiter) = waiter {
+                        waiter.run();
+                    }
                 })
                 .is_ok()
             {
+                // This observation answers whatever the old watch reported.
+                if let Some(watch) = snapshot.and_then(|snapshot| snapshot.watch.as_ref()) {
+                    watch.take_changed();
+                }
                 self.identity_pending.push((uri.to_owned(), result));
             }
         }
@@ -626,7 +1062,7 @@ impl Wallpaper {
                 (output.w, output.h),
                 1,
                 Transform::Normal,
-                None,
+                opaque_region(pixels, (output.w, output.h)),
             )
         });
         self.loaded.push(Loaded {
@@ -867,7 +1303,7 @@ impl Wallpaper {
                     (w, h),
                     1,
                     Transform::Normal,
-                    None,
+                    opaque_region(&pixels, (w, h)),
                 ),
             ));
         }
@@ -887,8 +1323,9 @@ impl Wallpaper {
         .ok()
     }
 
-    /// Re-read the drop file and start or collect the decode for
-    /// `output`; the current URI when there is a picture to show.
+    /// Read the drop file if it may have changed and start or collect the
+    /// decode for `output`; the current URI when there is a picture to
+    /// show.
     fn refresh(&mut self, output: Size<i32, Logical>, geometry: Geometry) -> Option<String> {
         self.refresh_picture(output, false, geometry)
     }
@@ -906,7 +1343,30 @@ impl Wallpaper {
         }
         self.current_uris.clear();
         self.refresh_stage = Some("drop-open");
-        let text = crate::runtime_signal::read_bounded(&wallpaper_drop_path(), 16 * 1024).ok()?;
+        let read = || crate::runtime_signal::read_bounded(&wallpaper_drop_path(), 16 * 1024).ok();
+        // The text leaves the cache for the parse and returns after it.
+        let (text, watched) = match std::mem::take(&mut self.drop_file) {
+            DropFile::Unwatched => (read(), false),
+            DropFile::Stale => (read(), true),
+            DropFile::Read(text) => (text, true),
+        };
+        let key = text
+            .as_deref()
+            .and_then(|text| self.refresh_from_drop(text, output, lock, geometry));
+        if watched {
+            self.drop_file = DropFile::Read(text);
+        }
+        key
+    }
+
+    /// [`refresh_picture`](Self::refresh_picture) for the drop file's `text`.
+    fn refresh_from_drop(
+        &mut self,
+        text: &str,
+        output: Size<i32, Logical>,
+        lock: bool,
+        geometry: Geometry,
+    ) -> Option<String> {
         self.refresh_stage = Some("drop-parse-metadata");
         let mut lines = text.lines();
         let mut uri = lines.next().unwrap_or_default().trim().to_owned();
@@ -1090,7 +1550,8 @@ impl Wallpaper {
     /// drawn scaled to `card`: overview transition frames resize the card
     /// every frame, and re-rendering it per size cost a full crop, resize
     /// and shadow blur on the compositor thread each frame while evicting
-    /// the settled cards from the cache.
+    /// the settled cards from the cache. A frame that scales draws the
+    /// largest render the cache holds of the picture ([`largest_render`]).
     #[allow(clippy::too_many_arguments)]
     pub fn card_element(
         &mut self,
@@ -1112,18 +1573,13 @@ impl Wallpaper {
         };
         let uri = self.refresh(output, geometry).unwrap_or_default();
         let key = self.request_card(&uri, output, work_top, rendered)?;
-        let cached = self.cards.iter().find(|c| c.key == key)?;
-        let (location, size) = card_placement(card, rendered, cached.margin);
-        MemoryRenderBufferRenderElement::from_buffer(
-            renderer,
-            location,
-            &cached.buffer,
-            Some(alpha),
-            None,
-            size,
-            Kind::Unspecified,
-        )
-        .ok()
+        let index = if card.size == rendered {
+            self.cards.iter().position(|c| c.key == key)?
+        } else {
+            largest_render(&self.cards, &key)?
+        };
+        let index = touch(&mut self.cards, index);
+        self.cards[index].element(renderer, card, alpha)
     }
 
     /// Prepare the common two-workspace picker during desktop painting, before
@@ -1155,21 +1611,7 @@ impl Wallpaper {
             if let Some(result) = result {
                 let pending = self.card_pending.remove(index);
                 if let Some(card) = result {
-                    if self.cards.len() >= MAX_CARDS {
-                        self.cards.remove(0);
-                    }
-                    self.cards.push(CardCache {
-                        key: pending.key,
-                        buffer: MemoryRenderBuffer::from_slice(
-                            &card.pixels,
-                            Fourcc::Argb8888,
-                            (card.width as i32, card.height as i32),
-                            1,
-                            Transform::Normal,
-                            None,
-                        ),
-                        margin: card.margin as i32,
-                    });
+                    cache_card(&mut self.cards, CardCache::new(pending.key, &card));
                 }
             } else {
                 index += 1;
@@ -1207,8 +1649,11 @@ impl Wallpaper {
         // Crop origin is part of the image, even when output/card size stays fixed.
         let key = (uri.to_owned(), output, rendered.w, rendered.h, top, color);
         self.poll_cards();
-        if self.cards.iter().any(|card| card.key == key)
-            || self.card_pending.iter().any(|card| card.key == key)
+        if let Some(index) = self.cards.iter().position(|card| card.key == key) {
+            touch(&mut self.cards, index);
+            return Some(key);
+        }
+        if self.card_pending.iter().any(|card| card.key == key)
             || self.card_pending.len() >= MAX_CARDS
         {
             return Some(key);
@@ -1404,7 +1849,17 @@ impl FileIdentity {
 /// This entire observer executes on a bounded worker, including timezone
 /// calendar conversion and every referenced image's arbitrary-path metadata.
 impl SourceObservation {
+    #[cfg(test)]
     fn observe(uri: &str) -> Self {
+        Self::observe_watched(uri, &mut |_| {})
+    }
+
+    /// Observe `uri`, handing `watch` every path before it is read: a
+    /// change after that is reported by the watch, never lost (#503).
+    fn observe_watched(uri: &str, watch: &mut dyn FnMut(&std::path::Path)) -> Self {
+        if let Some(path) = wallpaper_uri_to_path(uri) {
+            watch(&path);
+        }
         let identity = FileIdentity::for_uri(uri);
         let mut observed = Self {
             identity: identity.clone(),
@@ -1455,6 +1910,7 @@ impl SourceObservation {
                 if observed.references.len() >= 128 {
                     return observed;
                 }
+                watch(path);
                 observed
                     .references
                     .push((path.clone(), FileIdentity::for_path(path)));
@@ -1812,6 +2268,7 @@ mod tests {
             uri: "old".into(),
             value: std::sync::Arc::new(SourceObservation::observe("old")),
             observed: std::time::Instant::now() - std::time::Duration::from_secs(3),
+            watch: None,
         });
         assert!(wallpaper.refresh((8, 8).into(), test_geometry()).is_none());
         assert_eq!(wallpaper.maintenance_deadline(), None);
@@ -1824,6 +2281,7 @@ mod tests {
             uri: "old".into(),
             value: std::sync::Arc::new(super::SourceObservation::observe("old")),
             observed: now - std::time::Duration::from_secs(3),
+            watch: None,
         });
         assert_eq!(wallpaper.maintenance_deadline(), None);
         wallpaper.current_uris.push("old".into());
@@ -1834,6 +2292,182 @@ mod tests {
         let (_send, receive) = std::sync::mpsc::channel();
         wallpaper.identity_pending.push(("old".into(), receive));
         assert_eq!(wallpaper.maintenance_deadline(), None);
+    }
+
+    /// A 2x2 picture of one colour: every colour encodes to the same length.
+    fn solid_png(path: &std::path::Path, rgb: [u8; 3]) {
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([rgb[0], rgb[1], rgb[2], 255]))
+            .save(path)
+            .expect("write test png");
+    }
+
+    /// The desktop key once it differs from `previous`, within `within`.
+    fn key_within(
+        wallpaper: &mut Wallpaper,
+        previous: Option<&str>,
+        within: std::time::Duration,
+    ) -> Option<String> {
+        let end = std::time::Instant::now() + within;
+        loop {
+            if let Some(key) = wallpaper.refresh((8, 8).into(), test_geometry()) {
+                if previous != Some(key.as_str()) {
+                    return Some(key);
+                }
+            }
+            if std::time::Instant::now() >= end {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// A picture replaced, rewritten in place (same length, the old
+    /// modification time put back), renamed over, or reached through a
+    /// symbolic link that is pointed elsewhere, is observed again on the
+    /// watch's report, within the second the old timed re-observation
+    /// allowed; until then nothing is due on a timer (#503).
+    #[test]
+    fn watched_picture_changes_are_observed_on_their_event() {
+        type Change = fn(&std::path::Path, &std::path::Path);
+        let changes: [(&str, Change); 4] = [
+            ("replaced", |dir, picture| {
+                std::fs::remove_file(picture).unwrap();
+                solid_png(&dir.join("wall.png"), [0, 0, 240]);
+            }),
+            ("rewritten in place", |_, picture| {
+                let before = std::fs::metadata(picture).unwrap().modified().unwrap();
+                let replacement = picture.with_file_name("staging.png");
+                solid_png(&replacement, [0, 0, 240]);
+                let bytes = std::fs::read(&replacement).unwrap();
+                std::fs::remove_file(&replacement).unwrap();
+                assert_eq!(
+                    bytes.len() as u64,
+                    std::fs::metadata(picture).unwrap().len()
+                );
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(picture)
+                    .unwrap();
+                std::io::Write::write_all(&mut file, &bytes).unwrap();
+                file.set_times(std::fs::FileTimes::new().set_modified(before))
+                    .unwrap();
+            }),
+            ("renamed over", |dir, picture| {
+                let replacement = dir.join("replacement.png");
+                solid_png(&replacement, [0, 0, 240]);
+                std::fs::rename(replacement, picture).unwrap();
+            }),
+            ("symlink retargeted", |dir, picture| {
+                let other = dir.join("pictures/other.png");
+                solid_png(&other, [0, 0, 240]);
+                let link = dir.join("link.tmp");
+                std::os::unix::fs::symlink(&other, &link).unwrap();
+                std::fs::rename(link, picture).unwrap();
+            }),
+        ];
+        let _lock = RUNTIME_DIR_LOCK.lock().expect("runtime lock");
+        for (case, change) in changes {
+            let dir = tempfile::TempDir::new().unwrap();
+            if !crate::wake::inotify_reliable(dir.path()) {
+                eprintln!(
+                    "skipped: {} is not on a local filesystem",
+                    dir.path().display()
+                );
+                return;
+            }
+            let _runtime = RuntimeDirGuard::point_at(dir.path());
+            let picture = dir.path().join("wall.png");
+            if case == "symlink retargeted" {
+                std::fs::create_dir(dir.path().join("pictures")).unwrap();
+                let first = dir.path().join("pictures/first.png");
+                solid_png(&first, [240, 0, 0]);
+                std::os::unix::fs::symlink(&first, &picture).unwrap();
+            } else {
+                solid_png(&picture, [240, 0, 0]);
+            }
+            std::fs::write(
+                wallpaper_drop_path(),
+                format!("file://{}\n#023c88\n", picture.display()),
+            )
+            .unwrap();
+            let mut wallpaper = Wallpaper::new();
+            let initial = key_within(&mut wallpaper, None, std::time::Duration::from_secs(3))
+                .unwrap_or_else(|| panic!("{case}: the first observation never completed"));
+            assert_eq!(
+                wallpaper.maintenance_deadline(),
+                None,
+                "{case}: a watched picture is observed again on events only"
+            );
+            change(dir.path(), &picture);
+            assert!(
+                key_within(
+                    &mut wallpaper,
+                    Some(&initial),
+                    std::time::Duration::from_secs(1)
+                )
+                .is_some(),
+                "{case}: the change was not observed within a second"
+            );
+        }
+    }
+
+    /// An unchanged watched picture is never read again: no observation
+    /// worker starts over three of the old one-second periods.
+    #[test]
+    fn an_unchanged_watched_picture_is_not_observed_again() {
+        let _lock = RUNTIME_DIR_LOCK.lock().expect("runtime lock");
+        let dir = tempfile::TempDir::new().unwrap();
+        if !crate::wake::inotify_reliable(dir.path()) {
+            eprintln!(
+                "skipped: {} is not on a local filesystem",
+                dir.path().display()
+            );
+            return;
+        }
+        let _runtime = RuntimeDirGuard::point_at(dir.path());
+        let picture = dir.path().join("wall.png");
+        solid_png(&picture, [240, 0, 0]);
+        std::fs::write(
+            wallpaper_drop_path(),
+            format!("file://{}\n#023c88\n", picture.display()),
+        )
+        .unwrap();
+        let mut wallpaper = Wallpaper::new();
+        let key = key_within(&mut wallpaper, None, std::time::Duration::from_secs(3))
+            .expect("the first observation never completed");
+        let observed = wallpaper.identities[0].observed;
+        // An unrelated file in the same directory is not the picture.
+        std::fs::write(dir.path().join("notes.txt"), "unrelated").unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < end {
+            assert_eq!(
+                wallpaper.refresh((8, 8).into(), test_geometry()).as_deref(),
+                Some(key.as_str())
+            );
+            assert!(wallpaper.identity_pending.is_empty(), "observed again");
+            assert_eq!(wallpaper.identities[0].observed, observed);
+            assert_eq!(wallpaper.maintenance_deadline(), None);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Without a watch (a URI no file stands behind, or a filesystem
+    /// inotify cannot vouch for) the source is observed again on the
+    /// safety timer, not every second.
+    #[test]
+    fn an_unwatched_source_is_observed_again_on_the_safety_timer() {
+        let now = std::time::Instant::now();
+        let mut wallpaper = Wallpaper::new();
+        wallpaper.current_uris.push("old".into());
+        wallpaper.identities.push(IdentitySnapshot {
+            uri: "old".into(),
+            value: std::sync::Arc::new(SourceObservation::observe("old")),
+            observed: now,
+            watch: None,
+        });
+        let deadline = wallpaper.maintenance_deadline().unwrap();
+        assert!(deadline >= now + SAFETY_RECHECK);
+        assert!(deadline <= std::time::Instant::now() + SAFETY_RECHECK);
     }
     use super::*;
     use std::sync::Mutex;
@@ -2116,8 +2750,8 @@ mod tests {
         let (at, size) = card_placement(settled, rendered, 22);
         assert_eq!((at.x, at.y), (157.0, 86.0));
         assert_eq!(size, None, "the settled card stays pixel for pixel");
-        // A transition frame: the whole output, the content and its
-        // shadow margin scaled by the same factors.
+        // A larger rectangle, as transition frames have: the content and
+        // its shadow margin scaled by the same factors.
         let grown = Rectangle::from_size((1280, 800).into());
         let (at, size) = card_placement(grown, rendered, 22);
         let (kx, ky) = (1280.0 / 922.0, 800.0 / 553.0);
@@ -2127,6 +2761,380 @@ mod tests {
             (size.w, size.h),
             ((966.0 * kx).round() as i32, (597.0 * ky).round() as i32)
         );
+    }
+
+    /// Headless GL harness: surfaceless EGL, or `None` when this
+    /// machine has no EGL (the test skips instead of failing).
+    #[cfg(feature = "drm")]
+    fn headless_renderer() -> Option<GlesRenderer> {
+        use smithay::backend::egl::native::EGLSurfacelessDisplay;
+        use smithay::backend::egl::{EGLContext, EGLDisplay};
+        let display = unsafe { EGLDisplay::new(EGLSurfacelessDisplay) }.ok()?;
+        let context = EGLContext::new(&display).ok()?;
+        unsafe { GlesRenderer::new(context) }.ok()
+    }
+
+    /// The quarters of the test desktop, as RGB: top-left, top-right,
+    /// bottom-left, bottom-right.
+    #[cfg(feature = "drm")]
+    const QUARTERS: [[u8; 3]; 4] = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]];
+    #[cfg(feature = "drm")]
+    const BACKDROP: [u8; 3] = [34, 34, 38];
+
+    /// The card of an `output` desktop painted in [`QUARTERS`], rendered
+    /// with its content `rendered` pixels large, as the worker caches it.
+    #[cfg(feature = "drm")]
+    fn quartered_card(output: (u32, u32), rendered: Size<i32, Physical>) -> CardCache {
+        let (w, h) = output;
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let [r, g, b] = QUARTERS[usize::from(x >= w / 2) + 2 * usize::from(y >= h / 2)];
+                pixels.extend([b, g, r, 255]);
+            }
+        }
+        let scale = rendered.w as f32 / w as f32;
+        let card = tuna_wallpaper::card(
+            Some((&pixels, w, h)),
+            (0, 0, w, h),
+            [0; 3],
+            rendered.w as u32,
+            rendered.h as u32,
+            30.0 * scale,
+            tuna_wallpaper::Shadow {
+                dy: 4.0 * scale,
+                blur: 16.0 * scale,
+                spread: 4.0 * scale,
+                alpha: 0.2,
+            },
+        )
+        .unwrap();
+        let key = (
+            String::new(),
+            (w as i32, h as i32).into(),
+            rendered.w,
+            rendered.h,
+            0,
+            None,
+        );
+        CardCache::new(key, &card)
+    }
+
+    /// One `size` frame of the overview's backdrop and `cards`, as RGBA
+    /// rows. `culled` paints it as `draw_scene` does: the backdrop only
+    /// where no card names itself opaque, and what a card drawn pixel for
+    /// pixel names opaque without blending. Otherwise the backdrop is
+    /// painted everywhere and every card blended over it. The target
+    /// starts green, as a last frame nothing may show through.
+    #[cfg(feature = "drm")]
+    fn paint(
+        renderer: &mut GlesRenderer,
+        size: Size<i32, Physical>,
+        cards: &[MemoryRenderBufferRenderElement<GlesRenderer>],
+        culled: bool,
+    ) -> Vec<u8> {
+        use crate::occlusion::{draw_planned, Occlusion};
+        use smithay::backend::renderer::gles::GlesTexture;
+        use smithay::backend::renderer::{Bind, Color32F, ExportMem, Frame, Offscreen, Renderer};
+        let whole = Rectangle::from_size(size);
+        let [r, g, b] = BACKDROP.map(|v| f32::from(v) / 255.0);
+        let mut target: GlesTexture = renderer
+            .create_buffer(Fourcc::Abgr8888, (size.w, size.h).into())
+            .expect("frame texture");
+        let mut bound = renderer.bind(&mut target).expect("bind");
+        {
+            let mut frame = renderer
+                .render(&mut bound, size, Transform::Normal)
+                .expect("frame");
+            frame
+                .clear(Color32F::new(0.0, 1.0, 0.0, 1.0), &[whole])
+                .expect("last frame");
+            let mut occlusion = Occlusion::new(whole, &[whole]);
+            let plan = occlusion.plan(1.0, cards);
+            let backdrop = if culled {
+                occlusion.uncovered()
+            } else {
+                vec![whole]
+            };
+            frame
+                .clear(Color32F::new(r, g, b, 1.0), &backdrop)
+                .expect("backdrop");
+            draw_planned::<GlesRenderer, _>(&mut frame, 1.0, cards, &plan, culled).expect("cards");
+            let _ = frame.finish().expect("finish");
+        }
+        let mapping = renderer
+            .copy_framebuffer(
+                &bound,
+                Rectangle::from_size((size.w, size.h).into()),
+                Fourcc::Abgr8888,
+            )
+            .expect("read back");
+        renderer.map_texture(&mapping).expect("map").to_vec()
+    }
+
+    /// A flat card of `uri` rendered `w` x `h`, cropped `top` down a
+    /// 1280x800 output.
+    fn flat_card(uri: &str, w: i32, h: i32, top: i32) -> CardCache {
+        let shadow = tuna_wallpaper::Shadow {
+            dy: 1.0,
+            blur: 2.0,
+            spread: 1.0,
+            alpha: 0.2,
+        };
+        let rendered = tuna_wallpaper::card(
+            None,
+            (0, 0, 0, 0),
+            [1, 2, 3],
+            w as u32,
+            h as u32,
+            2.0,
+            shadow,
+        )
+        .unwrap();
+        let key = (uri.to_owned(), (1280, 800).into(), w, h, top, None);
+        CardCache::new(key, &rendered)
+    }
+
+    /// What the cache holds follows from what was drawn, not from the
+    /// order the workers finish in. At a fractional scale the picker alone
+    /// has four sizes (each card as the transition rounds it and as it
+    /// rests): prepared in either order, drawn through an open, a rest
+    /// and a morph to the app grid, the cache keeps the render the morph
+    /// scales when the grid's two small renders arrive.
+    #[test]
+    fn the_cache_gives_up_the_render_unused_longest_whatever_order_workers_finish() {
+        let size = |c: &CardCache| (c.rendered().w, c.rendered().h);
+        let draw = |cards: &mut Vec<CardCache>, w: i32, h: i32| {
+            let index = cards.iter().position(|c| size(c) == (w, h)).unwrap();
+            touch(cards, index);
+        };
+        let grid = flat_card("a", 19, 11, 40).key;
+        let mut held = Vec::new();
+        for prepared in [
+            [(92, 55), (87, 52), (91, 55), (86, 52)],
+            [(86, 52), (91, 55), (87, 52), (92, 55)],
+        ] {
+            let mut cards = Vec::new();
+            for (w, h) in prepared {
+                cache_card(&mut cards, flat_card("a", w, h, 40));
+            }
+            // Opening: both cards at their transition sizes; at rest.
+            draw(&mut cards, 92, 55);
+            draw(&mut cards, 87, 52);
+            draw(&mut cards, 91, 55);
+            draw(&mut cards, 86, 52);
+            // Into the app grid: both cards scale the largest render.
+            for _ in 0..2 {
+                let largest = largest_render(&cards, &grid).unwrap();
+                assert_eq!(size(&cards[largest]), (92, 55));
+                touch(&mut cards, largest);
+            }
+            cache_card(&mut cards, flat_card("a", 19, 11, 40));
+            cache_card(&mut cards, flat_card("a", 18, 10, 40));
+            let largest = largest_render(&cards, &grid).unwrap();
+            assert_eq!(size(&cards[largest]), (92, 55), "{prepared:?}");
+            let mut sizes: Vec<_> = cards.iter().map(size).collect();
+            sizes.sort_unstable();
+            held.push(sizes);
+        }
+        assert_eq!(held[0], held[1]);
+        assert_eq!(held[0], [(18, 10), (19, 11), (86, 52), (92, 55)]);
+    }
+
+    /// A card whose settled size is small (the app grid's) is drawn,
+    /// while it shrinks or grows, from the picker-sized render the cache
+    /// already holds of the same picture.
+    #[test]
+    fn transition_frames_scale_the_largest_render_cached_of_the_picture() {
+        let cards = [
+            flat_card("a", 92, 55, 32),
+            flat_card("a", 19, 11, 32),
+            flat_card("a", 120, 72, 40),
+            flat_card("b", 200, 120, 32),
+        ];
+        let small = cards[1].key.clone();
+        let size = |index: usize, cards: &[CardCache]| {
+            (cards[index].rendered().w, cards[index].rendered().h)
+        };
+        let chosen = largest_render(&cards, &small).unwrap();
+        assert_eq!(size(chosen, &cards), (92, 55));
+        // Alone in the cache, the card's own render.
+        let chosen = largest_render(&cards[1..], &small).unwrap();
+        assert_eq!(size(chosen, &cards[1..]), (19, 11));
+        // Never another picture's, or another crop of this one.
+        let key = ("c".to_owned(), (1280, 800).into(), 19, 11, 32, None);
+        assert!(largest_render(&cards, &key).is_none());
+        let key = ("a".to_owned(), (1280, 800).into(), 19, 11, 24, None);
+        assert!(largest_render(&cards, &key).is_none());
+    }
+
+    /// #1106: a transition frame draws the whole settled card scaled into
+    /// the card's rectangle of that frame, so each quarter of the desktop
+    /// fills its quarter of the card out to the card's far corner. Drawn
+    /// unscaled from the buffer's top-left corner, a grown card ended
+    /// short of its rectangle and a shrunk one showed only the corner.
+    #[cfg(feature = "drm")]
+    #[test]
+    fn a_transition_frame_scales_the_whole_card_into_its_rectangle() {
+        use smithay::backend::renderer::element::Element;
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("card GL test skipped: no surfaceless EGL");
+            return;
+        };
+        let frame = Size::<i32, Physical>::from((400, 240));
+        let rendered = Size::<i32, Physical>::from((240, 144));
+        let cache = quartered_card((400, 240), rendered);
+        let whole = Rectangle::from_size(
+            (
+                f64::from(rendered.w + 2 * cache.margin),
+                f64::from(rendered.h + 2 * cache.margin),
+            )
+                .into(),
+        );
+        for card in [
+            // Settled, grown toward the desktop (the overview opening or
+            // closing) and shrunk.
+            Rectangle::new((80, 48).into(), rendered),
+            Rectangle::new((20, 12).into(), (360, 216).into()),
+            Rectangle::new((140, 84).into(), (120, 72).into()),
+        ] {
+            let cards = [cache.element(&mut renderer, card, 1.0).unwrap()];
+            let pixels = paint(&mut renderer, frame, &cards, true);
+            let at = |x: i32, y: i32| {
+                let i = ((y * frame.w + x) * 4) as usize;
+                [pixels[i], pixels[i + 1], pixels[i + 2]]
+            };
+            let (w, h) = (card.size.w, card.size.h);
+            // Within each quarter: beside the card's corner (inside its
+            // rounding) and beside the card's middle.
+            let (dx, dy) = (w / 16, h / 16);
+            for (quarter, colour) in QUARTERS.iter().enumerate() {
+                let (right, low) = (quarter % 2 == 1, quarter / 2 == 1);
+                let xs = if right {
+                    [w - 1 - dx, w / 2 + dx]
+                } else {
+                    [dx, w / 2 - 1 - dx]
+                };
+                let ys = if low {
+                    [h - 1 - dy, h / 2 + dy]
+                } else {
+                    [dy, h / 2 - 1 - dy]
+                };
+                for (x, y) in xs.into_iter().zip(ys) {
+                    let got = at(card.loc.x + x, card.loc.y + y);
+                    assert!(
+                        got.iter().zip(colour).all(|(a, b)| a.abs_diff(*b) <= 2),
+                        "{card:?}: quarter {quarter} at +{x},+{y} is {got:?}, not {colour:?}"
+                    );
+                }
+            }
+            // The card ends where its rectangle does: only its shadow
+            // darkens the backdrop beside it.
+            for (x, y) in [(-2, h / 2), (w + 1, h / 2), (w / 2, -2), (w / 2, h + 1)] {
+                let got = at(card.loc.x + x, card.loc.y + y);
+                assert!(
+                    got.iter().zip(BACKDROP).all(|(a, b)| *a <= b),
+                    "{card:?}: beside the card at +{x},+{y} is {got:?}"
+                );
+            }
+            assert_eq!(cards[0].src(), whole, "{card:?} samples the whole buffer");
+        }
+    }
+
+    /// #503's opaque rectangles hold for a scaled card: a frame painted
+    /// with the backdrop left out under them is, pixel for pixel, the
+    /// frame with the backdrop everywhere and the card blended over it,
+    /// at every size from under the app grid's small card (a fifth of the
+    /// picker's, whose render it is scaled from) to the whole desktop.
+    #[cfg(feature = "drm")]
+    #[test]
+    fn a_scaled_card_hides_only_backdrop_it_covers() {
+        use smithay::backend::renderer::element::Element;
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("card GL test skipped: no surfaceless EGL");
+            return;
+        };
+        let frame = Size::<i32, Physical>::from((400, 240));
+        let rendered = Size::<i32, Physical>::from((240, 144));
+        let cache = quartered_card((400, 240), rendered);
+        for step in 0..=36 {
+            // 40x24 (a sixth of the rendered size) up to 400x240, at
+            // origins that leave the scaled shadow margin off whole pixels.
+            let (w, h) = (40 + 10 * step, 24 + 6 * step);
+            let card = Rectangle::new(((400 - w) / 2, (240 - h) / 3).into(), (w, h).into());
+            let element = cache.element(&mut renderer, card, 1.0).unwrap();
+            let named: i32 = element
+                .opaque_regions(1.0.into())
+                .iter()
+                .map(|r| r.size.w * r.size.h)
+                .sum();
+            assert!(
+                named > w * h / 2,
+                "{card:?} names most of itself opaque: {named}"
+            );
+            let cards = [element];
+            let culled = paint(&mut renderer, frame, &cards, true);
+            let blended = paint(&mut renderer, frame, &cards, false);
+            let differing = culled
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(blended.as_chunks::<4>().0)
+                .position(|(a, b)| a != b);
+            assert_eq!(
+                differing.map(|i| (i as i32 % frame.w, i as i32 / frame.w)),
+                None,
+                "{card:?} differs at this pixel"
+            );
+        }
+    }
+
+    /// The same at the sizes of a 1280x800 output: the picker's render
+    /// at scales 1, 1.25 and 1.5 (the bar is 32, 40 and 48 output pixels,
+    /// so the card is 553, 548 and 541 tall) scaled to the app grid's
+    /// small cards, to frames of the morph between them and to the whole
+    /// work area, at the odd origins a fractional scale rounds to.
+    #[cfg(feature = "drm")]
+    #[test]
+    fn a_picker_render_scaled_to_the_app_grid_hides_only_backdrop_it_covers() {
+        use smithay::backend::renderer::element::Element;
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("card GL test skipped: no surfaceless EGL");
+            return;
+        };
+        let frame = Size::<i32, Physical>::from((1280, 800));
+        for rendered in [(922, 553), (921, 548), (922, 541)] {
+            let cache = quartered_card((1280, 800), rendered.into());
+            for (x, y, w, h) in [
+                (436, 102, 192, 115),
+                (431, 103, 195, 115),
+                (661, 106, 183, 108),
+                (296, 83, 535, 317),
+                (450, 112, 463, 274),
+                (144, 66, 940, 564),
+                (0, 40, 1280, 760),
+            ] {
+                let card = Rectangle::new((x, y).into(), (w, h).into());
+                let cards = [cache.element(&mut renderer, card, 1.0).unwrap()];
+                assert!(
+                    !cards[0].opaque_regions(1.0.into()).is_empty(),
+                    "{rendered:?} at {card:?} names something opaque"
+                );
+                let culled = paint(&mut renderer, frame, &cards, true);
+                let blended = paint(&mut renderer, frame, &cards, false);
+                let differing = culled
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(blended.as_chunks::<4>().0)
+                    .position(|(a, b)| a != b);
+                assert_eq!(
+                    differing.map(|i| (i as i32 % frame.w, i as i32 / frame.w)),
+                    None,
+                    "{rendered:?} at {card:?} differs at this pixel"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2376,6 +3384,73 @@ mod tests {
                 previous = Some(key);
             }
         }
+    }
+
+    /// #503: a watched drop file is read when its change is reported, not
+    /// at every refresh; without a watch every refresh still reads it.
+    #[test]
+    fn a_watched_drop_file_is_read_again_only_when_it_changes() {
+        let _lock = RUNTIME_DIR_LOCK.lock().expect("runtime lock");
+        let dir = tempfile::TempDir::new().unwrap();
+        let _runtime = RuntimeDirGuard::point_at(dir.path());
+        let publish = |primary: [u8; 3]| {
+            let picture = PictureSettings {
+                placement: tuna_shell_control::background::Placement::None,
+                shading: tuna_shell_control::background::Shading::Horizontal,
+                primary,
+                secondary: [0, 0, 240],
+            };
+            let metadata = serde_json::to_string(&BackgroundMetadata {
+                version: 1,
+                desktop: picture,
+                lock: picture,
+            })
+            .unwrap();
+            std::fs::write(
+                wallpaper_drop_path(),
+                format!("\n#023c88\n#3584e4\n\n{metadata}\n"),
+            )
+            .unwrap();
+        };
+        let refresh = |wallpaper: &mut Wallpaper| wallpaper.refresh((8, 8).into(), test_geometry());
+
+        // Unwatched (no inotify, or a state document in the runtime dir):
+        // every refresh reads the file, as it always did.
+        let mut unwatched = Wallpaper::new();
+        publish([240, 0, 0]);
+        let red = refresh(&mut unwatched).expect("the drop names a colour");
+        publish([0, 240, 0]);
+        let green = refresh(&mut unwatched).expect("the drop names a colour");
+        assert_ne!(red, green, "an unwatched drop is read at every refresh");
+
+        // Watched: the first refresh reads it. A rewrite nobody reported
+        // shows that later refreshes do not touch the file.
+        let mut watched = Wallpaper::new();
+        watched.watch_drop();
+        assert_eq!(refresh(&mut watched).as_ref(), Some(&green));
+        publish([0, 0, 240]);
+        for _ in 0..3 {
+            assert_eq!(
+                refresh(&mut watched).as_ref(),
+                Some(&green),
+                "no change was reported, so the file is not read"
+            );
+        }
+        // The reported change is read at the next refresh.
+        watched.drop_changed();
+        let blue = refresh(&mut watched).expect("the drop names a colour");
+        assert_ne!(blue, green);
+
+        // A removed drop is no picture once its removal is reported, and a
+        // new one shows once that is.
+        std::fs::remove_file(wallpaper_drop_path()).unwrap();
+        assert_eq!(refresh(&mut watched).as_ref(), Some(&blue));
+        watched.drop_changed();
+        assert!(refresh(&mut watched).is_none());
+        publish([240, 0, 0]);
+        assert!(refresh(&mut watched).is_none());
+        watched.drop_changed();
+        assert_eq!(refresh(&mut watched), Some(red));
     }
 
     #[test]
@@ -2731,6 +3806,16 @@ mod tests {
             resampled(&mut wallpaper),
             "a wall-clock step re-samples immediately"
         );
+        // Such a picture changes with the clock, which no event reports,
+        // so the loop keeps drawing it; a still picture does not.
+        assert!(wallpaper.follows_clock());
+        std::fs::write(
+            wallpaper_drop_path(),
+            "file:///no-such-still-picture.png\n#023c88\n#3584e4\n",
+        )
+        .unwrap();
+        wallpaper.refresh((8, 8).into(), test_geometry());
+        assert!(!wallpaper.follows_clock());
     }
 
     #[test]

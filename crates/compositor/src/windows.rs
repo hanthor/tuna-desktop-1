@@ -55,7 +55,7 @@ use smithay::{
     },
     desktop::{Window, WindowSurface},
     input::{
-        keyboard::{FilterResult, KeyboardHandle, ModifiersState, XkbConfig},
+        keyboard::{FilterResult, KeyboardHandle, Keycode, ModifiersState, XkbConfig},
         pointer::{AxisFrame, ButtonEvent, MotionEvent, PointerHandle},
     },
     reexports::wayland_server::protocol::wl_surface::WlSurface,
@@ -81,6 +81,8 @@ const DEFAULT_WIDTH: i32 = 800;
 const DEFAULT_HEIGHT: i32 = 600;
 /// Cascade offset for each newly mapped window.
 const CASCADE_STEP: i32 = 50;
+/// The xdg_toplevel version that knows the `suspended` state.
+const XDG_TOPLEVEL_STATE_SUSPENDED_SINCE: u32 = 6;
 
 /// One managed window: live surface plus compositor-side geometry.
 /// The surface is the toolkit's unified window handle, so native and
@@ -411,6 +413,11 @@ pub struct WindowManager {
     accel_fired: Vec<(u32, u32, u32)>,
     /// Input is going to the session-lock surface.
     lock_input_active: bool,
+    /// Physical holds quarantined at unlock, until their genuine keyup.
+    unlock_quarantined: HashSet<Keycode>,
+    /// Unlock found no popup grab to return the keyboard to: the next
+    /// reconcile re-delivers pointer focus, as after a grab.
+    unlock_pointer_refocus: bool,
     /// A touchpad swipe began on the session-lock surface and has not
     /// ended: only its updates and end follow it there.
     lock_swipe: bool,
@@ -535,6 +542,8 @@ pub struct WindowManager {
     grab_raise: Option<GrabRaise>,
     /// Mutter's alive checks and the close dialog (#1035).
     alive: alive::AliveState,
+    /// Mutter's suspend state of the native windows (#503).
+    suspension: crate::suspend::Suspension,
 }
 
 impl WindowManager {
@@ -711,6 +720,8 @@ impl WindowManager {
             accel_released: Vec::new(),
             accel_fired: Vec::new(),
             lock_input_active: false,
+            unlock_quarantined: HashSet::new(),
+            unlock_pointer_refocus: false,
             lock_swipe: false,
             tablet: tablet_input::TabletFocus::default(),
             menu_requests: Vec::new(),
@@ -773,6 +784,7 @@ impl WindowManager {
             auto_raise: None,
             grab_raise: None,
             alive: alive::AliveState::new(state),
+            suspension: Default::default(),
         }
     }
 
@@ -1330,6 +1342,81 @@ impl WindowManager {
         self.workspace_tracker.next_deadline()
     }
 
+    /// Mutter's suspend state (#503). `shown` lists the windows something
+    /// on screen shows this frame (the scene, window clones, casts); the
+    /// runtime calls this before a frame is drawn and after. A native
+    /// window not shown for Mutter's 3 s is suspended; a shown one
+    /// resumes at once, so it is told before the frame that draws it.
+    /// Each change is one configure with or without `suspended`; clients
+    /// older than xdg-shell v6 are never told.
+    pub fn update_suspended(&mut self, shown: &[u64], now: std::time::Instant) {
+        let windows = self
+            .windows
+            .iter()
+            .filter(|(_, window)| {
+                matches!(
+                    window.surface.underlying_surface(),
+                    WindowSurface::Wayland(_)
+                )
+            })
+            .map(|(id, _)| (*id, shown.contains(id)));
+        for (id, suspended) in self.suspension.update(windows, now) {
+            let Some(WindowSurface::Wayland(toplevel)) = self
+                .windows
+                .get(&id)
+                .map(|window| window.surface.underlying_surface())
+            else {
+                continue;
+            };
+            if toplevel.version() < XDG_TOPLEVEL_STATE_SUSPENDED_SINCE {
+                continue;
+            }
+            toplevel.with_pending_state(|pending| {
+                if suspended {
+                    pending.states.set(xdg_toplevel::State::Suspended);
+                } else {
+                    pending.states.unset(xdg_toplevel::State::Suspended);
+                }
+            });
+            toplevel.send_pending_configure();
+        }
+    }
+
+    /// When the next hidden window is due to be suspended.
+    pub fn suspend_deadline(&self) -> Option<std::time::Instant> {
+        self.suspension.deadline()
+    }
+
+    /// Whether window `id` is suspended (Mutter's `SUSPENDED`).
+    pub fn is_suspended(&self, id: u64) -> bool {
+        self.suspension.is_suspended(id)
+    }
+
+    /// Every suspended window, in id order.
+    pub fn suspended_windows(&self) -> Vec<u64> {
+        self.suspension.suspended()
+    }
+
+    /// Root surfaces of the suspended windows whose clients were told
+    /// (xdg-shell v6 and later). Mutter sends hidden surfaces no frame
+    /// callbacks; these get none until they resume.
+    pub fn told_suspended_surfaces(&self) -> Vec<WlSurface> {
+        self.suspension
+            .suspended()
+            .into_iter()
+            .filter_map(
+                |id| match self.windows.get(&id)?.surface.underlying_surface() {
+                    WindowSurface::Wayland(toplevel)
+                        if toplevel.version() >= XDG_TOPLEVEL_STATE_SUSPENDED_SINCE =>
+                    {
+                        Some(toplevel.wl_surface().clone())
+                    }
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
     /// The workspace switch motion (stepped by the runtime).
     pub fn workspace_slide(&self) -> &crate::workspace_slide::WorkspaceSlide {
         &self.workspace_slide
@@ -1524,16 +1611,21 @@ impl WindowManager {
             .collect();
         state.refresh_ime_cursor_origins();
         // Never pull focus out from under a live grab.
-        if state.take_popup_refocus() && !state.popup_grab_active() {
+        let grabbed = state.popup_grab_active();
+        let popup_refocus = state.take_popup_refocus() && !grabbed;
+        // Unlock already handed the keyboard back without raising
+        // (`unlock_input`); only the pointer is re-delivered here.
+        let unlock_refocus = std::mem::take(&mut self.unlock_pointer_refocus) && !grabbed;
+        if popup_refocus {
             self.restore_keyboard_owner(state);
-            // The grab held pointer focus wherever the pointer went:
-            // re-deliver it where the pointer is now, so the surface it
-            // left hears the leave (a panel button drops its hover).
-            if self.pointer.is_some() {
-                let pos = self.pointer_pos;
-                let time = (crate::state::system_millis() & u64::from(u32::MAX)) as u32;
-                self.pointer_motion(state, pos, time);
-            }
+        }
+        // The grab (or the lock) held pointer focus wherever the pointer
+        // went: re-deliver it where the pointer is now, so the surface it
+        // left hears the leave (a panel button drops its hover).
+        if (popup_refocus || unlock_refocus) && self.pointer.is_some() {
+            let pos = self.pointer_pos;
+            let time = (crate::state::system_millis() & u64::from(u32::MAX)) as u32;
+            self.pointer_motion(state, pos, time);
         }
         let live: Vec<ToplevelSurface> = state.toplevels();
         let mut seen = Vec::with_capacity(live.len());
@@ -1708,7 +1800,7 @@ impl WindowManager {
         self.pre_overview_focus = None;
         if let Some(old) = self.overview_activated.take() {
             if Some(old) != restore {
-                self.configure(old, false);
+                self.deactivate(old);
             }
         }
         self.apply_focus(state, restore);
@@ -2590,7 +2682,7 @@ impl WindowManager {
         }
         if self.overview_activated != id {
             if let Some(old) = self.overview_activated {
-                self.configure(old, false);
+                self.deactivate(old);
             }
             if let Some(id) = id {
                 self.configure(id, true);
@@ -2655,7 +2747,7 @@ impl WindowManager {
         let serial = SERIAL_COUNTER.next_serial();
         for old in [previous, self.activated.take()].into_iter().flatten() {
             if Some(old) != id {
-                self.configure(old, false);
+                self.deactivate(old);
             }
         }
         if let Some(id) = id {
@@ -2726,6 +2818,19 @@ impl WindowManager {
     /// flag, and presentation state. X11 windows take the toolkit's
     /// X11 configure path with the same geometry and activation.
     fn configure(&self, id: u64, activated: bool) {
+        self.configure_with(id, activated, false);
+    }
+
+    /// Tell `id` it is no longer activated. Like Mutter, which configures
+    /// on a change of the window's state, a native window already told
+    /// gets no second, identical configure: one focus change deactivates
+    /// the previously focused and the previously activated window, often
+    /// the same one (#503).
+    fn deactivate(&self, id: u64) {
+        self.configure_with(id, false, true);
+    }
+
+    fn configure_with(&self, id: u64, activated: bool, only_changes: bool) {
         self.pointer_scene_dirty.set(true);
         let Some(window) = self.windows.get(&id) else {
             return;
@@ -2737,10 +2842,16 @@ impl WindowManager {
                 // picks its own.
                 let size = (!(window.unplaced && layout == WindowLayout::Floating))
                     .then_some(window.geometry.size);
-                Self::configure_wayland(toplevel, &layout, size, activated);
+                Self::configure_wayland(toplevel, &layout, size, activated, only_changes);
             }
             #[cfg(feature = "xwayland")]
             WindowSurface::X11(surface) => {
+                if only_changes
+                    && surface.is_activated() == activated
+                    && surface.geometry() == window.geometry
+                {
+                    return;
+                }
                 if surface.set_activated(activated).is_err()
                     || surface.configure(Some(window.geometry)).is_err()
                 {
@@ -2751,12 +2862,14 @@ impl WindowManager {
     }
 
     /// Advertise geometry, activation, and presentation state to one
-    /// native client.
+    /// native client; with `only_changes`, only if they differ from what
+    /// it was last told.
     fn configure_wayland(
         surface: &ToplevelSurface,
         layout: &WindowLayout,
         size: Option<Size<i32, Logical>>,
         activated: bool,
+        only_changes: bool,
     ) {
         surface.with_pending_state(|pending| {
             pending.size = size;
@@ -2807,7 +2920,11 @@ impl WindowManager {
                 }
             }
         });
-        surface.send_configure();
+        if only_changes {
+            surface.send_pending_configure();
+        } else {
+            surface.send_configure();
+        }
     }
 
     fn strip_grab_owner(grab: PointerGrab) -> Option<StripPointer> {
@@ -4274,8 +4391,8 @@ impl WindowManager {
     /// none is up (ext-session-lock-v1: nothing behind the lock has
     /// focus). Applications get wl_keyboard.leave as the session locks,
     /// as GNOME's lock screen takes focus, instead of keeping it until
-    /// the first key press; [`Self::refocus_after_lock`] hands it back
-    /// on unlock.
+    /// the first key press; [`Self::unlock_input`] hands it back on
+    /// unlock.
     pub fn hold_lock_focus(
         &mut self,
         state: &mut State,
@@ -4289,12 +4406,14 @@ impl WindowManager {
     }
 
     /// Hand the keyboard back to whoever owns it when nothing holds it
-    /// (after a popup grab, after unlock): the parked overview first,
-    /// then an Exclusive layer surface (the panel holding Ctrl+Alt+Tab
-    /// focus keeps its keyboard across its own menus), and only then the
+    /// (after a popup grab): the parked overview first, then an
+    /// Exclusive layer surface (the panel holding Ctrl+Alt+Tab focus
+    /// keeps its keyboard across its own menus), and only then the
     /// focused window. Handing an Exclusive hold back to a window (or
     /// nothing) strands the panel inactive with GTK focus intact but no
-    /// keyboard (G-PANEL-FOCUS).
+    /// keyboard (G-PANEL-FOCUS). Unlock walks the same owners through
+    /// [`Self::unlock_input`], which also honours a popup grab taken
+    /// while locked and never raises.
     pub fn restore_keyboard_owner(&mut self, state: &mut State) {
         if let Some(held) = self.overview_held.clone() {
             let serial = SERIAL_COUNTER.next_serial();
@@ -4314,24 +4433,61 @@ impl WindowManager {
         }
     }
 
-    /// The lock lifted: give the keyboard back to what had it, as GNOME
-    /// Shell's `popModal` does (screenShield.js locks with a modal stage
-    /// grab, which revokes Mutter's Wayland popup grab without dismissing
-    /// it): the topmost popup of a grab that outlived the lock, else the
-    /// owner a popup grab hands back to (the parked overview, an
-    /// Exclusive layer, the focused window). Without this the keyboard
-    /// stayed on the destroyed lock surface until the next click.
-    pub fn refocus_after_lock(&mut self, state: &mut State) {
-        if let Some(top) = state.popup_grab.last().map(|p| p.wl_surface().clone()) {
-            if let Some(keyboard) = self.keyboard.clone() {
-                keyboard.set_focus(state, Some(top), SERIAL_COUNTER.next_serial());
-            }
-            return;
+    /// The authoritative lock-to-session handoff, never a per-frame focus sync.
+    /// Clear client-visible holds before entering any session surface, but keep
+    /// physical/XKB state until real keyup. Trusted AT runs before this filter.
+    ///
+    /// The keyboard goes back to what had it, as GNOME Shell's `popModal`
+    /// does. The lock dismissed every popup grab
+    /// ([`crate::State::dismiss_popup_grab_for_lock`]), so only a grab taken
+    /// while locked is returned to (its topmost popup); otherwise the owner
+    /// a popup grab hands back to (the parked overview, an Exclusive layer,
+    /// the focused window).
+    pub fn unlock_input(&mut self, state: &mut State) {
+        if let Some(keyboard) = &self.keyboard {
+            self.unlock_quarantined.extend(keyboard.pressed_keys());
+            keyboard.clear_forwarded_pressed_keys();
+            // Even without a mapped shield the session may retain focus and
+            // a pre-lock client-visible hold. A leave balances that client's
+            // state before its genuine release becomes quarantined.
+            keyboard.set_focus(state, None, SERIAL_COUNTER.next_serial());
         }
-        // No grab to return to: the owner has the keyboard back at once,
-        // and the next reconcile re-delivers pointer focus as after a grab.
-        self.restore_keyboard_owner(state);
-        state.popup_refocus = true;
+        // A popup grab is a logical owner, not a Smithay keyboard grab.
+        // Lock input moved actual focus away; restore its deepest surface
+        // without dismissing it or stealing focus for the underlying window.
+        let grabbed = state.popup_grab_surface().cloned();
+        // No grab to return to: the next reconcile re-delivers pointer
+        // focus as after a grab.
+        self.unlock_pointer_refocus = grabbed.is_none();
+        let owner = grabbed
+            .or_else(|| self.overview_held.clone())
+            .or_else(|| crate::layer::exclusive_keyboard_layer(state));
+        if let Some(surface) = owner {
+            if let Some(keyboard) = self.keyboard.clone() {
+                keyboard.set_focus(state, Some(surface.clone()), SERIAL_COUNTER.next_serial());
+            }
+            state.sync_selection_focus(Some(&surface));
+        } else {
+            self.apply_focus_raise(state, self.model.focused(), false);
+        }
+    }
+
+    /// Consume a quarantined physical hold after the trusted AT has seen it.
+    /// Releases clear real seat state too, even if another route consumes them.
+    pub fn discard_quarantined_key_input(
+        &mut self,
+        state: &mut State,
+        input: &ManagerInput,
+    ) -> bool {
+        let ManagerInput::Key { keycode, .. } = input else {
+            return false;
+        };
+        let code = keycode.saturating_add(XKB_X11_OFFSET).into();
+        if !self.unlock_quarantined.contains(&code) {
+            return false;
+        }
+        self.discard_key_input(state, input);
+        true
     }
 
     /// Route one input event to the session-lock surface and nothing
@@ -4513,6 +4669,24 @@ impl WindowManager {
         let Some(keyboard) = self.keyboard.clone() else {
             return false;
         };
+        if self.lock_input_active && !pressed {
+            // A second lock may own the genuine keyup of a hold quarantined
+            // by the previous unlock. Do not poison a later fresh press.
+            self.unlock_quarantined
+                .remove(&keycode.saturating_add(XKB_X11_OFFSET).into());
+        }
+        if !self.lock_input_active
+            && self.discard_quarantined_key_input(
+                state,
+                &ManagerInput::Key {
+                    keycode,
+                    pressed,
+                    time,
+                },
+            )
+        {
+            return true;
+        }
         if pressed && keycode == ESCAPE_KEYCODE && self.cancel_strip_pointer(state) {
             keyboard.input_discard(
                 state,
@@ -6602,14 +6776,20 @@ impl WindowManager {
         else {
             return false;
         };
-        self.a11y_shadow.key(
+        let grabbed = self.a11y_shadow.key(
             &keyboard,
             state,
             self.keymap_generation,
             monitor,
             (*keycode, *pressed),
             self.repeat.1,
-        )
+        );
+        if grabbed {
+            // AT grants can change while an ordinary lock-origin hold is
+            // quarantined. Still retire that seat hold on its genuine keyup.
+            self.discard_quarantined_key_input(state, input);
+        }
+        grabbed
     }
 
     /// Keep physical modifier holds current even when a lock, blanking shield
@@ -6635,6 +6815,8 @@ impl WindowManager {
         ) = (self.keyboard.clone(), input)
         {
             if !*pressed {
+                self.unlock_quarantined
+                    .remove(&keycode.saturating_add(XKB_X11_OFFSET).into());
                 self.accel_held.retain(|held| held.keycode != *keycode);
             }
             keyboard.input_discard(
@@ -7221,6 +7403,9 @@ impl WindowManager {
     /// Alt+F4 asks the focused client to close (cancelling an open
     /// switcher with it); its press is consumed too.
     pub fn on_input(&mut self, state: &mut State, input: ManagerInput) {
+        if self.discard_quarantined_key_input(state, &input) {
+            return;
+        }
         match input {
             ManagerInput::Key {
                 keycode,

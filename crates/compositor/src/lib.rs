@@ -87,6 +87,7 @@ pub mod animation;
 pub mod animation_clock;
 mod auth_owner;
 mod bell;
+pub mod buffer_upload;
 pub mod capture_security;
 mod client_listener;
 pub mod clipboard_manager;
@@ -115,6 +116,7 @@ pub mod introspect;
 pub mod layer;
 pub mod lock;
 pub mod lockdown;
+pub(crate) mod lockdown_settings;
 mod logind_session;
 pub mod magnifier;
 pub mod malloc;
@@ -169,6 +171,7 @@ pub mod spring;
 pub mod state;
 mod state_snapshot;
 pub mod supervise;
+mod suspend;
 pub mod tablet;
 pub mod tablet_actions;
 pub(crate) mod tablet_settings;
@@ -221,6 +224,9 @@ pub(crate) struct OutputEntry {
 pub struct State {
     /// Surface commits/destruction invalidate the pointer's scene pick.
     pub(crate) pointer_scene_dirty: bool,
+    /// Surface commits applied so far, whatever applied them: a client
+    /// request, or a refresh cycle releasing a held-back one.
+    pub(crate) commit_count: u64,
     pub(crate) window_icons: window_icons::WindowIcons,
     compositor_state: CompositorState,
     shm_state: ShmState,
@@ -278,6 +284,8 @@ pub struct State {
     /// (and through it the SHM pool mapping and fd) for every banner,
     /// overview toggle and other short-lived layer surface (#307).
     pub(crate) dead_layer_surfaces: std::collections::HashSet<ObjectId>,
+    /// Surfaces whose commits await their upload ([`buffer_upload`]).
+    pub(crate) committed: buffer_upload::Committed,
     /// Popup trees per parent surface (#88).
     pub(crate) popups: smithay::desktop::PopupManager,
     /// Popups holding an explicit grab, oldest first: an outside click
@@ -806,7 +814,9 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &wl_surface::WlSurface) {
         self.pointer_scene_dirty = true;
+        self.commit_count = self.commit_count.wrapping_add(1);
         on_commit_buffer_handler::<State>(surface);
+        self.committed.push(surface);
         self.window_icons.commit(surface);
         self.popups.commit(surface);
         if let Some(smithay::desktop::PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
@@ -1050,6 +1060,18 @@ impl State {
         true
     }
 
+    /// The session locks: GNOME's lock closes every open menu with its
+    /// grab, so `popup_done` goes to each grabbed popup (a GTK popover
+    /// holding its toolkit grab would otherwise keep the lock screen's
+    /// keys in the same client). Nothing is handed the keyboard back:
+    /// it is the lock's until `unlock_input`. Returns whether a
+    /// grab was dismissed.
+    pub fn dismiss_popup_grab_for_lock(&mut self) -> bool {
+        let dismissed = self.dismiss_popup_grab();
+        self.popup_refocus = false;
+        dismissed
+    }
+
     /// Take the "hand keyboard focus back" flag (see `popup_refocus`).
     pub(crate) fn take_popup_refocus(&mut self) -> bool {
         std::mem::take(&mut self.popup_refocus)
@@ -1068,6 +1090,11 @@ impl State {
     /// Whether an explicit popup grab is active.
     pub fn popup_grab_active(&self) -> bool {
         !self.popup_grab.is_empty()
+    }
+
+    /// Keyboard owner at the deepest surviving level of an explicit grab.
+    pub(crate) fn popup_grab_surface(&self) -> Option<&wl_surface::WlSurface> {
+        self.popup_grab.last().map(|popup| popup.wl_surface())
     }
 
     /// Whether `surface` is a popup holding (part of) the explicit grab.
@@ -1222,11 +1249,13 @@ impl State {
             clipboard_manager: Default::default(),
             panel_surfaces: Vec::new(),
             dead_layer_surfaces: std::collections::HashSet::new(),
+            committed: Default::default(),
             popups: smithay::desktop::PopupManager::default(),
             popup_grab: Vec::new(),
             popup_refocus: false,
             window_origins: std::collections::HashMap::new(),
             pointer_scene_dirty: true,
+            commit_count: 0,
             initial_outputs: std::collections::HashMap::new(),
             outputs: Vec::new(),
             retired_output_globals: Vec::new(),
@@ -1724,9 +1753,11 @@ impl TestCompositor {
     }
 
     /// The runtime's idle tick at `now`: ext-idle-notify notifications
-    /// due by then fire, held back by live idle inhibitors.
-    pub fn idle_tick(&mut self, now: std::time::Instant) {
-        let inhibited = self.state.idle_inhibited();
+    /// due by then fire, held back by idle inhibitors on surfaces
+    /// `manager` shows.
+    pub fn idle_tick(&mut self, manager: &windows::WindowManager, now: std::time::Instant) {
+        let shown = crate::frame_timing::drawn_roots(&self.state, manager, false);
+        let inhibited = self.state.idle_inhibited(&shown);
         self.state.protocols.idle_notifier.tick(now, inhibited);
     }
 

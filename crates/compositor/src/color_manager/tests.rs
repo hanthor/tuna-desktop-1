@@ -373,11 +373,8 @@ impl TestBus {
         }
     }
 
-    fn connect(&self) -> zbus::blocking::Connection {
-        zbus::blocking::connection::Builder::address(self.address.as_str())
-            .unwrap()
-            .build()
-            .unwrap()
+    fn connect(&self) -> zbus::Connection {
+        zbus::block_on(zbus::connection::Builder::address(self.address.as_str()).build()).unwrap()
     }
 }
 
@@ -418,13 +415,13 @@ fn sanitize(id: &str) -> String {
 
 #[zbus::interface(name = "org.freedesktop.ColorManager")]
 impl FakeColord {
-    fn get_devices(&self) -> Vec<zbus::zvariant::OwnedObjectPath> {
+    fn get_devices(&self) -> Vec<zbus::OwnedObjectPath> {
         self.0
             .lock()
             .unwrap()
             .devices
             .iter()
-            .map(|d| zbus::zvariant::OwnedObjectPath::try_from(d.1.clone()).unwrap())
+            .map(|d| zbus::OwnedObjectPath::try_from(d.1.clone()).unwrap())
             .collect()
     }
 
@@ -434,7 +431,7 @@ impl FakeColord {
         _scope: String,
         props: HashMap<String, String>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
-    ) -> Result<zbus::zvariant::OwnedObjectPath, CdError> {
+    ) -> Result<zbus::OwnedObjectPath, CdError> {
         let path = format!("/org/freedesktop/ColorManager/devices/{}", sanitize(&id));
         {
             let mut s = self.0.lock().unwrap();
@@ -461,34 +458,34 @@ impl FakeColord {
                 },
             )
             .await?;
-        Ok(zbus::zvariant::OwnedObjectPath::try_from(path).unwrap())
+        Ok(zbus::OwnedObjectPath::try_from(path).unwrap())
     }
 
-    fn find_device_by_id(&self, id: String) -> Result<zbus::zvariant::OwnedObjectPath, CdError> {
+    fn find_device_by_id(&self, id: String) -> Result<zbus::OwnedObjectPath, CdError> {
         let s = self.0.lock().unwrap();
         s.devices
             .iter()
             .find(|d| d.0 == id)
-            .map(|d| zbus::zvariant::OwnedObjectPath::try_from(d.1.clone()).unwrap())
+            .map(|d| zbus::OwnedObjectPath::try_from(d.1.clone()).unwrap())
             .ok_or(CdError::NotFound(id))
     }
 
-    fn find_profile_by_id(&self, id: String) -> Result<zbus::zvariant::OwnedObjectPath, CdError> {
+    fn find_profile_by_id(&self, id: String) -> Result<zbus::OwnedObjectPath, CdError> {
         let s = self.0.lock().unwrap();
         s.profiles
             .iter()
             .find(|p| p.0 == id)
-            .map(|p| zbus::zvariant::OwnedObjectPath::try_from(p.1.clone()).unwrap())
+            .map(|p| zbus::OwnedObjectPath::try_from(p.1.clone()).unwrap())
             .ok_or(CdError::NotFound(id))
     }
 
-    fn delete_device(&self, path: zbus::zvariant::OwnedObjectPath) {
+    fn delete_device(&self, path: zbus::OwnedObjectPath) {
         let mut s = self.0.lock().unwrap();
         s.devices.retain(|d| d.1 != path.as_str());
         s.deleted.push(path.to_string());
     }
 
-    fn delete_profile(&self, path: zbus::zvariant::OwnedObjectPath) {
+    fn delete_profile(&self, path: zbus::OwnedObjectPath) {
         let mut s = self.0.lock().unwrap();
         s.profiles.retain(|p| p.1 != path.as_str());
         s.deleted.push(path.to_string());
@@ -498,11 +495,11 @@ impl FakeColord {
         &self,
         id: String,
         _scope: String,
-        fd: zbus::zvariant::OwnedFd,
+        fd: zbus::OwnedFd,
         props: HashMap<String, String>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
         #[zbus(signal_emitter)] emitter: zbus::object_server::SignalEmitter<'_>,
-    ) -> Result<zbus::zvariant::OwnedObjectPath, CdError> {
+    ) -> Result<zbus::OwnedObjectPath, CdError> {
         let mut file = std::fs::File::from(std::os::fd::OwnedFd::from(fd));
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(&mut file, &mut bytes).unwrap();
@@ -539,16 +536,16 @@ impl FakeColord {
             )
             .await?;
         if let Some(device) = mapped_device {
-            let device = zbus::zvariant::ObjectPath::try_from(device).unwrap();
+            let device = zbus::ObjectPath::try_from(device).unwrap();
             Self::device_changed(&emitter, device).await?;
         }
-        Ok(zbus::zvariant::OwnedObjectPath::try_from(path).unwrap())
+        Ok(zbus::OwnedObjectPath::try_from(path).unwrap())
     }
 
     #[zbus(signal)]
     async fn device_changed(
         emitter: &zbus::object_server::SignalEmitter<'_>,
-        device: zbus::zvariant::ObjectPath<'_>,
+        device: zbus::ObjectPath<'_>,
     ) -> zbus::Result<()>;
 }
 
@@ -573,7 +570,7 @@ struct FakeDevice {
 #[zbus::interface(name = "org.freedesktop.ColorManager.Device")]
 impl FakeDevice {
     #[zbus(property)]
-    fn profiles(&self) -> Vec<zbus::zvariant::OwnedObjectPath> {
+    fn profiles(&self) -> Vec<zbus::OwnedObjectPath> {
         self.state
             .lock()
             .unwrap()
@@ -582,7 +579,7 @@ impl FakeDevice {
             .cloned()
             .unwrap_or_default()
             .into_iter()
-            .map(|p| zbus::zvariant::OwnedObjectPath::try_from(p).unwrap())
+            .map(|p| zbus::OwnedObjectPath::try_from(p).unwrap())
             .collect()
     }
 
@@ -590,7 +587,7 @@ impl FakeDevice {
     /// move first, then colord announces DeviceChanged.
     async fn make_profile_default(
         &self,
-        profile: zbus::zvariant::OwnedObjectPath,
+        profile: zbus::OwnedObjectPath,
         #[zbus(connection)] conn: &zbus::Connection,
     ) -> zbus::fdo::Result<()> {
         {
@@ -602,7 +599,7 @@ impl FakeDevice {
         let emitter = zbus::object_server::SignalEmitter::new(conn, CD_PATH)?;
         FakeColord::device_changed(
             &emitter,
-            zbus::zvariant::ObjectPath::try_from(self.path.as_str()).unwrap(),
+            zbus::ObjectPath::try_from(self.path.as_str()).unwrap(),
         )
         .await?;
         Ok(())
@@ -639,11 +636,11 @@ fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
     }
 }
 
-fn serve_fake(bus: &TestBus) -> (FakeColord, zbus::blocking::Connection) {
+fn serve_fake(bus: &TestBus) -> (FakeColord, zbus::Connection) {
     let fake = FakeColord::default();
     let conn = bus.connect();
-    conn.object_server().at(CD_PATH, fake.clone()).unwrap();
-    conn.request_name(CD_SERVICE).unwrap();
+    zbus::block_on(conn.object_server().at(CD_PATH, fake.clone())).unwrap();
+    zbus::block_on(conn.request_name(CD_SERVICE)).unwrap();
     (fake, conn)
 }
 
@@ -727,15 +724,14 @@ fn colord_client_registers_devices_profiles_and_follows_assignment() {
         .1
         .clone();
     let device_path = dp.object_path.clone().unwrap();
-    fake_conn
-        .call_method(
-            Some(CD_SERVICE),
-            device_path.as_str(),
-            Some(CD_DEVICE),
-            "MakeProfileDefault",
-            &(zbus::zvariant::ObjectPath::try_from(user_path.as_str()).unwrap(),),
-        )
-        .unwrap();
+    zbus::block_on(fake_conn.call_method(
+        Some(CD_SERVICE),
+        device_path.as_str(),
+        Some(CD_DEVICE),
+        "MakeProfileDefault",
+        &(zbus::ObjectPath::try_from(user_path.as_str()).unwrap(),),
+    ))
+    .unwrap();
     wait_for("calibrated profile assigned", || {
         share
             .device("DP-1")
@@ -818,5 +814,69 @@ fn colord_absence_is_reported_not_fatal() {
         matches!(share.colord_status(), ColordStatus::Unavailable(_))
     });
     assert!(share.devices().is_empty());
+    client.shutdown();
+}
+
+/// #503: the colord thread sleeps until something happens. An unchanged
+/// store is not scanned; a profile dropped into it is registered from its
+/// change event; and a symbolic link, whose target lives outside the
+/// watch, brings back the periodic scan that sees the target change.
+#[test]
+fn colord_thread_scans_the_store_on_change_events_not_on_a_timer() {
+    let bus = TestBus::spawn();
+    let (fake, _fake_conn) = serve_fake(&bus);
+    let icc_dir = tempfile::tempdir().unwrap();
+    let share = Arc::new(ColorShare::default());
+    // No EDID and no gamma LUT: the client writes no device profile into
+    // the store itself.
+    let client = ColordClient::start(
+        share.clone(),
+        vec![ColordMonitor {
+            identity: MonitorIdentity::new("HDMI-A-1", None, true, (0, 0), |_| None),
+            gamma_lut_size: 0,
+        }],
+        Bus::Address(bus.address.clone()),
+        Some(icc_dir.path().to_owned()),
+    );
+    wait_for("device ready", || {
+        share.device("HDMI-A-1").is_some_and(|d| d.ready)
+    });
+    let scans = || share.store_scans.load(Ordering::SeqCst);
+    let registered = |file: &Path| {
+        let name = file.display().to_string();
+        let state = fake.0.lock().unwrap();
+        state.profiles.iter().filter(|p| p.2 == name).count()
+    };
+
+    // Three periods of the 500 ms rescan this replaced: nothing is scanned.
+    let before = scans();
+    assert!(before >= 1, "the store is scanned at startup");
+    std::thread::sleep(Duration::from_millis(1600));
+    assert_eq!(scans(), before, "an unchanged store must not be scanned");
+
+    // A profile dropped into the store is registered from its change event.
+    let later = icc_dir.path().join("later.icc");
+    let mut late = icc::DisplayProfile::srgb();
+    late.description = "Later".to_owned();
+    std::fs::write(&later, late.encode().unwrap()).unwrap();
+    wait_for("later profile registered", || registered(&later) == 1);
+    assert!(scans() > before);
+
+    // A link's target changes where the watch cannot see it: the periodic
+    // scan returns and registers the rewritten target, as before.
+    let outside = tempfile::tempdir().unwrap();
+    let target = std::fs::canonicalize(outside.path())
+        .unwrap()
+        .join("linked.icc");
+    let mut linked = icc::DisplayProfile::srgb();
+    linked.description = "Linked".to_owned();
+    std::fs::write(&target, linked.encode().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&target, icc_dir.path().join("linked.icc")).unwrap();
+    wait_for("linked profile registered", || registered(&target) == 1);
+    linked.description = "Linked again".to_owned();
+    std::fs::write(&target, linked.encode().unwrap()).unwrap();
+    wait_for("rewritten link target registered", || {
+        registered(&target) == 2
+    });
     client.shutdown();
 }
