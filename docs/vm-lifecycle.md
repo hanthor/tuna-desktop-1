@@ -952,8 +952,11 @@ feature tour:
 | V-POINTER-LIVE | GNOME mouse speed/natural-scroll, acceleration profile (`flat`, then `adaptive`), middle-click emulation (on, then off) and scroll-wheel emulation (button 2 → `on-button-down` with BTN_MIDDLE and button lock, then off) reach live libinput device state and restore, asserted on the compositor's per-device readback. Each option needs at least one mouse offering it; wheel emulation is asserted on mice offering button scrolling and BTN_MIDDLE in `pointer_buttons` (libinput rejects a button the device lacks). Both source-built and published guests must report profile/button state and provide GNOME 51's wheel-emulation schema; absence fails rather than skipping proof. Snapshots: lifecycle/pointer-live.json (#343) |
 | V-POINTER-HOTPLUG | A QMP-hotplugged USB mouse arrives with the current settings already applied (DRM DeviceAdded path); unplug drops it while survivors keep theirs; bus discovery, arrival and survivor snapshots retained in lifecycle/pointer-hotplug.json (#343) |
 | V-VT | VT away/back, DRM pause/activate events, unchanged process identities and app rectangles, matching body plus a fresh visible count update from the real GTK client |
-| V-SUSPEND | Real logind suspend reaches QEMU `suspended`; the first guest snapshot after `system_wakeup` must already be locked, with all application identities intact; the real varied lock mask must repaint within five seconds, matching the pre-suspend mask; QEMU inactive-output placeholders fail |
-| V-SLEEP-AUTH-FAIL-CLOSED / V-SLEEP-FRESH-AUTH | The single real suspend interrupts a correct password attempt delayed by actual pam_exec; the real PAM success from the old generation is refused, then fresh correct authentication succeeds |
+| V-SLEEP-DELAY-INHIBITOR | On the unlocked desktop the compositor's snapshot records its logind sleep delay inhibitor held, and logind's inhibitor list (`systemd-inhibit --list`) shows a `delay` inhibitor on `sleep` from "Tuna Desktop" for the session user's compositor PID, as GNOME 51's screen shield holds one while unlocked (lifecycle/sleep-delay-before.json) |
+| V-SUSPEND-UNLOCKED (with -GPU-PM / -GPU-UPLOAD) | The first real suspend starts from the unlocked desktop; the same checks as V-SUSPEND, so the first snapshot after wake must already be locked |
+| V-SUSPEND-LOCKED-FRAME | Across that suspend the compositor's `sleep_delay` record shows exactly one sleep whose inhibitor it released only once every lit output had scanned out a frame drawn locked, no release without that, no overrun of logind's `InhibitDelayMaxUSec`, and the inhibitor taken again after wake (lifecycle/sleep-delay-after.json). QEMU's display while suspended is logged as a non-gating observation |
+| V-SUSPEND | The second real suspend, from a locked session: real logind suspend reaches QEMU `suspended`; the first guest snapshot after `system_wakeup` must already be locked, with all application identities intact; the real varied lock mask must repaint within five seconds, matching the pre-suspend mask; QEMU inactive-output placeholders fail |
+| V-SLEEP-AUTH-FAIL-CLOSED / V-SLEEP-FRESH-AUTH | The second real suspend interrupts a correct password attempt delayed by actual pam_exec; the real PAM success from the old generation is refused, then fresh correct authentication succeeds |
 | V-SLEEP-CLIENT-REPAINT | The same GTK client receives a fresh key and visibly repaints after wake/unlock |
 | V-VT-FAIL-CLOSED | VT away/back while locked keeps the mask and original application processes |
 | V-AUTH-FAIL-CLOSED | Real PAM service temporarily uses `pam_deny`; fresh submitted/refused milestones prove the correct test password was attempted and denied; original service restored afterward |
@@ -1002,8 +1005,17 @@ can carry the preceding vblank's timestamp, so timestamps alone do not
 identify abandoned frames. A failed reset or drain keeps scanout blocked
 until recovery succeeds. Wake
 recovery does not depend on a VT change; an off-seat wake waits for seat
-activation. This does not establish a delay inhibitor or physical masked
-frame acknowledgement before sleep.
+activation.
+
+While the session is active and the lock screen is allowed, the compositor
+holds a logind `delay` inhibitor on `sleep`, as GNOME 51's `screenShield.js`
+`_syncInhibitor` does. On `PrepareForSleep(true)` it locks and closes the
+inhibitor only once every lit output has completed the page flip of a frame
+drawn locked, so the frame left on screen through sleep is the lock. It takes
+the inhibitor again on `PrepareForSleep(false)`. When logind's
+`InhibitDelayMaxUSec` runs out first, logind sleeps anyway and the session is
+still locked; the record counts an overrun. A lockdown that disables the lock
+screen, or a session off its VT, releases the inhibitor at once.
 
 These new gates require their own actual CI results before acceptance.
 Output hotplug and loss of every compositor-adjacent service remain
