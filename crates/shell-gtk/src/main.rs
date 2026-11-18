@@ -130,6 +130,7 @@ mod location;
 mod lock;
 mod lock_auth;
 mod lock_curtain;
+mod lock_notifications;
 mod lock_wiggle;
 mod lockdown;
 mod logic;
@@ -2358,6 +2359,20 @@ fn build(app: &adw::Application) {
             }),
         )
     };
+    // GNOME's lock screen lists unseen notifications by their policy
+    // (unlockDialog.js NotificationsBox, #348), live while locked.
+    {
+        let notify = notify.clone();
+        lock_ui.set_notifications(Rc::new(move || notify.lock_entries()));
+    }
+    {
+        let lock_ui = Rc::downgrade(&lock_ui);
+        notify.connect_lock_changed(move || {
+            if let Some(lock_ui) = lock_ui.upgrade() {
+                lock_ui.refresh_notifications();
+            }
+        });
+    }
     let brightness_policy_settings =
         settings("org.gnome.settings-daemon.plugins.power").filter(|s| {
             s.settings_schema()
@@ -3576,15 +3591,15 @@ fn build(app: &adw::Application) {
                 }
             };
             let vanished = owner_changed.clone();
-            // Watched for the whole session (a WatcherId unwatches
+            // Watched for the whole session (a NameWatch unwatches
             // nothing when it drops): a restarted daemon takes its keys
             // back, a crashed one leaves the native subset.
-            let _ = gio::bus_watch_name(
-                gio::BusType::Session,
+            let _ = services::bus_watch_name(
+                services::WatchBus::Type(gio::BusType::Session),
                 keybindings::MEDIA_KEYS_DAEMON,
                 gio::BusNameWatcherFlags::NONE,
-                move |_, _, _| owner_changed(true),
-                move |_, _| vanished(false),
+                move || owner_changed(true),
+                move || vanished(false),
             );
         }
         for settings in [settings, wm_settings, mutter_settings, media_settings]
@@ -4169,6 +4184,9 @@ fn build(app: &adw::Application) {
                 };
                 drop(shell);
                 input_sources.focus(holder);
+                // No banners while locked (GNOME's lock screen session
+                // mode); the lock screen lists what arrives instead.
+                notify.set_locked(locked);
                 if locked {
                     notify.release_focus();
                     release_panel_focus(&panel_focus_window, &panel_focus_held);
