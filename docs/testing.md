@@ -537,6 +537,28 @@ rm -rf gtk-shell-artifacts
 TUNA_REQUIRE_PAM_WRAPPER=1 scripts/tuna-gtk-shell-proof --artifacts gtk-shell-artifacts
 ```
 
+`--notify-lock-only` stops after panel readiness and runs just the
+lock-screen notification, notification sound and disabled-app restore
+gates (G-NOTIFY-LOCK, G-NOTIFY-LOCK-PIXELS, G-NOTIFY-LOCK-LIVE,
+G-NOTIFY-SOUND, G-NOTIFY-RESTORE); it needs pam_wrapper to unlock. The
+proof's `canberra-gtk-play` stand-in records every event sound the shell
+asks for in `canberra-calls`.
+The restore gate opens the real message-tray binding after retaining the
+long-word redaction-test notifications in history. Card text must wrap at
+character boundaries when needed, and collapsed groups must measure only
+their visible page horizontally, so hidden expanded content cannot force
+the date popup wider than the nested output.
+
+The full GTK proof's media callback barrier waits at most 25 seconds:
+one key can execute four serialized `wpctl` subprocesses with five-second
+production timeouts, plus callback dispatch. It still requires accepted
+tokens to finish successfully and the actual scheduler to be idle; a
+fixture volume write alone never proves completion.
+The power-save proof admits both dim and undim after live idle-brightness
+writes finish: only the explicit pending-transaction reply waits, for at
+most ten seconds. Other errors still fail immediately, and exact backlight
+readbacks remain required before blanking and fixture teardown.
+
 `scripts/tuna-drm-smoke` loads a kernel module and starts seatd as root.
 Run it in a VM or a disposable machine rather than your desktop session.
 The Ubuntu setup helper first checks whether vkms is already installed for
@@ -1043,7 +1065,10 @@ behind opaque surfaces (`culled_windows`). Both cover the whole output, so
 a frame that repaints only the panel or the cursor still lists the windows
 it leaves on screen as drawn. `throttled_windows` lists the windows
 whose frame callbacks run at the hidden rate (about 1 Hz): off the scene
-or wholly culled, unless the overview, the switcher or a cast shows them.
+or wholly culled, unless the overview, the switcher or a cast shows them;
+every window while locked. After 3 s hidden a window is suspended
+(`suspended_windows`, the xdg_toplevel `suspended` state) and a client
+told so gets no frame callbacks until it shows again.
 Proof `G-OCCLUSION-CULL` fullscreens an opaque window over another and
 requires the lower one to be culled and throttled, then drawn at full
 rate again once the upper window's translucent shadow returns.
