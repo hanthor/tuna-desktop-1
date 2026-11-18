@@ -24,6 +24,8 @@
 #   --window-leak-only runs panel readiness, G-WINDOW-LEAK (100 libadwaita
 #   windows opened and closed leave the compositor's memory within a fixed
 #   bound of its warm state, #1088) and G-SHELL-STABLE only.
+#   --lock-menu-only runs panel readiness, G-LOCK-WITH-MENU-OPEN and
+#   G-SHELL-STABLE only (needs pam_wrapper).
 #   --grid-cancel-only --grid-cancel-admission FILE is an exact CI comparison slice.
 #   --expect-grid-cancel-old-negative is permitted only in that admitted slice.
 #
@@ -156,7 +158,8 @@
 #   G-OV-SHELL-UI  the overview shows the search entry and the dash
 #   G-OV-SEARCH typing lists matching apps (#57)
 #   G-OV-SEARCH-STILL the focused, unchanged overview search draws no
-#               frames: the shell's caret is steady, as GNOME's (#503)
+#               frames: the shell's caret is steady, as GNOME's (#503);
+#               the window never spans the panel clock's minute turn
 #   G-OV-LAUNCH Enter launches the top result and closes the overview
 #   G-OV-APPGRID Show Apps opens the app grid
 #   G-X11-APP      XWayland is on by default: an X11 app launched from
@@ -262,6 +265,10 @@
 #                  unlocks, fades only under Reduced Motion, instant
 #                  with animations off
 #                  (these sample TUNA_ANIMATION_CLOCK at exact delays)
+#   G-LOCK-WITH-MENU-OPEN Super+L with the date menu (then quick
+#                  settings) open closes the menu; the very next typed
+#                  password and Return unlock through PAM, and the menu
+#                  stays closed after unlocking
 #   G-DISPLAY-SETTINGS GNOME Settings' DisplayConfig as Mutter 51 answers
 #                  it: modes and scales listed, verify/stale/bad-mode
 #                  errors, temporary changes unsaved, persistent ones
@@ -523,6 +530,7 @@ KEYBOARD_ROUTES_ONLY=0
 DATEMENU_ONLY=0
 SEARCH_LEAK_ONLY=0
 WINDOW_LEAK_ONLY=0
+LOCK_MENU_ONLY=0
 GRID_CANCEL_ONLY=0
 GRID_CANCEL_OLD_NEGATIVE=0
 GRID_CANCEL_ADMISSION=""
@@ -542,16 +550,17 @@ while [ $# -gt 0 ]; do
         --datemenu-only) DATEMENU_ONLY=1; shift ;;
         --search-leak-only) SEARCH_LEAK_ONLY=1; shift ;;
         --window-leak-only) WINDOW_LEAK_ONLY=1; shift ;;
+        --lock-menu-only) LOCK_MENU_ONLY=1; shift ;;
         --display) DISPLAY_ARG="$2"; shift 2 ;;
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
-        --help|-h) sed -n '2,31p' "$0"; exit 0 ;;
+        --help|-h) sed -n '2,33p' "$0"; exit 0 ;;
         *) echo "tuna-gtk-shell-proof: unknown argument $1" >&2; exit 1 ;;
     esac
 done
 if [ "$GRID_HOVER_ONLY" = 1 ] && { [ "$SCREENSHOT_KEYS_ONLY" = 1 ] || [ "$A11Y_FOCUS_ONLY" = 1 ] || [ "$GRID_CANCEL_ONLY" = 1 ] || [ "$GRID_CANCEL_OLD_NEGATIVE" = 1 ] || [ -n "$GRID_CANCEL_ADMISSION" ]; }; then
     echo "--grid-hover-only cannot be combined with other focused or grid admission flags" >&2; exit 1
 fi
-if [ "$DATEMENU_ONLY" = 1 ] && { [ "$INSTALLED_PACKAGE" = 1 ] || [ "$SCREENSHOT_KEYS_ONLY" = 1 ] || [ "$A11Y_FOCUS_ONLY" = 1 ] || [ "$TRAY_ONLY" = 1 ] || [ "$GRID_HOVER_ONLY" = 1 ] || [ "$KEYBOARD_ROUTES_ONLY" = 1 ] || [ "$SEARCH_LEAK_ONLY" = 1 ] || [ "$WINDOW_LEAK_ONLY" = 1 ] || [ "$GRID_CANCEL_ONLY" = 1 ] || [ "$GRID_CANCEL_OLD_NEGATIVE" = 1 ] || [ -n "$GRID_CANCEL_ADMISSION" ]; }; then
+if [ "$DATEMENU_ONLY" = 1 ] && { [ "$INSTALLED_PACKAGE" = 1 ] || [ "$SCREENSHOT_KEYS_ONLY" = 1 ] || [ "$A11Y_FOCUS_ONLY" = 1 ] || [ "$TRAY_ONLY" = 1 ] || [ "$GRID_HOVER_ONLY" = 1 ] || [ "$KEYBOARD_ROUTES_ONLY" = 1 ] || [ "$SEARCH_LEAK_ONLY" = 1 ] || [ "$WINDOW_LEAK_ONLY" = 1 ] || [ "$LOCK_MENU_ONLY" = 1 ] || [ "$GRID_CANCEL_ONLY" = 1 ] || [ "$GRID_CANCEL_OLD_NEGATIVE" = 1 ] || [ -n "$GRID_CANCEL_ADMISSION" ]; }; then
     echo "--datemenu-only cannot be combined with other focused, installed or grid admission flags" >&2; exit 1
 fi
 if [ "$GRID_CANCEL_ONLY" = 1 ]; then
@@ -1471,7 +1480,7 @@ MEDIA_SOURCE=0
 if [ "$INSTALLED_PACKAGE" = 0 ] && [ "$SCREENSHOT_KEYS_ONLY" = 0 ] &&
    [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$KEYBOARD_ROUTES_ONLY" = 0 ] &&
    [ "$GRID_CANCEL_ONLY" = 0 ] && [ "$DATEMENU_ONLY" = 0 ] &&
-   [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ] &&
+   [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ "$LOCK_MENU_ONLY" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ] &&
    [ -z "${TUNA_PROOF_SHELL_BIN:-}" ] && [ -z "${TUNA_SHELL_BIN:-}" ] &&
    [ -n "${GITHUB_RUN_ID:-}" ] && [ -n "${GITHUB_RUN_ATTEMPT:-}" ] &&
    [ -n "${GITHUB_SHA:-}" ]; then
@@ -1480,7 +1489,7 @@ if [ "$INSTALLED_PACKAGE" = 0 ] && [ "$SCREENSHOT_KEYS_ONLY" = 0 ] &&
 fi
 if [ "$INSTALLED_PACKAGE" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ]; then
     cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor -p tuna-wallpaper-svg -p tuna-shell-gtk -p tuna-shell-host
-    if [ "$SCREENSHOT_KEYS_ONLY" = 0 ] && [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$GRID_HOVER_ONLY" = 0 ] && [ "$DATEMENU_ONLY" = 0 ] && [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ]; then
+    if [ "$SCREENSHOT_KEYS_ONLY" = 0 ] && [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$GRID_HOVER_ONLY" = 0 ] && [ "$DATEMENU_ONLY" = 0 ] && [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ "$LOCK_MENU_ONLY" = 0 ]; then
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example icon-probe
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example shortcut-inhibit-client
     fi
@@ -1763,6 +1772,56 @@ tray_x11_gate() {
     fi
 }
 
+# G-LOCK-WITH-MENU-OPEN: GNOME's lock dismisses the open shell menu and
+# its grab, and the lock screen has the keyboard at once. Each menu is
+# opened from its keybinding, Super+L locks over it, and the password
+# is typed straight away: its first printable key lifts the curtain and
+# becomes the first character, so PAM unlocking proves every key reached
+# the lock screen (the open menu's grab once swallowed them all until an
+# Escape closed it, beta.3 qualification).
+lock_with_menu_gate() {
+    [ -n "$PAM_ON" ] || fail G-LOCK-WITH-MENU-OPEN "pam_wrapper is required to unlock"
+    for lock_menu in "super+v:Previous month:date-menu" "super+s:Dark Style:quick-settings"; do
+        lock_menu_key=${lock_menu%%:*}
+        lock_menu_rest=${lock_menu#*:}
+        lock_menu_probe=${lock_menu_rest%%:*}
+        lock_menu_name=${lock_menu_rest#*:}
+        cstate '(.locked | not)' "$lock_menu_name lock ready" 15 ||
+            fail G-LOCK-WITH-MENU-OPEN "the session was locked before opening the $lock_menu_name"
+        xdotool key "$lock_menu_key"
+        sleep 1.5
+        "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-open.json" 20 ||
+            fail G-LOCK-WITH-MENU-OPEN "accessibility dump failed"
+        showing "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-open.json" "$lock_menu_probe" ||
+            fail G-LOCK-WITH-MENU-OPEN "$lock_menu_key did not open the $lock_menu_name"
+        scrot "$ARTIFACTS/lock-menu-$lock_menu_name-01-open.png" >/dev/null
+        xdotool key super+l
+        cstate '.locked' "locked over the $lock_menu_name" 10 ||
+            fail G-LOCK-WITH-MENU-OPEN "Super+L did not lock with the $lock_menu_name open"
+        sleep 1
+        "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-locked.json" 20 ||
+            fail G-LOCK-WITH-MENU-OPEN "accessibility dump failed"
+        hidden "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-locked.json" "$lock_menu_probe" ||
+            fail G-LOCK-WITH-MENU-OPEN "the $lock_menu_name stayed open behind the lock"
+        scrot "$ARTIFACTS/lock-menu-$lock_menu_name-02-locked.png" >/dev/null
+        lock_menu_first=${UNLOCK_PASSWORD%"${UNLOCK_PASSWORD#?}"}
+        xdotool type --delay 30 "$lock_menu_first"
+        sleep 0.3
+        xdotool type --delay 30 "${UNLOCK_PASSWORD#?}"
+        scrot "$ARTIFACTS/lock-menu-$lock_menu_name-03-typed.png" >/dev/null
+        xdotool key Return
+        cstate '(.locked | not)' "unlocked from the $lock_menu_name lock" 15 ||
+            fail G-LOCK-WITH-MENU-OPEN "the password typed after locking over the $lock_menu_name did not reach the lock screen"
+        sleep 1
+        "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-unlocked.json" 20 ||
+            fail G-LOCK-WITH-MENU-OPEN "accessibility dump failed"
+        hidden "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-unlocked.json" "$lock_menu_probe" ||
+            fail G-LOCK-WITH-MENU-OPEN "the $lock_menu_name came back after unlocking"
+        scrot "$ARTIFACTS/lock-menu-$lock_menu_name-04-unlocked.png" >/dev/null
+    done
+    pass G-LOCK-WITH-MENU-OPEN "locking over the open date menu or quick settings closes it; the password typed at once and Return unlock through PAM"
+}
+
 # The panel is up once the shell registers on the a11y bus with its
 # controls; that also proves the accessible tree.
 "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-panel.json" 60 ||
@@ -1834,6 +1893,16 @@ if [ "$WINDOW_LEAK_ONLY" = 1 ]; then
     # Let the startup cover settle before the first window.
     sleep 3
     window_leak_proof
+    grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
+    shell_stable_gate
+    exit 0
+fi
+if [ "$LOCK_MENU_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "lock menu desktop ready" ||
+        fail G-LOCK-WITH-MENU-OPEN "desktop never became ready"
+    # Let the startup cover settle before the first menu.
+    sleep 3
+    lock_with_menu_gate
     grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
     shell_stable_gate
     exit 0
@@ -2836,7 +2905,26 @@ scrot "$ARTIFACTS/10-search.png" >/dev/null
 # A blinking GTK caret would redraw the entry at the display rate. The
 # grid-cancel comparison's old role runs pinned pre-#503 binaries through
 # this stage, so the gate belongs to the current build only.
+# The overview keeps the top bar, whose clock redraws once as the minute
+# turns (wall_clock.rs, as GnomeWallClock): a legitimate frame, not the
+# entry's. The window never spans a turn: within 3 s of one it first
+# waits for that turn's frame to be drawn, and within 1 s after one it
+# starts once the turn is 1 s old.
 if [ "$GRID_CANCEL_OLD_NEGATIVE" != 1 ]; then
+    minute_ms() { echo $(($(date +%s%3N) % 60000)); }
+    sleep_ms() { sleep "$(printf '%d.%03d' $(($1 / 1000)) $(($1 % 1000)))"; }
+    search_still_ms="$(minute_ms)"
+    if [ "$search_still_ms" -ge 57000 ]; then
+        search_still_frames="$(jq .rendered_frames "$CSTATE")"
+        search_still_ms="$(minute_ms)"
+    fi
+    if [ "$search_still_ms" -ge 57000 ]; then
+        sleep_ms $((60000 - search_still_ms))
+        cstate ".rendered_frames > $search_still_frames" "the clock's minute turn drawn" 5 ||
+            fail G-OV-SEARCH-STILL "the panel clock drew no frame as the minute turned"
+    elif [ "$search_still_ms" -lt 1000 ]; then
+        sleep_ms $((1000 - search_still_ms))
+    fi
     search_still_frames="$(jq .rendered_frames "$CSTATE")"
     sleep 1.5
     [ "$(jq .rendered_frames "$CSTATE")" = "$search_still_frames" ] ||
@@ -12225,6 +12313,7 @@ if [ -n "$PAM_ON" ]; then
     cp "$CSTATE" "$ARTIFACTS/locate-after-dbus-unlock.json"
     gsettings set org.gnome.desktop.interface locate-pointer false
     pass G-POINTER-TRACE-PRIVATE "D-Bus lock during an actual rendered frozen-clock ripple redacts cursor diagnostics; unlock retains no activity/history"
+    lock_with_menu_gate
     # Reduced Motion keeps GNOME's opacity change and drops the slide.
     gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
     cstate '.motion_policy == "fade-only"' "reduced curtain" ||
