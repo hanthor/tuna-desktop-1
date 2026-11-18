@@ -171,6 +171,7 @@ pub mod spring;
 pub mod state;
 mod state_snapshot;
 pub mod supervise;
+mod suspend;
 pub mod tablet;
 pub mod tablet_actions;
 pub(crate) mod tablet_settings;
@@ -1059,6 +1060,18 @@ impl State {
         true
     }
 
+    /// The session locks: GNOME's lock closes every open menu with its
+    /// grab, so `popup_done` goes to each grabbed popup (a GTK popover
+    /// holding its toolkit grab would otherwise keep the lock screen's
+    /// keys in the same client). Nothing is handed the keyboard back:
+    /// it is the lock's until `unlock_input`. Returns whether a
+    /// grab was dismissed.
+    pub fn dismiss_popup_grab_for_lock(&mut self) -> bool {
+        let dismissed = self.dismiss_popup_grab();
+        self.popup_refocus = false;
+        dismissed
+    }
+
     /// Take the "hand keyboard focus back" flag (see `popup_refocus`).
     pub(crate) fn take_popup_refocus(&mut self) -> bool {
         std::mem::take(&mut self.popup_refocus)
@@ -1740,9 +1753,11 @@ impl TestCompositor {
     }
 
     /// The runtime's idle tick at `now`: ext-idle-notify notifications
-    /// due by then fire, held back by live idle inhibitors.
-    pub fn idle_tick(&mut self, now: std::time::Instant) {
-        let inhibited = self.state.idle_inhibited();
+    /// due by then fire, held back by idle inhibitors on surfaces
+    /// `manager` shows.
+    pub fn idle_tick(&mut self, manager: &windows::WindowManager, now: std::time::Instant) {
+        let shown = crate::frame_timing::drawn_roots(&self.state, manager, false);
+        let inhibited = self.state.idle_inhibited(&shown);
         self.state.protocols.idle_notifier.tick(now, inhibited);
     }
 
