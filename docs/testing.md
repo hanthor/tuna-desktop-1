@@ -193,6 +193,14 @@ This matches Mutter 51's initial-focus path:
 [attaching the drag handler immediately invalidates focus](https://github.com/GNOME/mutter/blob/51.0/src/wayland/meta-wayland-input.c#L288-L325),
 and [drag focus sends the destination its offer while restricting source-less drags to the origin client](https://github.com/GNOME/mutter/blob/51.0/src/wayland/meta-wayland-data-device.c#L337-L397).
 
+The GTK proof's focused slices (`--*-only`) run one at a time. A new slice
+adds its usage line above `# end of --help` in the script's header (`--help`
+prints up to that line) and one case arm that calls `only_mode` with its flag
+and the traits it needs: `source-build` refuses `--installed-package`, and
+`no-media-source`, `no-examples` and `no-camera-policy` skip the full run's
+media-source receipt, example-client build and camera policy. No other
+slice's checks change.
+
 `scripts/tuna-gtk-shell-proof --window-leak-only --artifacts DIR` runs
 G-WINDOW-LEAK (#1088): after five warm-up windows, 100 libadwaita windows
 (`TUNA_WINDOW_LEAK_WINDOWS` sets the count) are opened and closed, odd ones
@@ -960,6 +968,7 @@ budget. The owner observation is null while locked.
 The compositor state (`TUNA_COMPOSITOR_STATE`) carries `frame_cost`, one
 entry per output describing its last drawn frame: `rendered` and `culled`
 element counts, `damage_rects` and `damage_area` against `output_area`,
+the box around the damage (`damage_bounds`, `[x, y, w, h]`),
 and the window ids the frame shows (`drawn_windows`) or wholly hides
 behind opaque surfaces (`culled_windows`). Both cover the whole output, so
 a frame that repaints only the panel or the cursor still lists the windows
@@ -972,6 +981,11 @@ told so gets no frame callbacks until it shows again.
 Proof `G-OCCLUSION-CULL` fullscreens an opaque window over another and
 requires the lower one to be culled and throttled, then drawn at full
 rate again once the upper window's translucent shadow returns.
+Proof `G-CLOCK-DAMAGE` (#1154) turns on clock-show-seconds and requires
+a frame whose damage lies inside the panel bar and covers under 2% of the
+output: the clock's rectangle. Before #1154 the nested output's buffer
+age read as 0 after every client commit, so each one repainted the whole
+output.
 
 ## Settings writes in proofs
 

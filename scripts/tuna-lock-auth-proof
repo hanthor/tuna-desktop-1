@@ -56,6 +56,8 @@ if [ -z "${TUNA_PROOF_PRIVATE_BUS:-}" ]; then
 fi
 unset CDPATH
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+# shellcheck source=scripts/lib/tuna-state-snapshot.sh
+. "$ROOT/scripts/lib/tuna-state-snapshot.sh"
 DISPLAY_ARG=""
 ARTIFACTS="$ROOT/lock-auth-artifacts"
 WIDTH=1280
@@ -172,7 +174,7 @@ finish() {
         FAILED_CASE="$CURRENT_CASE"
         echo "$(ledger_id "$CURRENT_CASE") fail [$CURRENT_CASE] exited with status $status" >>"$ASSERTIONS"
     fi
-    [ -s "$CSTATE" ] && cp "$CSTATE" "$ARTIFACTS/final-state.json"
+    [ -s "$CSTATE" ] && snapshot_state "$CSTATE" "$ARTIFACTS/final-state.json"
     # The compositor first, so its shell and conversations retire while
     # their buses are still there; then the buses and services.
     stop_pid "$COMPOSITOR_PID"

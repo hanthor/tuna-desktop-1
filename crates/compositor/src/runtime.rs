@@ -885,6 +885,13 @@ pub struct Runtime {
     /// Signature of the last presented nested frame; unchanged means
     /// no client, cursor, or effect moved, so the tick submits nothing.
     winit_signature: Option<crate::native_repaint::FrameSignature>,
+    /// Buffer age of the nested window's next back buffer, read right
+    /// after each swap. EGL defines it only while the window's surface is
+    /// current; the commits uploaded before a frame (#1084) leave the
+    /// context current without it, where Smithay's query fails and reads
+    /// as 0, so every client commit (the panel clock's minute) repainted
+    /// the whole output (#1154).
+    winit_age: usize,
     /// When hidden windows last got their throttled frame callbacks
     /// ([`HIDDEN_FRAME_INTERVAL`](crate::occlusion::HIDDEN_FRAME_INTERVAL)).
     hidden_beat: Option<Instant>,
@@ -1571,6 +1578,7 @@ impl Runtime {
             frame_costs: std::collections::BTreeMap::new(),
             winit_tracker: None,
             winit_signature: None,
+            winit_age: 0,
             hidden_beat: None,
             hidden_waiting: false,
             active_at: Instant::now(),
@@ -6272,6 +6280,10 @@ impl Runtime {
         self.wallpaper.set_time(now);
         self.transitions
             .advance(now, locked, lock_ready, shell_ready);
+        // The shell reports the screen saver active only once the
+        // curtain has landed: gnome-settings-daemon blanks on it.
+        self.control
+            .set_lock_screen_shown(self.transitions.lock_shown());
         // While locked the curtain carries the lock surface and its
         // background; it never uncovers content (`show_content`).
         let lock_curtain = self.transitions.curtain().filter(|_| locked);
@@ -6453,7 +6465,7 @@ impl Runtime {
             Backend::Winit(backend) => {
                 backend.window().set_cursor_visible(false);
                 let size = backend.window_size();
-                let age = backend.buffer_age().unwrap_or(0);
+                let age = self.winit_age;
                 let mut presented: PresentedFrame = None;
                 {
                     let (renderer, mut framebuffer) = backend
@@ -6742,9 +6754,13 @@ impl Runtime {
                 if let Some((damage, drawn, presented_cursor)) = presented {
                     self.frame_costs.insert("winit".to_owned(), drawn);
                     send_surface_scales(&self.state, &self.manager);
+                    // Unknown until the swap succeeds: a failed one leaves
+                    // the back buffer's contents unknown.
+                    self.winit_age = 0;
                     backend
                         .submit(Some(&damage))
                         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                    self.winit_age = backend.buffer_age().unwrap_or(0);
                     if let Some(surface) = &presented_cursor {
                         crate::cursor::Cursor::frame_done(
                             &crate::cursor::Pointer::Surface(surface.clone()),
