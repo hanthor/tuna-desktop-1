@@ -63,10 +63,9 @@ Install the complete package list in
 matching the CI `check` job). The compositor builds its DRM and PipeWire
 features by default, so it needs the libseat, libinput, libudev, GBM, libdrm,
 PipeWire, libclang and xkbcommon development packages
-(`crates/compositor/Cargo.toml`); the GTK shell and greeter need GTK 4,
-libadwaita and gtk4-layer-shell, and the shell also libgweather 4 for the
-date menu's world clocks and weather (`crates/shell-gtk/Cargo.toml`,
-`crates/greeter/Cargo.toml`). Where the distribution has no gtk4-layer-shell
+(`crates/compositor/Cargo.toml`); the GTK shell needs GTK 4, libadwaita,
+gtk4-layer-shell and, for the date menu's world clocks and weather,
+libgweather 4 (`crates/shell-gtk/Cargo.toml`). Where the distribution has no gtk4-layer-shell
 package, `scripts/ci-install-gtk4-layer-shell` builds it. At run time the
 nested backend additionally dlopens the EGL/Mesa display libraries
 (`libegl1`, `libgl1-mesa-dri`, `libgbm1` on Ubuntu).
