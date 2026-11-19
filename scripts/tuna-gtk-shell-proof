@@ -10,6 +10,8 @@
 #   and notification sound gates only (needs pam_wrapper).
 #   --tray-only runs panel readiness and the AppIndicator pointer, library,
 #   keyboard and X11 tray gates only.
+#   --x11-iconic-only runs panel readiness and G-X11-ICONIC (a minimized
+#   X11 window is IconicState with _NET_WM_STATE_HIDDEN, #1078) only.
 #   --grid-hover-only runs panel readiness, G-GRID-HOVER, G-GRID-REORDER,
 #   G-GRID-ON-DEMAND and G-SHELL-STABLE only.
 #   --keyboard-routes-only runs panel readiness and the P-A11Y-02 keyboard
@@ -168,6 +170,8 @@
 #   G-X11-APP      XWayland is on by default: an X11 app launched from
 #                  overview search gets DISPLAY and maps a window (#59)
 #   G-X11-INPUT-FOCUS the X server's input focus is the focused X11 window
+#   G-X11-ICONIC a minimized X11 window is WM_STATE IconicState with
+#                  _NET_WM_STATE_HIDDEN, and NormalState without once restored
 #   G-SETTINGS-CLOCK GNOME's clock-show-seconds key changes the panel clock
 #   G-SETTINGS-INPUT GNOME's input sources set the keymap (Super+Space
 #                  switches), repeat-interval the repeat rate, and
@@ -532,6 +536,7 @@ SCREENSHOT_KEYS_ONLY=0
 A11Y_FOCUS_ONLY=0
 NOTIFY_LOCK_ONLY=0
 TRAY_ONLY=0
+X11_ICONIC_ONLY=0
 GRID_HOVER_ONLY=0
 KEYBOARD_ROUTES_ONLY=0
 DATEMENU_ONLY=0
@@ -583,6 +588,7 @@ while [ $# -gt 0 ]; do
         --search-leak-only) SEARCH_LEAK_ONLY=1; only_mode "$1" no-media-source no-examples; shift ;;
         --window-leak-only) WINDOW_LEAK_ONLY=1; only_mode "$1" no-media-source no-examples; shift ;;
         --lock-menu-only) LOCK_MENU_ONLY=1; only_mode "$1" no-media-source no-examples; shift ;;
+        --x11-iconic-only) X11_ICONIC_ONLY=1; only_mode "$1"; shift ;;
         --display) DISPLAY_ARG="$2"; shift 2 ;;
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
         --help|-h) sed -n '2,/^# end of --help$/{/^# end of --help$/!p;}' "$0"; exit 0 ;;
@@ -1799,6 +1805,86 @@ tray_x11_gate() {
     fi
 }
 
+# G-X11-ICONIC (#1078): a minimized X11 window is told so, as Mutter's
+# meta_window_x11_set_wm_state and set_net_wm_state tell it: WM_STATE
+# IconicState and _NET_WM_STATE_HIDDEN while hidden, NormalState without
+# _NET_WM_STATE_HIDDEN once restored, so the client can pause rendering
+# and playback. Super+H, the window menu's Hide and the client's own ICCCM
+# WM_CHANGE_STATE IconicState request hide it; the overview and Alt+Tab
+# bring it back. Each state read is kept as x11-iconic-<step>.txt.
+x11_iconic_state() {
+    for _ in $(seq 1 25); do
+        DISPLAY="$x11_display" xprop -id "$iconic_window" WM_STATE _NET_WM_STATE \
+            >"$ARTIFACTS/x11-iconic-$2.txt" 2>&1 || true
+        if grep -q "window state: $1" "$ARTIFACTS/x11-iconic-$2.txt"; then
+            if grep -q _NET_WM_STATE_HIDDEN "$ARTIFACTS/x11-iconic-$2.txt"; then
+                [ "$1" = Iconic ] && return 0
+            else
+                [ "$1" = Normal ] && return 0
+            fi
+        fi
+        sleep 0.2
+    done
+    cat "$ARTIFACTS/x11-iconic-$2.txt" >&2
+    return 1
+}
+x11_iconic_pick() {
+    xdotool key Super_L
+    cstate ".overview_open and any(.previews[]; .id == $iconic_id)" "X11 probe preview" || return 1
+    sleep 1
+    iconic_pick="$(jq -r ".previews[] | select(.id == $iconic_id) | .rect | \"\(.[0] + .[2] / 2 | floor) \(.[1] + .[3] / 2 | floor)\"" "$CSTATE")"
+    # shellcheck disable=SC2086
+    xdotool mousemove --window "$WID" $iconic_pick click 1
+    cstate "(.overview_open | not) and .overview_progress == 0 and .focused == $iconic_id" "X11 probe picked"
+}
+x11_iconic_gate() {
+    iconic_before="$(jq -c '[.windows[] | .id]' "$CSTATE")"
+    DISPLAY="$x11_display" xev -name "Tuna Iconic Probe" >/dev/null 2>&1 &
+    ICONIC_PID=$!
+    cstate ".focused != null and (.focused as \$f | $iconic_before | index(\$f) == null)" "X11 probe focused" ||
+        fail G-X11-ICONIC "the X11 probe never took focus"
+    iconic_id="$(jq -r .focused "$CSTATE")"
+    iconic_window="$(DISPLAY="$x11_display" xdotool search --name '^Tuna Iconic Probe$' | head -1)"
+    [ -n "$iconic_window" ] || fail G-X11-ICONIC "the X11 probe's window was not found"
+    x11_iconic_state Normal mapped ||
+        fail G-X11-ICONIC "the mapped X11 window is not NormalState without _NET_WM_STATE_HIDDEN"
+
+    xdotool key super+h
+    cstate "any(.minimized[]; . == $iconic_id)" "Super+H hid the X11 probe" ||
+        fail G-X11-ICONIC "Super+H did not minimize the X11 window"
+    x11_iconic_state Iconic super-h ||
+        fail G-X11-ICONIC "Super+H left the X11 window without IconicState and _NET_WM_STATE_HIDDEN"
+    x11_iconic_pick || fail G-X11-ICONIC "the overview did not bring the X11 window back"
+    x11_iconic_state Normal overview ||
+        fail G-X11-ICONIC "the overview's restore left the X11 window iconic"
+
+    xdotool key alt+space
+    sleep 1.5
+    "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-x11-iconic-menu.json" 20 \
+        --press "Hide" || fail G-X11-ICONIC "the X11 window's menu has no Hide"
+    cstate "any(.minimized[]; . == $iconic_id)" "Hide hid the X11 probe" ||
+        fail G-X11-ICONIC "the window menu's Hide did not minimize the X11 window"
+    x11_iconic_state Iconic window-menu ||
+        fail G-X11-ICONIC "Hide left the X11 window without IconicState and _NET_WM_STATE_HIDDEN"
+    xdotool key alt+Tab
+    cstate ".focused == $iconic_id and (any(.minimized[]; . == $iconic_id) | not)" "Alt+Tab restored the X11 probe" ||
+        fail G-X11-ICONIC "Alt+Tab did not bring the X11 window back"
+    x11_iconic_state Normal alt-tab ||
+        fail G-X11-ICONIC "Alt+Tab's restore left the X11 window iconic"
+
+    # XIconifyWindow: WM_CHANGE_STATE IconicState to the root window.
+    DISPLAY="$x11_display" xdotool windowminimize "$iconic_window"
+    cstate "any(.minimized[]; . == $iconic_id)" "the X11 probe iconified itself" ||
+        fail G-X11-ICONIC "the client's WM_CHANGE_STATE IconicState did not minimize it"
+    x11_iconic_state Iconic wm-change-state ||
+        fail G-X11-ICONIC "the client's iconify left it without IconicState and _NET_WM_STATE_HIDDEN"
+    x11_iconic_pick || fail G-X11-ICONIC "the overview did not bring the iconified X11 window back"
+    x11_iconic_state Normal restored ||
+        fail G-X11-ICONIC "restoring the iconified X11 window left it iconic"
+    kill "$ICONIC_PID" 2>/dev/null || true
+    pass G-X11-ICONIC "Super+H, Hide and the client's own iconify make an X11 window IconicState with _NET_WM_STATE_HIDDEN; the overview and Alt+Tab make it NormalState without"
+}
+
 # G-LOCK-WITH-MENU-OPEN: GNOME's lock dismisses the open shell menu and
 # its grab, and the lock screen has the keyboard at once. Each menu is
 # opened from its keybinding, Super+L locks over it, and the password
@@ -1893,6 +1979,17 @@ if [ "$TRAY_ONLY" = 1 ]; then
     cstate '.x11_display != null' "xwayland" 30 || fail G-TRAY-X11 "XWayland display never advertised"
     x11_display="$(jq -r '.x11_display' "$CSTATE")"
     tray_x11_gate
+    exit 0
+fi
+if [ "$X11_ICONIC_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "X11 iconic desktop ready" ||
+        fail G-X11-ICONIC "desktop never became ready"
+    # Let the startup cover settle before the first window.
+    sleep 3
+    cstate '.x11_display != null' "xwayland" 30 || fail G-X11-ICONIC "XWayland display never advertised"
+    x11_display="$(jq -r '.x11_display' "$CSTATE")"
+    x11_iconic_gate
+    grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
     exit 0
 fi
 if [ "$KEYBOARD_ROUTES_ONLY" = 1 ]; then
@@ -5516,6 +5613,7 @@ EOF
     fi
     kill "$XEV_PID" 2>/dev/null || true
     pass G-X11-INPUT-FOCUS "X input focus is the focused X11 window $xev_window"
+    x11_iconic_gate
     tray_x11_gate
 else
     echo "tuna-gtk-shell-proof: G-X11-APP skipped (no Xwayland or xeyes)"
