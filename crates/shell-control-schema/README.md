@@ -55,6 +55,11 @@ before decoding.
   the locked, blanked screen when a notification reaches the lock screen's
   list (screenShield.js `_wakeUpScreen`); it is `Denied` while unlocked,
   never unlocks and does not count as user activity.
+- Lock screen shown (0.51): `Message::LockScreenShown { shown }` (peers
+  >=51 only) says the session is locked and the lock curtain has landed
+  (screenShield.js `_lockScreenShown`); `false` once it unlocks. The shell
+  reports `org.gnome.ScreenSaver` active only while it is shown, because
+  gnome-settings-daemon blanks the screen on `ActiveChanged(true)`.
 - Messages: `Message`, `StateOp`, `CommandKind`, `CommandStatus`,
   `ErrorKind`.
 - State types: `WindowInfo`, `WorkspaceInfo`, `OutputInfo`, `PreviewInfo`,
