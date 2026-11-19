@@ -72,7 +72,7 @@ am_pt() {
         ($o | split(" ") | map(tonumber)) as [$ox, $oy]
         | [foreach .[] as $n (null; if $n.role == "frame" then $n.name else . end; [., $n])]
         | map(select(.[0] == $frame) | .[1]
-            | select(.showing and (.role == "push button" or .role == "toggle button")
+            | select(.showing and (.role == "push button" or .role == "button" or .role == "toggle button")
                 and .name == $name and .bounds[2] > 0 and .bounds[3] > 0))
         | first | .bounds
         | "\((.[0] + $ox + .[2] * $fx) | floor) \((.[1] + $oy + .[3] / 2) | floor)"' "$1"
@@ -86,7 +86,7 @@ am_grid_pt() { am_pt "$1" "App Grid" "$2" tuna-shell-appgrid "${3:-0.5}"; }
 am_dash_names() {
     jq -r '[foreach .[] as $n (null; if $n.role == "frame" then $n.name else . end; [., $n])]
         | map(select(.[0] == "Dash") | .[1]
-            | select(.showing and .role == "push button" and .bounds[2] > 0))
+            | select(.showing and (.role == "push button" or .role == "button") and .bounds[2] > 0))
         | sort_by(.bounds[0]) | map(.name) | join(",")' "$1"
 }
 
@@ -94,7 +94,7 @@ am_dash_names() {
 am_focus_in() {
     jq -r --arg frame "$2" '[foreach .[] as $n (null; if $n.role == "frame" then $n.name else . end; [., $n])]
         | map(select(.[0] == $frame) | .[1]
-            | select(.focused and (.role == "push button" or .role == "toggle button")))
+            | select(.focused and (.role == "push button" or .role == "button" or .role == "toggle button")))
         | first | .name // empty' "$1"
 }
 
