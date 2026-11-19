@@ -2118,7 +2118,7 @@ keyring_prompter_proof() {
     kp_dump password
     kp_a11y="$ARTIFACTS/a11y-keyring-password.json"
     showing "$kp_a11y" "Unlock Login keyring" || fail G-KEYRING-PROMPTER "the message is not the dialog's title"
-    showing "$kp_a11y" "An application wants access to the keyring “Login”, but it is locked." ||
+    showing "$kp_a11y" 'An application wants access to the keyring “Login”, but it is locked.' ||
         fail G-KEYRING-PROMPTER "the description is missing"
     showing "$kp_a11y" "Password" || fail G-KEYRING-PROMPTER "no password entry"
     hidden "$kp_a11y" "Confirm Password" || fail G-KEYRING-PROMPTER "a confirmation entry shows for an existing password"
@@ -2260,12 +2260,15 @@ window_attention_proof() {
     wa_client="${TUNA_PROOF_BIN_DIR:-$ROOT/target/debug}/examples/tuna-activation-client"
     [ -x "$wa_client" ] ||
         fail G-WINDOW-ATTENTION "$wa_client is not built (cargo build -p tuna-compositor --example tuna-activation-client)"
-    wa_list="$ARTIFACTS/a11y-attention-list.json"
+    # GNOME's banner titles, single-quoted for their typographic quotes.
+    wa_alpha='“Alpha” is ready'
+    wa_gamma='“Gamma” is ready'
+    wa_title='“Title” is ready'
     wa_start() {
         : >"$ARTIFACTS/attention-$1.cmd"
         WAYLAND_DISPLAY="$SOCKET_NAME" "$wa_client" "$ARTIFACTS/attention-$1.cmd" "tuna-attn-$1" \
             >"$ARTIFACTS/attention-$1.log" 2>&1 &
-        eval "WA_PID_$1=$!"
+        wa_pid=$!
         wa_wait "$1" '^ready' || fail G-WINDOW-ATTENTION "client $1 never connected"
     }
     # wa_wait CLIENT PATTERN: the client's log shows PATTERN.
@@ -2310,7 +2313,9 @@ window_attention_proof() {
         xdotool mousemove --window "$WID" $(($1 + $3)) $(($2 + $4)) click 1
     }
     wa_start a
+    wa_pid_a=$wa_pid
     wa_start b
+    wa_pid_b=$wa_pid
     wa_do a "open Alpha" '^opened Alpha'
     wa_focus a || fail G-WINDOW-ATTENTION "Alpha did not take focus on map"
     wa_do b "open Bravo" '^opened Bravo'
@@ -2320,17 +2325,17 @@ window_attention_proof() {
     wa_do a "refuse Alpha" '^activated Alpha'
     sleep 0.5
     wa_dump refused
-    showing "$ARTIFACTS/a11y-attention-refused.json" "“Alpha” is ready" ||
-        fail G-WINDOW-ATTENTION "no \"“Alpha” is ready\" banner after the refused activation"
+    showing "$ARTIFACTS/a11y-attention-refused.json" "$wa_alpha" ||
+        fail G-WINDOW-ATTENTION "no \"$wa_alpha\" banner after the refused activation"
     showing "$ARTIFACTS/a11y-attention-refused.json" "tuna-attn-a" ||
         fail G-WINDOW-ATTENTION "the banner is not under the app's name"
     wa_focus b || fail G-WINDOW-ATTENTION "a refused activation moved focus to Alpha"
     scrot "$ARTIFACTS/window-attention.png" >/dev/null
     # Clicking it activates the window, and the notification goes.
-    wa_click_banner "“Alpha” is ready" "$ARTIFACTS/a11y-attention-refused.json"
+    wa_click_banner "$wa_alpha" "$ARTIFACTS/a11y-attention-refused.json"
     wa_focus a || fail G-WINDOW-ATTENTION "clicking the notification did not focus Alpha"
     sleep 1
-    if wa_listed click "“Alpha” is ready"; then
+    if wa_listed click "$wa_alpha"; then
         fail G-WINDOW-ATTENTION "the notification is still listed after Alpha was focused by its click"
     fi
     # Withdrawn on focus without a click: Alpha demands again behind
@@ -2342,19 +2347,20 @@ window_attention_proof() {
     wa_do a "refuse Alpha" '^activated Alpha'
     sleep 1
     wa_dump again
-    showing "$ARTIFACTS/a11y-attention-again.json" "“Alpha” is ready" ||
+    showing "$ARTIFACTS/a11y-attention-again.json" "$wa_alpha" ||
         fail G-WINDOW-ATTENTION "Alpha did not demand attention a second time after it had been focused"
-    wa_listed second "“Alpha” is ready" ||
+    wa_listed second "$wa_alpha" ||
         fail G-WINDOW-ATTENTION "the calendar does not list Alpha's notification"
     wa_do b quit 'ready'
-    wait "$WA_PID_b" 2>/dev/null || true
+    wait "$wa_pid_b" 2>/dev/null || true
     wa_focus a || fail G-WINDOW-ATTENTION "Alpha did not get focus back when Bravo's windows closed"
     sleep 1
-    if wa_listed third "“Alpha” is ready"; then
+    if wa_listed third "$wa_alpha"; then
         fail G-WINDOW-ATTENTION "the notification stayed in the list after Alpha got focus"
     fi
     # A window that maps behind the focused one after a refused request.
     wa_start c
+    wa_pid_c=$wa_pid
     wa_do c "open Charlie" '^opened Charlie'
     wa_focus c || fail G-WINDOW-ATTENTION "Charlie did not take focus on map"
     xdotool mousemove --window "$WID" $((WIDTH / 3)) $((HEIGHT / 2 + 40))
@@ -2362,20 +2368,20 @@ window_attention_proof() {
     sleep 1
     wa_focus c || fail G-WINDOW-ATTENTION "a window opened with a refused token took focus from Charlie"
     wa_dump gamma
-    showing "$ARTIFACTS/a11y-attention-gamma.json" "“Gamma” is ready" ||
-        fail G-WINDOW-ATTENTION "no \"“Gamma” is ready\" banner for the window opened behind Charlie"
+    showing "$ARTIFACTS/a11y-attention-gamma.json" "$wa_gamma" ||
+        fail G-WINDOW-ATTENTION "no \"$wa_gamma\" banner for the window opened behind Charlie"
     cstate '[.windows[] | select(.app_id == "tuna-attn-a")] | length == 2' "Gamma mapped" 5 ||
         fail G-WINDOW-ATTENTION "Gamma never mapped"
     # Its client leaving takes its windows and their notifications.
     wa_do a quit 'ready'
-    wait "$WA_PID_a" 2>/dev/null || true
+    wait "$wa_pid_a" 2>/dev/null || true
     sleep 1
-    if wa_listed gone "“Gamma” is ready"; then
+    if wa_listed gone "$wa_gamma"; then
         fail G-WINDOW-ATTENTION "Gamma's notification stayed after the window closed"
     fi
     wa_do c quit 'ready'
-    wait "$WA_PID_c" 2>/dev/null || true
-    pass G-WINDOW-ATTENTION "a refused xdg-activation token, or a window mapped behind the focused one after one, posts \"“Title” is ready\" under the app's name without moving focus; clicking it focuses the window; it is withdrawn once the window has focus or closes"
+    wait "$wa_pid_c" 2>/dev/null || true
+    pass G-WINDOW-ATTENTION "a refused xdg-activation token, or a window mapped behind the focused one after one, posts \"$wa_title\" under the app's name without moving focus; clicking it focuses the window; it is withdrawn once the window has focus or closes"
 }
 if [ "$SHELL_GAPS_ONLY" = 1 ]; then
     cstate '.active_workspace != null and .locked == false' "shell gaps desktop ready" ||
