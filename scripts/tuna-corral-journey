@@ -167,6 +167,7 @@ def fresh_account_session(sections):
     major = int(version.group(1)) if version else None
     fallback = ini_values(sections.get('custom.conf'), 'daemon', 'FallbackSession')
     result = {'gdm_version': sections.get('version', '').strip(), 'gdm_major': major,
+              'gdm_config': (sections.get('custom.conf-path') or '').strip() or None,
               'fallback_session': fallback, 'templates': {}}
     for kind in ('standard', 'administrator'):
         text = sections.get(f'template-{kind}')
@@ -225,10 +226,14 @@ class Guest:
 
     def session_defaults(self):
         """GDM's version and `[daemon]`, the AccountsService templates and the
-        test account's own record, read in one exchange."""
+        test account's own record, read in one exchange. GDM reads one
+        compiled-in config file: Debian's gdm3 /etc/gdm3/daemon.conf (it never
+        reads custom.conf there), Ubuntu's /etc/gdm3/custom.conf, others
+        /etc/gdm/custom.conf."""
         raw = self.out(
             'gdm=$(command -v gdm || command -v gdm3); echo "@@version"; "$gdm" --version 2>&1 || true; '
-            'echo "@@custom.conf"; cat /etc/gdm3/custom.conf 2>/dev/null || cat /etc/gdm/custom.conf 2>/dev/null || true; '
+            'for f in /etc/gdm3/daemon.conf /etc/gdm3/custom.conf /etc/gdm/custom.conf; do if [ -f "$f" ]; then '
+            'echo "@@custom.conf-path"; echo "$f"; echo "@@custom.conf"; cat "$f"; break; fi; done; '
             f'if [ -f /var/lib/AccountsService/users/{USER} ]; then echo "@@user"; cat /var/lib/AccountsService/users/{USER}; fi; '
             'for t in standard administrator; do for d in /run /etc /usr/local/share /usr/share; do '
             'f=$d/accountsservice/user-templates/$t; if [ -f "$f" ]; then echo "@@template-$t-path"; echo "$f"; '
