@@ -71,8 +71,12 @@ QUALIFICATION_CORE = {
     'desktop', 'lock', 'unlock-refused', 'unlock', 'power-menu', 'logout-dialog', 'logout',
 }
 # Ready means: boot finished, GDM active, its greeter session on seat0, and
-# something painted on the console.
-GREETER = 'loginctl list-sessions --no-legend | awk \'$6=="greeter" && $4=="seat0"\' | grep -q .'
+# something painted on the console. The greeter is found by its Class
+# property: `loginctl list-sessions` has a CLASS column only from systemd 256
+# (255, as on Ubuntu 24.04, prints TTY STATE IDLE SINCE after SEAT).
+GREETER_SID = ('for s in $(loginctl list-sessions --no-legend | awk \'$4=="seat0"{print $1}\'); do '
+               '[ "$(loginctl show-session "$s" -p Class --value)" != greeter ] || echo "$s"; done')
+GREETER = f'{GREETER_SID} | grep -q .'
 
 
 class NotExercised(Exception):
@@ -217,7 +221,7 @@ class Guest:
         return dict(line.split('=', 1) for line in props.splitlines())
 
     def greeter_session(self):
-        return self.out("loginctl list-sessions --no-legend | awk '$6==\"greeter\" && $4==\"seat0\"{print $1}'")
+        return self.out(GREETER_SID)
 
     def session_defaults(self):
         """GDM's version and `[daemon]`, the AccountsService templates and the
