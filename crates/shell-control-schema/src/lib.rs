@@ -2868,7 +2868,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_remote_access_follows_respond_close_dialog() {
+    fn stop_remote_access_follows_declare_bus_name() {
         let tag = |bytes: &[u8]| bytes[0];
         let mut buffer = [0_u8; 64];
         let respond = tag(postcard::to_slice(
@@ -2879,6 +2879,14 @@ mod tests {
             &mut buffer,
         )
         .unwrap());
+        let declare = tag(postcard::to_slice(
+            &CommandKind::DeclareBusName {
+                unique_name: ":1.2".into(),
+            },
+            &mut buffer,
+        )
+        .unwrap());
+        assert_eq!(declare, respond + 1);
         for kind in [
             RemoteAccessKind::ScreenCast,
             RemoteAccessKind::RemoteDesktop,
@@ -2887,7 +2895,7 @@ mod tests {
             let stop = CommandKind::StopRemoteAccess { kind, id: 12 };
             assert_eq!(
                 tag(postcard::to_slice(&stop, &mut buffer).unwrap()),
-                respond + 1
+                declare + 1
             );
             let command = Message::Command { id: 5, kind: stop };
             assert_eq!(decode_frame(&encode_frame(&command)).unwrap(), command);
