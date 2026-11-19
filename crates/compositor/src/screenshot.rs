@@ -620,6 +620,9 @@ mod tests {
         });
 
         let caller = connect();
+        // The shell is the bus names its pinned control session declared
+        // (ADR 0010); this test's caller connection stands in for it.
+        let shell = caller.unique_name().unwrap().to_string();
         let server_name = server.unique_name().unwrap().to_string();
         let call = |directory: &Path| {
             zbus::block_on(caller.call_method(
@@ -637,13 +640,13 @@ mod tests {
         };
 
         // Not the shell (and no portal): denied.
-        authority.publish(false, Some(u32::MAX));
+        authority.publish(false, std::iter::empty());
         assert_eq!(
             error_name(call(&own)),
             "org.freedesktop.DBus.Error.AccessDenied"
         );
-        // The shell (this process), but anywhere else: refused.
-        authority.publish(false, Some(std::process::id()));
+        // The shell, but anywhere else: refused.
+        authority.publish(false, [shell.as_str()]);
         for elsewhere in [
             PathBuf::from("/home/u/Pictures"),
             run.path().to_owned(),
@@ -657,13 +660,13 @@ mod tests {
             );
         }
         // The shell while locked: denied.
-        authority.publish(true, Some(std::process::id()));
+        authority.publish(true, [shell.as_str()]);
         assert_eq!(
             error_name(call(&own)),
             "org.freedesktop.DBus.Error.AccessDenied"
         );
         // The shell, unlocked, into its own directory: reaches the loop.
-        authority.publish(false, Some(std::process::id()));
+        authority.publish(false, [shell.as_str()]);
         call(&own).unwrap();
 
         stop.store(true, Ordering::SeqCst);
