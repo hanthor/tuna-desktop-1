@@ -477,6 +477,10 @@ pub struct NotifyUi {
     /// SYNC_CREATE, so Clear shows (insensitive) until the list first
     /// changes; after that it hides whenever the list is empty.
     clear_bound: std::cell::Cell<bool>,
+    /// Whether the placeholder is showing, as last set. Kept here: a
+    /// widget's `is_visible` also reads its ancestors, which are hidden
+    /// until the calendar opens.
+    placeholder_shown: std::cell::Cell<bool>,
     /// The banner on screen's expiry, from when it has dropped in.
     timer: RefCell<Option<BannerTimer>>,
     /// GNOME's `_userActiveWhileNotificationShown`: the user was active
@@ -776,6 +780,7 @@ impl NotifyUi {
             empty,
             clear,
             clear_bound: std::cell::Cell::new(false),
+            placeholder_shown: std::cell::Cell::new(true),
             timer: RefCell::new(None),
             user_active: Cell::new(false),
             expanded: RefCell::new(HashSet::new()),
@@ -1848,7 +1853,7 @@ impl NotifyUi {
     fn sync_placeholder(&self, notifications: usize) {
         let state = list_state(self.media_rows.borrow().len(), notifications);
         self.list.set_visible(!state.empty);
-        if self.empty.is_visible() != state.empty {
+        if self.placeholder_shown.replace(state.empty) != state.empty {
             // The placeholder changes: from here on Clear follows it.
             self.clear_bound.set(true);
         }
