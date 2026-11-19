@@ -8787,6 +8787,25 @@ fn run_loop(
     session: &NestedSession,
     mut probe: impl FnMut(&mut AuthOwnerProbe<'_>) -> Option<Duration>,
 ) -> Result<RunStats, RuntimeError> {
+    // Graceful shutdown on SIGTERM/SIGINT/SIGHUP: ending the loop drops the
+    // runtime, whose supervisor kills the shell child (ADR 0003 kill
+    // on exit). Without this a signal would bypass `Drop` and orphan
+    // the shell on a dead socket. logind creates session scopes with
+    // SendSIGHUP=yes, so a session stop sends SIGHUP right after SIGTERM;
+    // left at its default it killed the compositor before teardown, so the
+    // owned Orca was never retired (#836). The flag write is the only work
+    // done in the handler; the loop observes it below. Installed before
+    // `launch` binds the Wayland socket, so a session that is visible is
+    // already one a signal ends through teardown (#1174).
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    for signal in [
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGHUP,
+    ] {
+        signal_hook::flag::register(signal, std::sync::Arc::clone(&shutdown))
+            .map_err(|e| RuntimeError::Loop(format!("signal handler failed: {e}")))?;
+    }
     let (mut runtime, mut event_loop) = Runtime::launch(session)?;
     #[cfg(feature = "drm")]
     let _session_services = if matches!(runtime.backend, Backend::Drm(_)) {
@@ -8831,25 +8850,10 @@ fn run_loop(
     if let Some(session) = &logind_session {
         session.set_wake(&runtime.wake);
     }
-    // Graceful shutdown on SIGTERM/SIGINT/SIGHUP: ending the loop drops the
-    // runtime, whose supervisor kills the shell child (ADR 0003 kill
-    // on exit). Without this a signal would bypass `Drop` and orphan
-    // the shell on a dead socket. logind creates session scopes with
-    // SendSIGHUP=yes, so a session stop sends SIGHUP right after SIGTERM;
-    // left at its default it killed the compositor before teardown, so the
-    // owned Orca was never retired (#836). The flag write is the only work
-    // done in the handler; the loop observes it below.
-    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    for signal in [
-        signal_hook::consts::SIGTERM,
-        signal_hook::consts::SIGINT,
-        signal_hook::consts::SIGHUP,
-    ] {
-        signal_hook::flag::register(signal, std::sync::Arc::clone(&shutdown))
-            .map_err(|e| RuntimeError::Loop(format!("signal handler failed: {e}")))?;
-    }
     // The same signals, and child exits for the shell, IME and XWayland
-    // supervisors, wake a loop that may be sleeping (#503).
+    // supervisors, wake a loop that may be sleeping (#503). A signal taken
+    // before this source exists is still seen: the flag is read before the
+    // first wait.
     let signals = crate::wake::signal_source(&[
         signal_hook::consts::SIGCHLD,
         signal_hook::consts::SIGTERM,
