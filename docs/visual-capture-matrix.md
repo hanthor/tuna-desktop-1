@@ -159,6 +159,9 @@ state records its state observation next to its stills and clips.
 | P-SY-13 | InputCapture portal backend | `nonvisual` | No adequate capture | D-Bus and EIS behaviour; capture is wired on the DRM input path only |
 | P-SY-14 | Thunderbolt authorisation notices | `unsupported-in-nested` | No adequate capture | needs boltd and a Thunderbolt device or an emulated one (ADR 0008) |
 | P-ST-12 | Captive-portal sign-in | `unproven` | No adequate capture | notification and helper launch need NetworkManager reporting a portal |
+| P-PN-06 | Power Mode tile returns to the last profile | `unproven` | No adequate capture | G-QS-POWER-LAST checks the daemon's active profile and `last-selected-power-profile`; no capture state for the toggled tile yet |
+| P-PN-07 | Welcome dialog on first login | `unproven` | No adequate capture | the --welcome-only gates read the dialog from the accessibility tree; no capture state yet |
+| P-DS-05 | Switch-monitor popup (Super+P) | `unsupported-in-nested` | No adequate capture | the popup needs two monitors; the single nested output never shows it, so Corral with a second output |
 
 ## Walkthrough states
 
