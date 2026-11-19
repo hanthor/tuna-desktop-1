@@ -112,9 +112,9 @@ Restart=no
 TimeoutStopSec=5
 ```
 
-`Type=notify` needs the compositor to send `READY=1` in greeter mode (not
-done yet; until then `Type=simple` works but lets the plugins race the
-display import).
+`Type=notify`: in greeter mode the compositor sends `READY=1` to
+`NOTIFY_SOCKET` once, when the greeter's layer first maps (`G-GREETER-READY`),
+so the settings daemon plugins start after the login screen is up.
 
 Other greeters: no other greeter in the wild uses GDM's greeter API (LightDM
 and greetd greeters speak their own daemons); GDM's only other client of
@@ -223,16 +223,34 @@ logind) → fade out → `StartSessionWhenReady(service, true)`.
   systemd and D-Bus activation but starts no `tuna-session.target`, holds
   no leader FIFO and does not register with GDM: gnome-session leads, and
   the greeter registers itself. Outputs, input and the screen reader path
-  are those of a user session.
+  are those of a user session. `READY=1` goes to `NOTIFY_SOCKET` once the
+  greeter first maps.
 - `crates/auth-prompt` (`tuna-auth-prompt`): the lock screen's GNOME
   AuthPrompt state machine and `PromptEntry` widget, moved out of
   `tuna-shell-gtk` so both screens share them. `Host::can_retry`
   (`_canRetry`) and `Effect::GiveUp` add the login screen's
   `allowed-failures`; the lock screen keeps the default (always retry).
 - `crates/greeter` (`tuna-greeter`): `gdm.rs` (channel, signal parsing,
-  calls), `conversation.rs` (GDM's UserVerifier as the machine's `Host`),
-  `accounts.rs` (AccountsService list), `sessions.rs` (libgdm's session
-  enumeration), `main.rs` (layer-shell window, pages, Login Options).
+  calls; the session object's signals are subscribed through GDBus
+  directly, because gio-rs 0.22's subscription aborts on the sender-less
+  signals of a peer-to-peer channel), `conversation.rs` (GDM's UserVerifier
+  as the machine's `Host`), `accounts.rs` (AccountsService list),
+  `sessions.rs` (libgdm's session enumeration), `main.rs` (layer-shell
+  window, pages, Login Options).
+
+## Proof
+
+`scripts/tuna-greeter-proof` (gtk-shell CI job) runs the real
+`tuna-compositor --greeter` nested on Xvfb with the real `tuna-greeter`;
+GDM's daemon and AccountsService are `scripts/lib/tuna-gdm-mock.py` on a
+private system bus, serving the API above with GDM 51.1.1's signal order and
+failure text. Users are chosen and passwords typed with real X11 keys, and
+the result is read back through AT-SPI, the mock's call log and the
+compositor's state; `A-1-user-list.png` and `C-1-prompt.png` are the review
+shots against GNOME 51's login dialog. Gates: `G-GREETER-READY`,
+`-USER-LIST`, `-NO-SHELL`, `-NOT-LISTED`, `-GIVE-UP`, `-SESSION`,
+`-WRONG-PASSWORD`, `-PASSWORD`, `-START`, `-SUPERVISION`, `-HYGIENE`.
+Nested only: no real GDM, PAM, gnome-session or DRM.
 
 ## Security model
 
@@ -270,13 +288,14 @@ logind) → fade out → `StartSessionWhenReady(service, true)`.
 
 | Area | GDM 51 | Tuna greeter now | Gate |
 |---|---|---|---|
-| User list from AccountsService, filtered like `UserList.addUser` | yes | yes (live add/remove) | proof pending (G-GREETER-USERS) |
-| Password through `gdm-password`, GNOME's prompt and messages | yes | yes (shared AuthPrompt machine) | cargo: `conversation::tests::*`, `gdm::tests::*`; proof pending (G-GREETER-PASSWORD) |
-| Wrong password: GDM's problem shown, retry, `allowed-failures` back to the list | yes | yes | cargo: `a_host_done_trying_gives_up_once_the_problem_is_read`, `failure_then_stop_is_one_denied_result_and_counts` |
-| "Not listed?" username entry | yes | yes | proof pending |
-| Session type in Login Options, `DefaultSessionNameChanged` | yes | yes (re-selected after GDM resets) | cargo: `sessions::tests::*` |
-| `StartSessionWhenReady` after `SessionOpened` | yes | yes | proof pending (G-GREETER-START) |
-| Register session/display with GDM | yes | yes | V-GDM-LOGIN once packaged |
+| User list from AccountsService, filtered like `UserList.addUser` | yes | yes (live add/remove) | G-GREETER-USER-LIST |
+| Password through `gdm-password`, GNOME's prompt and messages | yes | yes (shared AuthPrompt machine) | G-GREETER-PASSWORD; cargo: `conversation::tests::*`, `gdm::tests::*` |
+| Wrong password: GDM's problem shown, retry, `allowed-failures` back to the list | yes | yes | G-GREETER-WRONG-PASSWORD, G-GREETER-GIVE-UP; cargo: `a_host_done_trying_gives_up_once_the_problem_is_read`, `failure_then_stop_is_one_denied_result_and_counts` |
+| "Not listed?" username entry | yes | yes | G-GREETER-NOT-LISTED |
+| Session type in Login Options, `DefaultSessionNameChanged` | yes | yes (re-selected after GDM resets) | G-GREETER-SESSION; cargo: `sessions::tests::*` |
+| `StartSessionWhenReady` after `SessionOpened` | yes | yes | G-GREETER-START |
+| No overview, lock or panel layers; greeter supervised | yes (`gdm` mode) | yes | G-GREETER-NO-SHELL, G-GREETER-SUPERVISION |
+| Register session/display with GDM | yes | yes | G-GREETER-READY (mock GDM); V-GDM-LOGIN once packaged |
 | Banner, logo, `disable-user-list`, `disable-restart-buttons` | yes | read when the schema is installed | none yet |
 | Wiggle, fades | yes | no | — |
 | Fingerprint (re-auth only in 51), smartcard, switchable auth, ChoiceList, CustomJSON web login | yes | no | #1164 |

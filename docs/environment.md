@@ -205,6 +205,7 @@ uses each one for.
 | `GNOME_SHELL_SLOWDOWN_FACTOR` | A positive number multiplies every animation duration, as in GNOME Shell. Read when the shell starts. | `crates/shell-control-schema/src/motion.rs:16`, `crates/shell-gtk/src/motion.rs:62` |
 | `GDM_MESSAGE_TIME_MULTIPLIER` | A positive number multiplies how long each lock-screen and login-screen message stays up, as in GDM. | `crates/shell-gtk/src/lock.rs:312-314`, `crates/greeter/src/main.rs`, `crates/auth-prompt/src/lib.rs:97-103` |
 | `GLYCIN_DATA_DIR` | Glycin loader configuration directory, hashed by the SVG wallpaper helper so a loader change invalidates its cache. | `crates/wallpaper-svg/src/provenance.rs:60-67` |
+| `NOTIFY_SOCKET` | systemd's notify socket: `tuna-compositor --greeter` sends `READY=1` once the login screen first maps (`Type=notify`). | `crates/compositor/src/session_services.rs` (`notify_ready`) |
 
 ## Scripts and builds
 
@@ -259,7 +260,7 @@ Options a proof script reads from your environment:
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `TUNA_PROOF_BIN_DIR` | `scripts/tuna-gtk-shell-proof`, `scripts/tuna-lock-auth-proof`, `scripts/tuna-visual-capture`, `scripts/lib/tuna-proof-session-launch` | Run prebuilt binaries from this directory instead of building them. |
+| `TUNA_PROOF_BIN_DIR` | `scripts/tuna-gtk-shell-proof`, `scripts/tuna-lock-auth-proof`, `scripts/tuna-greeter-proof`, `scripts/tuna-visual-capture`, `scripts/lib/tuna-proof-session-launch` | Run prebuilt binaries from this directory instead of building them. |
 | `TUNA_PROOF_SHELL_BIN` | `scripts/tuna-gtk-shell-proof`, `scripts/lib/tuna-proof-session-launch` | Shell binary for the proof session. |
 | `TUNA_PROOF_COMPANIONS` | `scripts/tuna-gtk-shell-proof:356` | Directory of the compositor's example clients (default `target/debug/examples`). |
 | `TUNA_PROOF_BINARY_SOURCE_COMMIT` | `scripts/tuna-gtk-shell-proof` | Commit recorded for prebuilt binaries in the proof manifest. |

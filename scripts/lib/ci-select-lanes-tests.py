@@ -54,6 +54,8 @@ class Selection(unittest.TestCase):
     def test_owned_paths_run_their_lane_without_rotation(self):
         self.assertEqual(pr("scripts/tuna-scroll-proof"), ["scroll-proof"])
         self.assertEqual(pr("docs/walkthrough.tsv"), ["gtk-shell"])
+        self.assertEqual(pr("scripts/tuna-greeter-proof"), ["gtk-shell"])
+        self.assertEqual(pr("scripts/lib/tuna-gdm-mock.py"), ["gtk-shell"])
         self.assertEqual(pr("packaging/marlin/vm-lane/Containerfile"),
                          ["arch-package", "marlin-image", "marlin-vm"])
         self.assertEqual(pr("docs/parity-ledger.md"),

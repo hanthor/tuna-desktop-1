@@ -193,6 +193,14 @@ This matches Mutter 51's initial-focus path:
 [attaching the drag handler immediately invalidates focus](https://github.com/GNOME/mutter/blob/51.0/src/wayland/meta-wayland-input.c#L288-L325),
 and [drag focus sends the destination its offer while restricting source-less drags to the origin client](https://github.com/GNOME/mutter/blob/51.0/src/wayland/meta-wayland-data-device.c#L337-L397).
 
+The GTK proof's focused slices (`--*-only`) run one at a time. A new slice
+adds its usage line above `# end of --help` in the script's header (`--help`
+prints up to that line) and one case arm that calls `only_mode` with its flag
+and the traits it needs: `source-build` refuses `--installed-package`, and
+`no-media-source`, `no-examples` and `no-camera-policy` skip the full run's
+media-source receipt, example-client build and camera policy. No other
+slice's checks change.
+
 `scripts/tuna-gtk-shell-proof --window-leak-only --artifacts DIR` runs
 G-WINDOW-LEAK (#1088): after five warm-up windows, 100 libadwaita windows
 (`TUNA_WINDOW_LEAK_WINDOWS` sets the count) are opened and closed, odd ones
@@ -939,7 +947,10 @@ behind opaque surfaces (`culled_windows`). Both cover the whole output, so
 a frame that repaints only the panel or the cursor still lists the windows
 it leaves on screen as drawn. `throttled_windows` lists the windows
 whose frame callbacks run at the hidden rate (about 1 Hz): off the scene
-or wholly culled, unless the overview, the switcher or a cast shows them.
+or wholly culled, unless the overview, the switcher or a cast shows them;
+every window while locked. After 3 s hidden a window is suspended
+(`suspended_windows`, the xdg_toplevel `suspended` state) and a client
+told so gets no frame callbacks until it shows again.
 Proof `G-OCCLUSION-CULL` fullscreens an opaque window over another and
 requires the lower one to be culled and throttled, then drawn at full
 rate again once the upper window's translucent shadow returns.
