@@ -227,12 +227,16 @@ impl ProtocolVersion {
     /// `HideCloseDialog`, and the shell-to-compositor `RespondCloseDialog`
     /// (gnome-shell's Force Quit / Wait). Positional postcard peers must
     /// ship together.
-    /// `0.51` appends GNOME's per-class `custom-accel-config` curves and the
+    /// `0.51` appends the compositor-to-shell `LockScreenShown` message
+    /// (the lock curtain has landed, screenShield.js `_lockScreenShown`):
+    /// the shell reports the screen saver active only then, because
+    /// gnome-settings-daemon blanks the screen on `ActiveChanged(true)`.
+    /// `0.52` appends GNOME's per-class `custom-accel-config` curves and the
     /// touchpad `disable-while-typing-timeout` to InputSettings (#343).
     /// Positional postcard peers must ship together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 51,
+        minor: 52,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -1184,6 +1188,17 @@ pub enum Message {
     /// (`meta_window_set_alive (TRUE)`), went away, left the screen, or
     /// the session locked. Sent only to peers advertising minor >= 50.
     HideCloseDialog { window: WindowId },
+    /// Since 0.51: whether the lock screen is shown: the session is
+    /// locked and the lock curtain has landed over it (GNOME 51
+    /// `screenShield.js` `_lockScreenShown`, after the
+    /// `Overview.ANIMATION_TIME` lowering). The shell reports the screen
+    /// saver active (`GetActive`, `ActiveChanged(true)`) only from here,
+    /// as gnome-shell does: gnome-settings-daemon blanks the screen on
+    /// `ActiveChanged(true)`, and blanking mid-slide freezes the curtain
+    /// off screen. `false` once the session unlocks. Sent on change and in
+    /// each handshake snapshot while shown, only to peers advertising
+    /// minor >= 51.
+    LockScreenShown { shown: bool },
 }
 
 /// [`Message::WorkspaceProgress`] positions are workspace indices times
@@ -1386,11 +1401,11 @@ pub struct InputSettings {
     /// placement, else mutter's first-fit from the work area's corner.
     #[serde(default = "default_center_new_windows")]
     pub center_new_windows: bool,
-    /// Since 0.51: each pointer class's `custom-accel-config`, used when
+    /// Since 0.52: each pointer class's `custom-accel-config`, used when
     /// that class's `accel-profile` is `custom`.
     #[serde(default)]
     pub custom_accel: CustomAccelConfigs,
-    /// Since 0.51: touchpad `disable-while-typing-timeout`, milliseconds.
+    /// Since 0.52: touchpad `disable-while-typing-timeout`, milliseconds.
     #[serde(default = "default_disable_while_typing_timeout_ms")]
     pub disable_while_typing_timeout_ms: u32,
 }
@@ -2493,7 +2508,7 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
                 ));
             }
         }
-        Message::HideCloseDialog { .. } => {}
+        Message::HideCloseDialog { .. } | Message::LockScreenShown { .. } => {}
     }
     Ok(())
 }
@@ -2767,11 +2782,11 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_51() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 51));
-        // A 0.50 shell still negotiates; a newer minor does not.
-        assert!(ProtocolVersion::new(0, 50).is_compatible_with(&CURRENT_VERSION));
-        assert!(!ProtocolVersion::new(0, 52).is_compatible_with(&CURRENT_VERSION));
+    fn current_version_is_0_52() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 52));
+        // A 0.51 shell still negotiates; a newer minor does not.
+        assert!(ProtocolVersion::new(0, 51).is_compatible_with(&CURRENT_VERSION));
+        assert!(!ProtocolVersion::new(0, 53).is_compatible_with(&CURRENT_VERSION));
     }
 
     #[test]
@@ -4333,6 +4348,22 @@ mod close_dialog_wire_tests {
             );
             let command = Message::Command { id: 11, kind };
             assert_eq!(decode_frame(&encode_frame(&command)).unwrap(), command);
+        }
+    }
+
+    #[test]
+    fn lock_screen_shown_follows_hide_close_dialog() {
+        let tag = |bytes: &[u8]| bytes[0];
+        let mut buffer = [0_u8; 64];
+        let hide =
+            tag(postcard::to_slice(&Message::HideCloseDialog { window: 7 }, &mut buffer).unwrap());
+        for shown in [true, false] {
+            let message = Message::LockScreenShown { shown };
+            assert_eq!(
+                tag(postcard::to_slice(&message, &mut buffer).unwrap()),
+                hide + 1
+            );
+            assert_eq!(decode_frame(&encode_frame(&message)).unwrap(), message);
         }
     }
 }

@@ -51,6 +51,11 @@ before decoding.
   lock). The shell answers `CommandKind::RespondCloseDialog { window,
   response }` with `CloseDialogResponse::ForceClose` or `Wait`. Texts are
   bounded by `MAX_TITLE_LEN`, sides by `MAX_CLOSE_DIALOG_SIDE`.
+- Lock screen shown (0.51): `Message::LockScreenShown { shown }` (peers
+  >=51 only) says the session is locked and the lock curtain has landed
+  (screenShield.js `_lockScreenShown`); `false` once it unlocks. The shell
+  reports `org.gnome.ScreenSaver` active only while it is shown, because
+  gnome-settings-daemon blanks the screen on `ActiveChanged(true)`.
 - Messages: `Message`, `StateOp`, `CommandKind`, `CommandStatus`,
   `ErrorKind`.
 - State types: `WindowInfo`, `WorkspaceInfo`, `OutputInfo`, `PreviewInfo`,
@@ -62,7 +67,7 @@ before decoding.
   `PointingStickSettings`) carry GNOME 51's per-device-class peripherals
   keys. Every acceleration key uses `PointerAccelProfile`: default, flat,
   adaptive, and custom.
-- Custom acceleration and typing timeout (0.51): `InputSettings::custom_accel`
+- Custom acceleration and typing timeout (0.52): `InputSettings::custom_accel`
   (`CustomAccelConfigs`, one `CustomAccelCurve { step, speeds }` per pointer
   class, GNOME's `custom-accel-config`) and
   `InputSettings::disable_while_typing_timeout_ms` are appended after

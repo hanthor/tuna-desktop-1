@@ -515,6 +515,7 @@ class StartupOverviewPolicy(unittest.TestCase):
             final = after or dict(original, overview_open=False, overview_progress=0)
             (out/'after').write_text(json.dumps(final))
             prelude = r'''set -eu
+. "$ROOT/scripts/lib/tuna-state-snapshot.sh"
 fail() { printf 'FAIL:%s\n' "$1" >>"$ARTIFACTS/events"; exit 9; }
 pass() { :; }
 fixture_a11y() { printf 'a11y\n' >>"$ARTIFACTS/events"; printf '[]' >"$3"; }
