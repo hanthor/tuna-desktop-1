@@ -2541,8 +2541,8 @@ impl WindowManager {
                 WindowRequest::Unmaximize => {
                     self.set_maximized(state, id, false);
                 }
-                WindowRequest::Fullscreen => {
-                    self.set_fullscreen(state, id, true);
+                WindowRequest::Fullscreen(output) => {
+                    self.set_fullscreen_on(state, id, output.as_deref());
                 }
                 WindowRequest::Unfullscreen => {
                     self.set_fullscreen(state, id, false);
@@ -5236,13 +5236,22 @@ impl WindowManager {
         }
     }
 
-    /// Whole output, including the panel strip, for fullscreen windows.
-    fn fullscreen_area(state: &State) -> Rectangle<i32, Logical> {
-        let primary = state.primary_size();
-        Rectangle {
-            loc: (0, 0).into(),
-            size: (primary.w.max(0), primary.h.max(0)).into(),
-        }
+    /// Whole output, including the panel strip, for a fullscreen window
+    /// whose floating rectangle is `floating`: the output that rectangle
+    /// is on, as Mutter fullscreens a window on its own monitor
+    /// (`window->monitor`), else the primary.
+    fn fullscreen_area(
+        state: &State,
+        floating: Rectangle<i32, Logical>,
+    ) -> Rectangle<i32, Logical> {
+        let outputs = state.output_slices();
+        Self::output_of(floating, &outputs)
+            .or_else(|| {
+                let primary = state.primary_output_name()?;
+                outputs.iter().find(|(name, _)| *name == primary)
+            })
+            .map(|(_, rect)| *rect)
+            .unwrap_or_default()
     }
 
     /// Gap between scroll-mode strip columns (niri default).
@@ -6335,8 +6344,9 @@ impl WindowManager {
         }
     }
 
-    /// Cover the output with a window, stashing its floating geometry.
-    /// Idempotent; false for unknown ids.
+    /// Cover the window's output (the one its floating rectangle is on)
+    /// with it, stashing its floating geometry. Idempotent; false for
+    /// unknown ids.
     pub fn set_fullscreen(&mut self, state: &mut State, id: u64, fullscreen: bool) -> bool {
         // Forced strip membership, like maximize: fullscreen changes
         // mid-scroll stay columns instead of covering the screen.
@@ -6347,6 +6357,59 @@ impl WindowManager {
             self.apply_layout(state, id, WindowLayout::Fullscreen)
         } else {
             self.restore_window(id)
+        }
+    }
+
+    /// Fullscreen a window on the output `xdg_toplevel.set_fullscreen`
+    /// named, as Mutter's `xdg_toplevel_set_fullscreen` does: the window
+    /// first moves to that monitor (`meta_window_move_to_monitor`), then
+    /// covers it. No output, or one that is gone, fullscreens the window
+    /// where it is. False for unknown ids.
+    fn set_fullscreen_on(&mut self, state: &mut State, id: u64, output: Option<&str>) -> bool {
+        if self.mode != SessionMode::Scroll {
+            if let Some(name) = output {
+                self.move_to_output(state, id, name);
+            }
+        }
+        self.set_fullscreen(state, id, true)
+    }
+
+    /// Mutter's `meta_window_move_to_monitor`: the window's floating
+    /// rectangle (its geometry, or the restore rectangle of a managed
+    /// layout) moves from its output to `name` as an output change moves
+    /// it, and `name` becomes the output it prefers. Unknown outputs and
+    /// ids are ignored.
+    fn move_to_output(&mut self, state: &State, id: u64, name: &str) {
+        let outputs = state.output_slices();
+        let Some((_, new_rect)) = outputs.iter().find(|(output, _)| output == name) else {
+            return;
+        };
+        let primary = state.primary_output_name();
+        let Some(window) = self.windows.get_mut(&id) else {
+            return;
+        };
+        window.preferred_output = Some(name.to_owned());
+        let floating = window.layout == WindowLayout::Floating;
+        let shown = floating_rect(window);
+        let Some((_, old_rect)) = Self::output_of(shown, &outputs).or_else(|| {
+            let primary = primary.as_deref()?;
+            outputs.iter().find(|(output, _)| output == primary)
+        }) else {
+            return;
+        };
+        if old_rect == new_rect {
+            return;
+        }
+        if floating {
+            let free = match window.unconstrained {
+                Some((free, at)) if at == shown => free,
+                _ => shown,
+            };
+            let (free, geo) = move_between_outputs(shown, free, *old_rect, *new_rect);
+            window.unconstrained = (free != geo).then_some((free, geo));
+            window.geometry = geo;
+        } else {
+            window.restore = Some(move_between_outputs(shown, shown, *old_rect, *new_rect).1);
         }
     }
 
@@ -6390,7 +6453,10 @@ impl WindowManager {
             WindowLayout::Floating => return self.restore_window(id),
             WindowLayout::Maximized => Self::work_area(state),
             WindowLayout::Tiled(side) => Self::tile_area(state, side),
-            WindowLayout::Fullscreen => Self::fullscreen_area(state),
+            WindowLayout::Fullscreen => match self.windows.get(&id) {
+                Some(window) => Self::fullscreen_area(state, floating_rect(window)),
+                None => return false,
+            },
             WindowLayout::Strip => self.strip_column_area(state, id),
         };
         let Some(window) = self.windows.get_mut(&id) else {
@@ -6478,9 +6544,7 @@ impl WindowManager {
                 .or_else(|| find(old))
                 .or_else(|| primary.as_deref().and_then(find))
         };
-        // meta_window_move_between_rects: move_rect_between_rects on the
-        // unconstrained rect `free` of the window shown at `shown`, then
-        // the constraints (META_MOVE_RESIZE_CONSTRAIN) on the new layout.
+        // meta_window_move_between_rects on the new layout.
         let relocate = |shown: Rectangle<i32, Logical>,
                         free: Rectangle<i32, Logical>,
                         preferred: Option<&str>| {
@@ -6489,16 +6553,7 @@ impl WindowManager {
             if new_rect == old_rect {
                 return None;
             }
-            let moved = move_rect_between_rects(free, *old_rect, *new_rect);
-            let constrained = crate::output_constraints::keep_fully_visible(
-                rect_tuple(shown),
-                floating_workarea((old_rect.loc.x, old_rect.loc.y), old_rect.size),
-                rect_tuple(moved),
-                floating_workarea((new_rect.loc.x, new_rect.loc.y), new_rect.size),
-            )
-            .map_or(moved, |(x, y, _, _)| {
-                Rectangle::new((x, y).into(), moved.size)
-            });
+            let (moved, constrained) = move_between_outputs(shown, free, *old_rect, *new_rect);
             Some((new_name, moved, constrained))
         };
         let mut moved = 0;
@@ -8258,6 +8313,40 @@ fn output_workareas(state: &State) -> Vec<(String, crate::output_constraints::Re
 
 fn rect_tuple(rect: Rectangle<i32, Logical>) -> crate::output_constraints::Rect {
     (rect.loc.x, rect.loc.y, rect.size.w, rect.size.h)
+}
+
+/// The rectangle a window floats at: its geometry while floating, else
+/// the restore rectangle its managed layout stashed.
+fn floating_rect(window: &ManagedWindow) -> Rectangle<i32, Logical> {
+    match window.layout {
+        WindowLayout::Floating => window.geometry,
+        _ => window.restore.unwrap_or(window.geometry),
+    }
+}
+
+/// Mutter's `meta_window_move_between_rects` from output `old` to
+/// output `new`: `move_rect_between_rects` on the unconstrained rect
+/// `free` of the window shown at `shown`, then the constraints
+/// (META_MOVE_RESIZE_CONSTRAIN): wholly visible before, it stays wholly
+/// inside the new output's workarea. The moved and the constrained
+/// rectangle.
+fn move_between_outputs(
+    shown: Rectangle<i32, Logical>,
+    free: Rectangle<i32, Logical>,
+    old: Rectangle<i32, Logical>,
+    new: Rectangle<i32, Logical>,
+) -> (Rectangle<i32, Logical>, Rectangle<i32, Logical>) {
+    let moved = move_rect_between_rects(free, old, new);
+    let constrained = crate::output_constraints::keep_fully_visible(
+        rect_tuple(shown),
+        floating_workarea((old.loc.x, old.loc.y), old.size),
+        rect_tuple(moved),
+        floating_workarea((new.loc.x, new.loc.y), new.size),
+    )
+    .map_or(moved, |(x, y, _, _)| {
+        Rectangle::new((x, y).into(), moved.size)
+    });
+    (moved, constrained)
 }
 
 /// Mutter's `move_rect_between_rects` (window.c): a window that fits
