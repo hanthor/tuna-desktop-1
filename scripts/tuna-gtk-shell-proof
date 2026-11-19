@@ -2040,6 +2040,8 @@ if [ "$LOCK_MENU_ONLY" = 1 ]; then
     lock_with_menu_gate
     grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
     shell_stable_gate
+    exit 0
+fi
 if [ "$SOUND_ALERTS_ONLY" = 1 ]; then
     cstate '.active_workspace != null and .locked == false' "sound alerts desktop ready" ||
         fail G-VISUAL-BELL "desktop never became ready"
