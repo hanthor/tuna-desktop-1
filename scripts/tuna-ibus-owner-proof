@@ -166,7 +166,9 @@ STUB
     # Anchored: dbus-run-session's own command line holds the same words.
     compositor=$(pgrep -f "^[^ ]*/tuna-compositor --backend winit --socket $socket( |$)" | head -1 || true)
     bridge=$(pgrep -P "$compositor" -f '(^|/)tuna-ibus-bridge( |$)' | head -1 || true)
-    [ -n "$compositor" ] && [ -n "$bridge" ] || fail "$gate" "no compositor or bridge process"
+    if [ -z "$compositor" ] || [ -z "$bridge" ]; then
+        fail "$gate" "no compositor or bridge process"
+    fi
 
     # The bus file of this display names the daemon that owns the bus.
     local busfile owner
@@ -221,8 +223,9 @@ STUB
             fail "$gate" "ibus-daemon does not lead its own process group ($pgid)"
         pass "$gate" "one ibus-daemon (pid $owner) owns the bus file: the bridge's own non-daemonized child"
     else
-        [ "$ppid" != "$bridge" ] && [ "$pgid" != "$bridge" ] ||
+        if [ "$ppid" = "$bridge" ] || [ "$pgid" = "$bridge" ]; then
             fail "$gate" "the bridge started a daemon beside its unit (parent $ppid group $pgid)"
+        fi
         local starts
         starts=$(grep -c -- '--no-block start tuna-proof-ibus.service' "$STUB_DIR/calls" || true)
         [ "$starts" = 1 ] ||
