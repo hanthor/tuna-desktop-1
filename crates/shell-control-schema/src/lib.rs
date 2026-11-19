@@ -227,17 +227,22 @@ impl ProtocolVersion {
     /// `HideCloseDialog`, and the shell-to-compositor `RespondCloseDialog`
     /// (gnome-shell's Force Quit / Wait). Positional postcard peers must
     /// ship together.
-    /// `0.51` appends the shell-to-compositor `WakeUpScreen` command (a
-    /// notification wakes the locked, blanked screen, #348). Positional
-    /// postcard peers must ship together.
     /// `0.51` appends the compositor-to-shell `LockScreenShown` message
     /// (the lock curtain has landed, screenShield.js `_lockScreenShown`):
     /// the shell reports the screen saver active only then, because
     /// gnome-settings-daemon blanks the screen on `ActiveChanged(true)`.
     /// Positional postcard peers must ship together.
+    /// `0.52` appends the shell-to-compositor `DeclareBusName` command: the
+    /// supervised shell names its session-bus connection over this
+    /// pidfd-pinned socket, and the compositor recognises the shell on
+    /// D-Bus by that unique name only (ADR 0010). Positional postcard peers
+    /// must ship together.
+    /// `0.53` appends the shell-to-compositor `WakeUpScreen` command (a
+    /// notification wakes the locked, blanked screen, #348). Positional
+    /// postcard peers must ship together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 51,
+        minor: 53,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -528,7 +533,14 @@ pub enum CommandKind {
         window: WindowId,
         response: CloseDialogResponse,
     },
-    /// Since 0.51: a notification reached the lock screen's list
+    /// Since 0.52: the unique name (`:1.N`) of the shell's session-bus
+    /// connection. The compositor admits D-Bus calls as the shell only
+    /// from the names its supervised, pidfd-pinned control session
+    /// declared, and forgets them when that session or process ends. A
+    /// session that is not the supervised shell is denied. A later
+    /// declaration replaces the earlier one.
+    DeclareBusName { unique_name: String },
+    /// Since 0.53: a notification reached the lock screen's list
     /// (unlockDialog.js `_wakeUpScreenForSource`): undo the idle shield's
     /// fade as screenShield.js `_wakeUpScreen` turns its lightbox off,
     /// without counting as user activity and without unlocking. Denied
@@ -2663,11 +2675,11 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_51() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 51));
-        // A 0.50 shell still negotiates; a newer minor does not.
-        assert!(ProtocolVersion::new(0, 50).is_compatible_with(&CURRENT_VERSION));
-        assert!(!ProtocolVersion::new(0, 52).is_compatible_with(&CURRENT_VERSION));
+    fn current_version_is_0_52() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 53));
+        // A 0.51 shell still negotiates; a newer minor does not.
+        assert!(ProtocolVersion::new(0, 51).is_compatible_with(&CURRENT_VERSION));
+        assert!(!ProtocolVersion::new(0, 53).is_compatible_with(&CURRENT_VERSION));
     }
 
     #[test]
@@ -4266,5 +4278,28 @@ mod close_dialog_wire_tests {
             );
             assert_eq!(decode_frame(&encode_frame(&message)).unwrap(), message);
         }
+    }
+
+    #[test]
+    fn declare_bus_name_follows_respond_close_dialog() {
+        let tag = |bytes: &[u8]| bytes[0];
+        let mut buffer = [0_u8; 64];
+        let respond = tag(postcard::to_slice(
+            &CommandKind::RespondCloseDialog {
+                window: 3,
+                response: CloseDialogResponse::Wait,
+            },
+            &mut buffer,
+        )
+        .unwrap());
+        let kind = CommandKind::DeclareBusName {
+            unique_name: ":1.42".into(),
+        };
+        assert_eq!(
+            tag(postcard::to_slice(&kind, &mut buffer).unwrap()),
+            respond + 1
+        );
+        let command = Message::Command { id: 12, kind };
+        assert_eq!(decode_frame(&encode_frame(&command)).unwrap(), command);
     }
 }

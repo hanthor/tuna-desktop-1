@@ -1279,7 +1279,7 @@ impl Runtime {
             |stream, runtime: &mut Runtime| {
                 let mut client_data = ClientState::native_connection(&stream);
                 // Layer-shell is the supervised shell's alone (#1048).
-                client_data.admit_supervised_shell(&stream, runtime.shell.child_pid());
+                client_data.admit_supervised_shell(runtime.shell.child_pid());
                 if runtime
                     .display
                     .handle()
@@ -1940,7 +1940,8 @@ impl Runtime {
         }
         // Input capture never survives the lock (#1040).
         self.input_capture.revoke_all();
-        self.capture_authority.publish(true, self.shell.child_pid());
+        self.capture_authority
+            .publish(true, self.control.shell_bus_names());
         self.state.set_shortcut_inhibition_locked(true);
         // A three-finger swipe under way is the unlocked session's: end
         // it cancelled, so its overview or workspace slide never resumes
@@ -5560,8 +5561,9 @@ impl Runtime {
         // ext-session-lock-v1: only the supervised shell may lock, and
         // locking through the protocol engages the compositor's own
         // flag. Anyone else's locker is dropped, which tells it the
-        // lock failed. Each waiting client gets its own verdict.
-        while let Some((locker, pid)) = self.state.take_lock_request() {
+        // lock failed. Only the shell's request is ever pending (others
+        // are refused on arrival), so there is at most one to judge.
+        if let Some((locker, pid)) = self.state.take_lock_request() {
             use crate::session_lock::{lock_request_verdict, LockVerdict};
             let verdict = lock_request_verdict(
                 pid,
@@ -5578,7 +5580,7 @@ impl Runtime {
                     eprintln!("tuna-compositor: session lock refused by administrator policy");
                 }
                 LockVerdict::RefusedForeign => {
-                    eprintln!("tuna-compositor: session lock refused for pid {pid:?}");
+                    eprintln!("tuna-compositor: session lock refused for pinned pid {pid:?}");
                 }
             }
             self.state
@@ -5721,8 +5723,6 @@ impl Runtime {
         }
         // Only the supervised shell may hold a control session (#30):
         // between restarts nobody may.
-        self.capture_authority
-            .publish(self.is_locked(), self.shell.child_pid());
         self.control.set_auth_owner(
             self.shell
                 .child_pid()
@@ -5733,6 +5733,10 @@ impl Runtime {
             Some(pid) => PeerGate::Pid(pid),
             None => PeerGate::Closed,
         });
+        // The shell is known on the session bus only by the unique names its
+        // current pinned control session declared (ADR 0010).
+        self.capture_authority
+            .publish(self.is_locked(), self.control.shell_bus_names());
         // Control EOF, manual/protocol/idle gates and shell PID gating are now current.
         // Never grant from a channel callback before those changes are observed.
         self.cancel_invalid_unlock();
@@ -8795,6 +8799,25 @@ fn run_loop(
     session: &NestedSession,
     mut probe: impl FnMut(&mut AuthOwnerProbe<'_>) -> Option<Duration>,
 ) -> Result<RunStats, RuntimeError> {
+    // Graceful shutdown on SIGTERM/SIGINT/SIGHUP: ending the loop drops the
+    // runtime, whose supervisor kills the shell child (ADR 0003 kill
+    // on exit). Without this a signal would bypass `Drop` and orphan
+    // the shell on a dead socket. logind creates session scopes with
+    // SendSIGHUP=yes, so a session stop sends SIGHUP right after SIGTERM;
+    // left at its default it killed the compositor before teardown, so the
+    // owned Orca was never retired (#836). The flag write is the only work
+    // done in the handler; the loop observes it below. Installed before
+    // `launch` binds the Wayland socket, so a session that is visible is
+    // already one a signal ends through teardown (#1174).
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    for signal in [
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGHUP,
+    ] {
+        signal_hook::flag::register(signal, std::sync::Arc::clone(&shutdown))
+            .map_err(|e| RuntimeError::Loop(format!("signal handler failed: {e}")))?;
+    }
     let (mut runtime, mut event_loop) = Runtime::launch(session)?;
     #[cfg(feature = "drm")]
     let _session_services = if matches!(runtime.backend, Backend::Drm(_)) {
@@ -8839,25 +8862,10 @@ fn run_loop(
     if let Some(session) = &logind_session {
         session.set_wake(&runtime.wake);
     }
-    // Graceful shutdown on SIGTERM/SIGINT/SIGHUP: ending the loop drops the
-    // runtime, whose supervisor kills the shell child (ADR 0003 kill
-    // on exit). Without this a signal would bypass `Drop` and orphan
-    // the shell on a dead socket. logind creates session scopes with
-    // SendSIGHUP=yes, so a session stop sends SIGHUP right after SIGTERM;
-    // left at its default it killed the compositor before teardown, so the
-    // owned Orca was never retired (#836). The flag write is the only work
-    // done in the handler; the loop observes it below.
-    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    for signal in [
-        signal_hook::consts::SIGTERM,
-        signal_hook::consts::SIGINT,
-        signal_hook::consts::SIGHUP,
-    ] {
-        signal_hook::flag::register(signal, std::sync::Arc::clone(&shutdown))
-            .map_err(|e| RuntimeError::Loop(format!("signal handler failed: {e}")))?;
-    }
     // The same signals, and child exits for the shell, IME and XWayland
-    // supervisors, wake a loop that may be sleeping (#503).
+    // supervisors, wake a loop that may be sleeping (#503). A signal taken
+    // before this source exists is still seen: the flag is read before the
+    // first wait.
     let signals = crate::wake::signal_source(&[
         signal_hook::consts::SIGCHLD,
         signal_hook::consts::SIGTERM,

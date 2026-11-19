@@ -390,6 +390,9 @@ pub struct Session<'a> {
     close_dialog_responses: Vec<(u64, tuna_shell_control::CloseDialogResponse)>,
     /// An admitted `WakeUpScreen`, drained by the hub.
     wake_up_screen: bool,
+    /// The session-bus unique name the supervised shell declared over this
+    /// session (`DeclareBusName`), read by [`ControlHub::shell_bus_names`].
+    bus_name: Option<String>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -493,6 +496,7 @@ impl<'a> Session<'a> {
             close_menu_unanimated: false,
             close_dialog_responses: Vec::new(),
             wake_up_screen: false,
+            bus_name: None,
         };
         let msg = match session.conn.read_frame() {
             Ok(msg) => msg,
@@ -1233,6 +1237,38 @@ impl<'a> Session<'a> {
             }
             Message::Command {
                 id,
+                kind: CommandKind::DeclareBusName { unique_name },
+            } => {
+                if self.peer_minor < 52 {
+                    self.conn.write_frame(&Message::Error {
+                        kind: ErrorKind::UnknownCommand,
+                        message: "bus name declarations require negotiated minor 52".into(),
+                    })?;
+                    return Ok(Handled::ErrorSent {
+                        kind: ErrorKind::UnknownCommand,
+                    });
+                }
+                // Only a session the hub bound to the supervised shell
+                // child (its pidfd-pinned peer) names the shell on D-Bus.
+                let status = if self.auth_owner.is_none() {
+                    CommandStatus::Denied {
+                        reason: "only the supervised shell declares its bus name".into(),
+                    }
+                } else if !is_unique_bus_name(&unique_name) {
+                    CommandStatus::Denied {
+                        reason: "not a unique bus name".into(),
+                    }
+                } else {
+                    self.bus_name = Some(unique_name);
+                    CommandStatus::Applied
+                };
+                let applied = status == CommandStatus::Applied;
+                self.conn
+                    .write_frame(&Message::CommandResult { id, status })?;
+                Ok(Handled::CommandResult { id, applied })
+            }
+            Message::Command {
+                id,
                 kind: CommandKind::WindowAction { window, action },
             } => {
                 // The window manager carries it out (drained by the hub);
@@ -1625,6 +1661,7 @@ fn apply_command(
         | CommandKind::CloseMenuUnanimated
         | CommandKind::RespondCloseDialog { .. }
         | CommandKind::WakeUpScreen
+        | CommandKind::DeclareBusName { .. }
         | CommandKind::SwitchInputSource { .. }
         | CommandKind::SetWindowIconGeometries { .. }
         | CommandKind::SetWellbeingEffects { .. }
@@ -1739,13 +1776,28 @@ pub struct OskBroadcast {
 pub const MAX_PENDING_PEERS: usize = 8;
 
 /// Kernel-reported credentials of a connected control peer
-/// (`SO_PEERCRED`): what the peer *is*, not what it claims.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// (`SO_PEERCRED`, plus `SO_PEERPIDFD`): what the peer *is*, not what it
+/// claims.
+#[derive(Clone, Debug)]
 pub struct PeerCred {
     /// Peer process id at connect time.
     pub pid: u32,
     /// Peer effective user id.
     pub uid: u32,
+    /// Descriptor pinned to the process that connected (`SO_PEERPIDFD`);
+    /// `None` on a kernel without it (before 6.5).
+    pub pidfd: Option<std::sync::Arc<std::os::fd::OwnedFd>>,
+}
+
+impl PeerCred {
+    /// `pid` while the pinned process that connected is still alive. A
+    /// numeric PID without a pin, or the pin of an exited process, is no
+    /// identity: that number may since have been recycled.
+    pub fn pinned_pid(&self) -> Option<u32> {
+        use std::os::fd::AsFd;
+        let pidfd = self.pidfd.as_deref()?;
+        crate::capture_security::pidfd_live(pidfd.as_fd()).then_some(self.pid)
+    }
 }
 
 /// Who may hold a control session (#30).
@@ -1758,7 +1810,8 @@ pub struct PeerCred {
 pub enum PeerGate {
     /// Any peer running as our user (tests, unsupervised development).
     SameUser,
-    /// Only the supervised shell process with this pid, as our user.
+    /// Only the supervised shell process with this pid, as our user,
+    /// pinned by `SO_PEERPIDFD`.
     Pid(u32),
     /// Nobody: no shell is running (between restarts, or none spawned).
     Closed,
@@ -1766,8 +1819,11 @@ pub enum PeerGate {
 
 impl PeerGate {
     /// Whether a peer with `peer` credentials may hold a session.
-    /// Unknown credentials are refused: fail closed.
-    pub fn admits(self, peer: Option<PeerCred>, our_uid: u32) -> bool {
+    /// Unknown credentials are refused: fail closed. The shell's gate
+    /// matches only the live pinned process, so a connection made under a
+    /// PID that was later recycled onto the shell is refused, and so is
+    /// every peer on a kernel without `SO_PEERPIDFD`.
+    pub fn admits(self, peer: Option<&PeerCred>, our_uid: u32) -> bool {
         let Some(peer) = peer else {
             return false;
         };
@@ -1776,7 +1832,7 @@ impl PeerGate {
         }
         match self {
             Self::SameUser => true,
-            Self::Pid(pid) => peer.pid == pid,
+            Self::Pid(pid) => peer.pinned_pid() == Some(pid),
             Self::Closed => false,
         }
     }
@@ -1788,7 +1844,14 @@ pub fn peer_cred(stream: &UnixStream) -> Option<PeerCred> {
     Some(PeerCred {
         pid: u32::try_from(cred.pid.as_raw_nonzero().get()).ok()?,
         uid: cred.uid.as_raw(),
+        pidfd: crate::capture_security::socket_pidfd(stream).map(std::sync::Arc::new),
     })
+}
+
+/// Whether `name` is a connection's unique bus name (`:1.N`), the only
+/// kind the bus never hands to another connection.
+fn is_unique_bus_name(name: &str) -> bool {
+    name.starts_with(':') && zbus::names::UniqueName::try_from(name).is_ok()
 }
 
 /// Our effective uid, for [`PeerGate::admits`].
@@ -2058,8 +2121,11 @@ impl ControlHub {
                 session.connection_id == lease.origin.connection
                     && session.auth_lease == Some(lease)
                     && session.auth_owner == Some(lease.owner)
-                    && PeerGate::Pid(lease.owner.pid).admits(self.session_peers[index], our_uid())
-                    && self.gate.admits(self.session_peers[index], our_uid())
+                    && PeerGate::Pid(lease.owner.pid)
+                        .admits(self.session_peers[index].as_ref(), our_uid())
+                    && self
+                        .gate
+                        .admits(self.session_peers[index].as_ref(), our_uid())
                     && session.conn.peer_live()
             })
     }
@@ -2099,6 +2165,30 @@ impl ControlHub {
     /// Current admission rule.
     pub fn peer_gate(&self) -> PeerGate {
         self.gate
+    }
+
+    /// The session-bus unique names the supervised shell declared over its
+    /// live control sessions: bound to the current shell child, whose
+    /// `SO_PEERPIDFD`-pinned peer is still that child, and still connected.
+    /// Empty between restarts, under any other gate, and once the
+    /// declaring session or process ended. The bus never reuses a unique
+    /// name, so this identity cannot pass to another process.
+    pub fn shell_bus_names(&self) -> impl Iterator<Item = &str> + Clone {
+        let uid = our_uid();
+        let owner = self.auth_owner;
+        let gate = self.gate;
+        self.sessions
+            .iter()
+            .zip(&self.session_peers)
+            .filter(move |(session, peer)| {
+                owner.is_some_and(|owner| {
+                    session.auth_owner == Some(owner)
+                        && PeerGate::Pid(owner.pid).admits(peer.as_ref(), uid)
+                        && gate.admits(peer.as_ref(), uid)
+                        && session.conn.peer_live()
+                })
+            })
+            .filter_map(|(session, _)| session.bus_name.as_deref())
     }
 
     /// Connections refused so far (gate or pending cap).
@@ -2219,11 +2309,12 @@ impl ControlHub {
         self.sessions.iter().enumerate().any(|(i, session)| {
             session.connection_id == origin.connection
                 && session.owes_auth(origin.request)
-                && self.gate.admits(self.session_peers[i], our_uid())
+                && self.gate.admits(self.session_peers[i].as_ref(), our_uid())
                 && (!self.auth_owner_configured
                     || self.auth_owner.is_some_and(|owner| {
                         session.auth_owner == Some(owner)
-                            && PeerGate::Pid(owner.pid).admits(self.session_peers[i], our_uid())
+                            && PeerGate::Pid(owner.pid)
+                                .admits(self.session_peers[i].as_ref(), our_uid())
                     }))
                 && session.conn.peer_live()
         })
@@ -2425,7 +2516,7 @@ impl ControlHub {
         while let Ok((stream, _)) = self.listener.accept() {
             received = true;
             let cred = peer_cred(&stream);
-            if !self.gate.admits(cred, uid) || self.pending_count() >= MAX_PENDING_PEERS {
+            if !self.gate.admits(cred.as_ref(), uid) || self.pending_count() >= MAX_PENDING_PEERS {
                 // Dropping the stream closes it: the peer sees EOF
                 // before any state crosses the socket.
                 self.refused += 1;
@@ -2447,7 +2538,7 @@ impl ControlHub {
         // A narrowed gate evicts sessions it no longer admits.
         let mut i = 0;
         while i < self.sessions.len() {
-            if self.gate.admits(self.session_peers[i], uid) {
+            if self.gate.admits(self.session_peers[i].as_ref(), uid) {
                 i += 1;
             } else {
                 self.sessions.swap_remove(i);
@@ -2788,7 +2879,7 @@ impl ControlHub {
         let uid = our_uid();
         for (stream, peer) in pending.into_iter().zip(peers) {
             // The gate may have narrowed since accept (shell restart).
-            if !self.gate.admits(peer, uid) {
+            if !self.gate.admits(peer.as_ref(), uid) {
                 self.refused += 1;
                 continue;
             }

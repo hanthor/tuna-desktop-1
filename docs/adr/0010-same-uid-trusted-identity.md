@@ -120,7 +120,7 @@ relative to the repository root.
   `crates/compositor/tests/peer_auth.rs` (`the_shell_gate_requires_a_pin`,
   `a_recycled_shell_pid_is_refused` and the earlier gate tests).
 - **Session bus.** The shell is the set of unique bus names it declared
-  over its pinned control session (`DeclareBusName`, control protocol 0.51;
+  over its pinned control session (`DeclareBusName`, control protocol 0.52;
   `crates/shell-control-schema`). Only a session bound to the current
   shell child's auth owner may declare, the name must be a unique name, and
   a declaration counts only while that session and its pinned peer are live

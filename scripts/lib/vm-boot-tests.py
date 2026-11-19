@@ -4309,6 +4309,9 @@ class FixtureLoginSession(unittest.TestCase):
                              "display-manager.service)\" = /usr/lib/systemd/system/gdm.service"):
                     self.assertIn(path, containerfile)
                 self.assertNotIn("AutomaticLogin", containerfile.replace("AutomaticLoginEnable|TimedLoginEnable", ""))
+        # Fingerprint unlock's PAM service (#1162 F5) postdates the published
+        # images, so only the current-build fixture hashes it.
+        self.assertIn("/etc/pam.d/tuna-lock /etc/pam.d/tuna-lock-fingerprint", self.fixture("Containerfile"))
 
     def test_both_fixtures_install_the_guest_helpers_the_lifecycle_runs(self):
         # The strict published lifecycle (#994) runs the current build's probes:
