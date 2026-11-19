@@ -235,6 +235,7 @@ jobs:
       - run: python3 scripts/tests/test_minimize_ci_freeze.py
       - run: python3 scripts/tests/test_minimize_brightness_controls.py
       - run: python3 scripts/tests/test_wb_shell_contract.py
+      - run: python3 scripts/tests/test_state_snapshot.py
       - run: python3 scripts/lib/window-lifecycle-proof-tests.py
       # Gate proofs and contract suites omitted from CI (#737).
       - run: python3 scripts/tests/test_wb_notice_button_mapping.py
