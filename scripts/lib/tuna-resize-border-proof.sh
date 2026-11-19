@@ -38,13 +38,23 @@ rb_open Borderhigh '#2190a4'
 rb_high="$rb_id" rb_high_pid="$rb_pid"
 sleep 1
 # The upper window moves down and right by its header bar, so its left
-# shadow lies over the lower window.
+# shadow lies over the lower window. Where earlier windows already cascade
+# it right and down (the full journey), it moves only as far as leaves the
+# output room for the edge (60 px) and corner (40x30 px) drags below from
+# 4 px outside the window: the pointer stops at the output's edge.
 read -r rb_x rb_y rb_w rb_h <<EOF
 $(rb_win "$rb_high" '.rect | map(tostring) | join(" ")')
 EOF
-x11f_drag $((rb_x + 120)) $((rb_y + 20)) $((rb_x + 120 + 140)) $((rb_y + 20 + 40))
-cstate ".interactive_move_window == null and (.windows[] | select(.id == $rb_high) | .rect[2] == $rb_w and .rect[3] == $rb_h and .rect[0] - $rb_x >= 100 and .rect[0] - $rb_x <= 140 and .rect[1] - $rb_y >= 20 and .rect[1] - $rb_y <= 40)" "upper window moved" 10 ||
-    fail G-RESIZE-BORDER "dragging the upper window's header bar did not move it: $(rb_win "$rb_high" '.rect | tostring')"
+rb_dx=$((WIDTH - rb_w - 4 - 60 - 4 - 40 - 1 - rb_x))
+[ "$rb_dx" -le 140 ] || rb_dx=140
+rb_dy=$((HEIGHT - rb_h - 4 - 30 - 1 - rb_y))
+[ "$rb_dy" -le 40 ] || rb_dy=40
+# The window moves with the pointer, up to 40 (20) px short of its travel.
+if [ "$rb_dx" -ge 0 ]; then rb_xlo=$((rb_dx - 40)) rb_xhi=$rb_dx; else rb_xlo=$rb_dx rb_xhi=$((rb_dx + 40)); fi
+if [ "$rb_dy" -ge 0 ]; then rb_ylo=$((rb_dy - 20)) rb_yhi=$rb_dy; else rb_ylo=$rb_dy rb_yhi=$((rb_dy + 20)); fi
+x11f_drag $((rb_x + 120)) $((rb_y + 20)) $((rb_x + 120 + rb_dx)) $((rb_y + 20 + rb_dy))
+cstate ".interactive_move_window == null and (.windows[] | select(.id == $rb_high) | .rect[2] == $rb_w and .rect[3] == $rb_h and .rect[0] - $rb_x >= $rb_xlo and .rect[0] - $rb_x <= $rb_xhi and .rect[1] - $rb_y >= $rb_ylo and .rect[1] - $rb_y <= $rb_yhi)" "upper window moved" 10 ||
+    fail G-RESIZE-BORDER "dragging the upper window's header bar by $rb_dx,$rb_dy did not move it: $(rb_win "$rb_high" '.rect | tostring'), was [$rb_x,$rb_y,$rb_w,$rb_h]"
 sleep 0.5
 read -r rb_x rb_y rb_w rb_h <<EOF
 $(rb_win "$rb_high" '.rect | map(tostring) | join(" ")')
