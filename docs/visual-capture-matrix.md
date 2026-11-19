@@ -160,7 +160,7 @@ state records its state observation next to its stills and clips.
 | P-SY-13 | InputCapture portal backend | `nonvisual` | No adequate capture | D-Bus and EIS behaviour; capture is wired on the DRM input path only |
 | P-SY-14 | Thunderbolt authorisation notices | `unsupported-in-nested` | No adequate capture | needs boltd and a Thunderbolt device or an emulated one (ADR 0008) |
 | P-ST-12 | Captive-portal sign-in | `unproven` | No adequate capture | notification and helper launch need NetworkManager reporting a portal |
-| P-OV-07 | App drag-and-drop through the overview | `unproven` | No adequate capture | the G-DND-* gates drive real GTK drags in the nested proof and read compositor state; no capture state films a drag held over the hot corner, Activities, a preview or a thumbnail yet |
+| P-OV-08 | App drag-and-drop through the overview | `unproven` | No adequate capture | the G-DND-* gates drive real GTK drags in the nested proof and read compositor state; no capture state films a drag held over the hot corner, Activities, a preview or a thumbnail yet |
 
 ## Walkthrough states
 
