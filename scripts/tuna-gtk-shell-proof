@@ -12285,7 +12285,16 @@ if [ -n "$PAM_ON" ]; then
     sleep 0.5
     grep -q 'ActiveChanged.*true' "$ARTIFACTS/screensaver-signals.log" || fail G-LOCK-KEY "no active signal"
     grep -q 'ActiveChanged.*false' "$ARTIFACTS/screensaver-signals.log" || fail G-LOCK-KEY "no inactive signal"
-    pass G-LOCK-KEY "Super+L locks; PAM unlocks; ActiveChanged publishes both transitions"
+    # gnome-settings-daemon unblanks only on input or WakeUpScreen, which
+    # gnome-shell's `_continueDeactivate` emits on every unlock before the
+    # screen saver goes inactive: `loginctl unlock-session` after the blank
+    # otherwise left the unlocked session dark (marlin-vm V-ORCA-ACTIVATION).
+    wake_line=$(grep -n 'WakeUpScreen' "$ARTIFACTS/screensaver-signals.log" | tail -1 | cut -d: -f1)
+    inactive_line=$(grep -n 'ActiveChanged.*false' "$ARTIFACTS/screensaver-signals.log" | tail -1 | cut -d: -f1)
+    if [ -z "$wake_line" ] || [ "$wake_line" -gt "$inactive_line" ]; then
+        fail G-LOCK-KEY "the unlock did not emit WakeUpScreen before ActiveChanged(false)"
+    fi
+    pass G-LOCK-KEY "Super+L locks; PAM unlocks; ActiveChanged publishes both transitions; the unlock wakes the screen first"
     # With animations off the curtain moves at once, both ways.
     gsettings set org.gnome.desktop.interface enable-animations false
     cstate '(.animations_enabled | not)' "still curtain" ||

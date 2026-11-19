@@ -4177,8 +4177,9 @@ fn build(app: &adw::Application) {
                 // Active once the curtain has landed, as gnome-shell's
                 // `_lockScreenShown`: gnome-settings-daemon blanks the
                 // screen on ActiveChanged(true), which mid-slide would
-                // freeze the curtain off screen.
-                screensaver.sync(lock_shown);
+                // freeze the curtain off screen. Each confirmed unlock
+                // wakes the screen first, as `_continueDeactivate` does.
+                screensaver.sync(authoritative_lock, lock_shown);
                 // The session keyboard never shows over the lock screen.
                 osk.set_locked(locked);
                 for (focus, show, touch_auto) in osk_updates {
