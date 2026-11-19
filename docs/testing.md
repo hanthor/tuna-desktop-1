@@ -201,6 +201,14 @@ bus, App Details from a GNOME Software stub), pinning by dragging from the
 grid, reordering and unpinning on Show Apps with real pointer drags, and
 `gsettings set favorite-apps` reaching the dash without a restart.
 
+The GTK proof's focused slices (`--*-only`) run one at a time. A new slice
+adds its usage line above `# end of --help` in the script's header (`--help`
+prints up to that line) and one case arm that calls `only_mode` with its flag
+and the traits it needs: `source-build` refuses `--installed-package`, and
+`no-media-source`, `no-examples` and `no-camera-policy` skip the full run's
+media-source receipt, example-client build and camera policy. No other
+slice's checks change.
+
 `scripts/tuna-gtk-shell-proof --window-leak-only --artifacts DIR` runs
 G-WINDOW-LEAK (#1088): after five warm-up windows, 100 libadwaita windows
 (`TUNA_WINDOW_LEAK_WINDOWS` sets the count) are opened and closed, odd ones
