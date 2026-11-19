@@ -138,9 +138,13 @@ locked state to the capture authority and closes the overview
 (`runtime.rs:1661-1687`). Unlock runs the session user's own PAM
 transaction against the `tuna-lock` service (`share/pam.d/tuna-lock`) in a
 private helper. Attempts are bound to the control connection, request,
-attempt serial and lock epoch. Fingerprint unlock does not run through PAM
-yet: a fprintd match unlocks without the account stack (a fix is in
-progress; [ADR 0011](adr/0011-lock-auth-and-capture-grant-lifecycle.md), F5).
+attempt serial and lock epoch. Fingerprint unlock is its own PAM
+transaction against the `tuna-lock-fingerprint` service
+(`share/pam.d/tuna-lock-fingerprint`: `pam_fprintd` plus `login`'s account
+stack, as GDM runs `gdm-fingerprint`), so the account stack decides a
+fingerprint unlock as it decides a password one
+([ADR 0011](adr/0011-lock-auth-and-capture-grant-lifecycle.md), F5; fixed in
+#1173).
 See:
 
 - [Lock-screen authentication conversations](security/lock-conversations.md)
