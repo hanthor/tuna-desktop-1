@@ -45,7 +45,11 @@ sudo apt install ./tuna-desktop_X.Y.Z_amd64.deb
 ```
 
 Dependencies resolve automatically on a target with the declared runtime
-packages available. After installing, the Tuna Desktop session is
+packages available: GTK at least 4.14, libadwaita, gtk4-layer-shell,
+libgweather 4.4 and `python3` for the shipped GeoClue agent-policy helper. Location services
+need `geoclue-2.0`, which the package recommends rather than requires;
+without it the session runs and hides the location indicator. After
+installing, the Tuna Desktop session is
 selectable from the login screen. Upgrading installs the newer package over
 the older one; the [legacy-upgrade guide](legacy-upgrade.md) explains the
 temporary two-file bridge, explicit session reselection, preserved settings
