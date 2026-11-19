@@ -248,22 +248,23 @@ fn a_foreign_lock_with_the_shells_pid_is_refused_on_arrival() {
 }
 
 /// A hostile client spamming `lock` around the shell's request can neither
-/// replace nor cancel it; the shell's lock is still granted.
+/// replace nor cancel it, nor drop the shell's early lock surface; the
+/// shell's lock is still granted with its surface. The shell locks because
+/// the compositor's flag is already set, and it asks once: if another
+/// client's request could finish the shell's before the runtime judged
+/// it, the session would stay locked with no curtain and no prompt.
 #[test]
 fn a_hostile_client_spamming_lock_cannot_cancel_the_shells_lock() {
     use tuna_compositor::session_lock::{lock_request_verdict, LockVerdict};
     let mut comp = compositor();
     let mut shell = connect(&mut comp);
     let mut hostile = connect_foreign(&mut comp);
-    let shell_manager: ExtSessionLockManagerV1 = shell.bind(1);
     let hostile_manager: ExtSessionLockManagerV1 = hostile.bind(1);
     let mut spam: Vec<_> = (100..132)
         .map(|tag| hostile_manager.lock(&hostile.queue.handle(), tag))
         .collect();
     hostile.queue.flush().unwrap();
-    let shell_lock = shell_manager.lock(&shell.queue.handle(), 1);
-    shell.queue.flush().unwrap();
-    comp.pump();
+    let (_shell_lock, _role, _surface) = pending_surface(&mut comp, &mut shell, 1);
     // More requests after the shell's, before the runtime's next tick.
     spam.extend((200..232).map(|tag| hostile_manager.lock(&hostile.queue.handle(), tag)));
     pump(&mut comp, &mut hostile);
@@ -278,16 +279,24 @@ fn a_hostile_client_spamming_lock_cannot_cancel_the_shells_lock() {
         .state
         .take_lock_request()
         .expect("the shell's request is still pending");
+    assert!(
+        comp.state.take_lock_request().is_none(),
+        "nothing else waits for a verdict"
+    );
     let verdict = lock_request_verdict(pid, Some(std::process::id()), true);
     assert_eq!(verdict, LockVerdict::Approved);
     comp.state.resolve_lock_request(locker, true);
     pump(&mut comp, &mut shell);
     assert_eq!(shell.client.events, vec![(1, true)]);
+    assert_eq!(
+        comp.state.lock_surfaces().len(),
+        1,
+        "the shell's early surface survived the spam"
+    );
     for lock in spam {
         lock.destroy();
     }
     hostile.conn.flush().unwrap();
-    drop(shell_lock);
 }
 
 #[test]

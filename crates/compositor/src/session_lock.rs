@@ -93,36 +93,35 @@ impl LockProtocol {
     }
 }
 
+/// The client behind a lock request.
+fn locker_client(locker: &SessionLocker) -> Option<ClientId> {
+    locker.ext_session_lock().client().map(|c| c.id())
+}
+
 impl SessionLockHandler for State {
     fn lock_state(&mut self) -> &mut SessionLockManagerState {
         &mut self.lock_protocol.state
     }
 
     fn lock(&mut self, confirmation: SessionLocker) {
-        let requester = confirmation.ext_session_lock().client();
-        if requester
+        if confirmation
+            .ext_session_lock()
+            .client()
             .as_ref()
             .and_then(crate::ClientState::pinned_shell_pid)
             .is_none()
         {
             // Refused on arrival: dropping the locker sends `finished`,
             // and the shell's pending request, the approved owner and
-            // their surfaces are untouched.
+            // their surfaces are untouched. So no other client's request
+            // can cancel the shell's before the runtime judges it.
             return;
         }
         // A newer request from the shell replaces its older one (dropping
-        // the old locker tells it that lock failed).
-        let client = requester.map(|c| c.id());
-        let owner = self.lock_protocol.owner.as_ref();
-        // Replacement discards abandoned pending surfaces, but never an
-        // already approved owner's.
-        self.lock_protocol.surfaces.retain(|(surface, _)| {
-            let surface_client = surface.wl_surface().client().map(|c| c.id());
-            surface_client
-                .as_ref()
-                .is_some_and(|id| Some(id) == owner || Some(id) == client.as_ref())
-        });
+        // the old locker tells it that lock failed), and with it any
+        // abandoned pending surfaces, but never an approved owner's.
         self.lock_protocol.pending = Some(confirmation);
+        self.retain_claimed_surfaces();
     }
 
     fn unlock(&mut self) {
@@ -139,16 +138,14 @@ impl SessionLockHandler for State {
         let Some(client) = surface.wl_surface().client().map(|c| c.id()) else {
             return;
         };
-        let pending_client = self
+        let pending = self
             .lock_protocol
             .pending
             .as_ref()
-            .and_then(|locker| locker.ext_session_lock().client().map(|c| c.id()));
+            .is_some_and(|locker| locker_client(locker).as_ref() == Some(&client));
         // Protocol clients may create surfaces before Locked. Keep those
         // pending surfaces, but expose them only after runtime approval.
-        if self.lock_protocol.owner.as_ref() != Some(&client)
-            && pending_client.as_ref() != Some(&client)
-        {
+        if self.lock_protocol.owner.as_ref() != Some(&client) && !pending {
             return;
         }
         let Some(output) = smithay::output::Output::from_resource(&output) else {
@@ -227,23 +224,27 @@ impl State {
         Some((locker, pid))
     }
 
+    /// Drop the lock surfaces nobody may still show: those of a client
+    /// that is neither the approved owner nor waiting on a lock request.
+    fn retain_claimed_surfaces(&mut self) {
+        let lock = &mut self.lock_protocol;
+        let pending = lock.pending.as_ref().and_then(locker_client);
+        let owner = &lock.owner;
+        lock.surfaces.retain(|(surface, _)| {
+            let client = surface.wl_surface().client().map(|c| c.id());
+            client.is_some() && (client == *owner || client == pending)
+        });
+    }
+
     /// Resolve a request after the runtime has checked the supervised PID.
     /// Denial cannot replace the current owner's surfaces or focus targets.
     pub fn resolve_lock_request(&mut self, locker: SessionLocker, approved: bool) {
         if approved {
             self.lock_protocol.approved_lock = Some(locker.ext_session_lock().clone());
-            self.lock_protocol.owner = locker.ext_session_lock().client().map(|c| c.id());
+            self.lock_protocol.owner = locker_client(&locker);
             self.lock_protocol.client_unlocked = false;
         }
-        let owner = self.lock_protocol.owner.as_ref();
-        self.lock_protocol.surfaces.retain(|(surface, _)| {
-            surface
-                .wl_surface()
-                .client()
-                .map(|c| c.id())
-                .as_ref()
-                .is_some_and(|id| Some(id) == owner)
-        });
+        self.retain_claimed_surfaces();
         if approved {
             locker.lock();
         }
