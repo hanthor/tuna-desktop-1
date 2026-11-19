@@ -457,8 +457,6 @@ pub enum X11ManagerEvent {
     Move(u32),
     /// `_NET_WM_MOVERESIZE` resize from an edge of the frame.
     Resize(u32, smithay::xwayland::xwm::ResizeEdge),
-    /// `WM_CHANGE_STATE` to iconic: the frame's minimize button.
-    Minimize(u32),
     /// `_NET_CLOSE_WINDOW` (a pager; the frame's own close button sends
     /// `WM_DELETE_WINDOW` to the client itself).
     Close(u32),
@@ -474,6 +472,9 @@ pub enum X11ManagerEvent {
     /// A mapped override-redirect window moved, resized or restacked
     /// itself (X11 window id, the sibling it now sits directly above).
     UnmanagedConfigured(u32, Option<u32>),
+    /// An X11 window asked to be iconified (ICCCM `WM_CHANGE_STATE`
+    /// IconicState), which Mutter honours by minimizing it (X11 window id).
+    Minimize(u32),
 }
 
 /// Spawn the compatibility server and hook its event source into the
@@ -753,10 +754,6 @@ mod handlers {
                     push($state(self), X11ManagerEvent::Move(window.window_id()));
                 }
 
-                fn minimize_request(&mut self, _xwm: XwmId, window: X11Surface) {
-                    push($state(self), X11ManagerEvent::Minimize(window.window_id()));
-                }
-
                 fn close_request(&mut self, _xwm: XwmId, window: X11Surface) {
                     push($state(self), X11ManagerEvent::Close(window.window_id()));
                 }
@@ -817,6 +814,12 @@ mod handlers {
                         $state(self),
                         X11ManagerEvent::Fullscreen(window.window_id(), false),
                     );
+                }
+
+                // WM_CHANGE_STATE IconicState. Mutter ignores the NormalState
+                // form (unminimize_request): a client restores by mapping.
+                fn minimize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+                    push($state(self), X11ManagerEvent::Minimize(window.window_id()));
                 }
             }
         };
@@ -1200,7 +1203,7 @@ mod frame_tests {
     use super::{x11_wants_frame, X11Frame};
     use smithay::utils::{Logical, Rectangle, Size};
     use smithay::xwayland::xwm::{
-        addresses_window, wm_state_property, FrameBorder, FrameExtents, WmWindowType,
+        addresses_window, FrameBorder, FrameExtents, WmWindowType,
     };
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
@@ -1471,13 +1474,5 @@ mod frame_tests {
         assert!(!addresses_window(other, client, Some(frame)));
         // A window without a frame answers to its own id alone.
         assert!(!addresses_window(frame, client, None));
-    }
-
-    #[test]
-    fn a_minimized_window_s_wm_state_is_iconic_without_an_icon_window() {
-        // ICCCM 4.1.3.1: NormalState 1, IconicState 3, then the icon
-        // window (None), as Mutter's set_wm_state_on_xwindow writes them.
-        assert_eq!(wm_state_property(true), [3, 0]);
-        assert_eq!(wm_state_property(false), [1, 0]);
     }
 }
