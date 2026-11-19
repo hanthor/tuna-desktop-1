@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+# tuna-ibus-owner-proof: exactly one party owns the session's ibus-daemon,
+# and session end leaves none of it behind (#1014).
+#
+# Usage: scripts/tuna-ibus-owner-proof [ARTIFACT_DIR]
+#
+# Runs the real nested compositor (winit on Xvfb, private session bus,
+# private HOME) twice and reads the processes it leaves:
+#
+#   own   No IBus unit exists for the session (nested sessions never name
+#         one). The bridge starts one `ibus-daemon --panel disable` that is
+#         its own child, not daemonized (it leads its own process group,
+#         as ibus-daemon always does); the bus file's IBUS_DAEMON_PID names
+#         it, and it is the only ibus-daemon for the display. After SIGTERM
+#         to the compositor (what logind's session stop sends) neither it
+#         nor its config component (ibus-dconf, or ibus-memconf) is left,
+#         and the compositor logged that it retired the bridge's group and
+#         the daemon's.
+#   unit  The session names a user unit (TUNA_IBUS_UNIT, as the compositor
+#         does on the hardware session) that a stub `systemctl` reports
+#         down while the session is not up yet, then up: the bridge starts
+#         no daemon of its own before that, asks the manager once, and
+#         the single daemon is the unit's (a stub systemd detaches it, so it
+#         is not the bridge's child or in its group). Session end retires
+#         nothing of the manager's; the stub manager then stops its unit,
+#         as systemd does at session end (the unit is PartOf=
+#         gnome-session-initialized.target).
+#
+# In both modes, after session end no ibus-* process of the display's
+# (by WAYLAND_DISPLAY in its environment, so a daemonized escapee counts)
+# is left running.
+#
+# Writes assertions.txt (one `GATE pass|fail text` line each).
+set -euo pipefail
+
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+art=${1:-$root/ibus-owner-artifacts}
+mkdir -p "$art"
+art=$(realpath "$art")
+assertions="$art/assertions.txt"
+: >"$assertions"
+
+for tool in ibus-daemon ibus Xvfb dbus-run-session pgrep ps; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "tuna-ibus-owner-proof: $tool is required" >&2
+        exit 1
+    }
+done
+
+cargo build --locked --manifest-path "$root/Cargo.toml" -p tuna-compositor -p tuna-shell-host
+bin_dir=${CARGO_TARGET_DIR:-$root/target}/debug
+
+pass() {
+    echo "$1 pass $2" >>"$assertions"
+    echo "tuna-ibus-owner-proof: $1 pass: $2"
+}
+fail() {
+    echo "$1 fail $2" >>"$assertions"
+    echo "tuna-ibus-owner-proof: $1 FAIL: $2" >&2
+    tail -30 "${log:-/dev/null}" >&2 || true
+    exit 1
+}
+
+# Whatever a session started, should a gate fail part way: the proof must
+# not itself leave behind the processes it looks for. Runs at the end of
+# each session's subshell, after its gates.
+teardown() {
+    local pid
+    pkill -TERM -f "^[^ ]*/tuna-compositor --backend winit --socket $socket( |$)" 2>/dev/null || true
+    sleep 1
+    for pid in $(pgrep '^ibus' || true); do
+        if tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qx "WAYLAND_DISPLAY=$socket"; then
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+    [ -z "${bus_done:-}" ] || touch "$bus_done"
+    [ -z "${runner:-}" ] || kill "$runner" 2>/dev/null || true
+    [ -z "${xvfb:-}" ] || kill "$xvfb" 2>/dev/null || true
+    rm -rf "${run:-}"
+}
+
+# One session. $1 is the mode (own|unit); runs under its own private bus,
+# in a subshell, so the globals it sets for teardown stay its own.
+session() {
+    local mode=$1
+    local dir="$art/$mode"
+    rm -rf "$dir"
+    mkdir -p "$dir"
+    socket=tuna-ibus-$mode-$$
+    runner="" xvfb="" bus_done=""
+    run=$(mktemp -d "${TMPDIR:-/tmp}/tuna-ibus-$mode.XXXXXX")
+    trap teardown EXIT
+    chmod 700 "$run"
+    export XDG_RUNTIME_DIR=$run
+    export HOME=$dir/home XDG_CONFIG_HOME=$dir/config XDG_CACHE_HOME=$dir/cache
+    export XDG_DATA_HOME=$dir/data XDG_STATE_HOME=$dir/state
+    export GSETTINGS_BACKEND=keyfile
+    mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+    log=$dir/nested.log
+    local gate=G-IBUS-OWNER-${mode^^}
+
+    local xvfb_display="$dir/xvfb-display"
+    "$root/scripts/lib/tuna-xvfb" -displayfd 3 -screen 0 1024x768x24 \
+        3>"$xvfb_display" >"$dir/xvfb.log" 2>&1 &
+    xvfb=$!
+    for _ in $(seq 1 60); do [ -s "$xvfb_display" ] && break; sleep 0.5; done
+    [ -s "$xvfb_display" ] || fail "$gate" "Xvfb did not start"
+    DISPLAY=":$(cat "$xvfb_display")"
+    export DISPLAY
+
+    if [ "$mode" = unit ]; then
+        mkdir -p "$dir/stub"
+        export STUB_DIR=$dir/stub
+        cat >"$dir/stub/systemctl" <<'STUB'
+#!/bin/sh
+# A stand-in user manager with one IBus unit. The session is "not up"
+# for the first three is-active probes of its initialized target.
+echo "$*" >>"$STUB_DIR/calls"
+case "$*" in
+*"show "*)
+    echo "LoadState=loaded"
+    if [ -e "$STUB_DIR/started" ]; then echo "ActiveState=active"; else echo "ActiveState=inactive"; fi
+    ;;
+*"is-active --quiet gnome-session-initialized.target"*)
+    n=$(cat "$STUB_DIR/probes" 2>/dev/null || echo 0)
+    echo $((n + 1)) >"$STUB_DIR/probes"
+    [ "$n" -ge 3 ]
+    ;;
+*"start "*)
+    touch "$STUB_DIR/started"
+    # The manager, not the caller, owns what a unit starts: a detached
+    # parent that outlives this call, as systemd does (a non-daemonized
+    # ibus-daemon quits when its parent dies).
+    setsid sh -c 'ibus-daemon --panel disable & wait' >"$STUB_DIR/unit-daemon.log" 2>&1 </dev/null &
+    ;;
+esac
+STUB
+        chmod +x "$dir/stub/systemctl"
+        export PATH=$dir/stub:$PATH
+        export TUNA_IBUS_UNIT=tuna-proof-ibus.service
+    else
+        unset TUNA_IBUS_UNIT
+    fi
+
+    # Compositor and daemon run under one private bus, which outlives the
+    # compositor as the user's bus outlives a session: session end, not
+    # the bus going away, must be what retires a daemon.
+    bus_done="$dir/bus-done"
+    # shellcheck disable=SC2016 # expanded by the inner shell
+    LIBGL_ALWAYS_SOFTWARE=1 WINIT_UNIX_BACKEND=x11 GDK_BACKEND=x11 BUS_DONE="$bus_done" \
+        dbus-run-session -- sh -c '
+            env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u IBUS_ADDRESS -u BUS_DONE "$@"
+            while [ ! -e "$BUS_DONE" ]; do sleep 0.2; done' sh \
+        "$bin_dir/tuna-compositor" --backend winit --socket "$socket" \
+        --width 1024 --height 768 --shell-bin "$bin_dir/tuna-shell-host" >"$log" 2>&1 &
+    runner=$!
+    local ready=0
+    for _ in $(seq 1 120); do
+        grep -q "tuna-ibus-bridge: ready" "$log" && { ready=1; break; }
+        kill -0 "$runner" 2>/dev/null || break
+        sleep 0.5
+    done
+    [ "$ready" = 1 ] || fail "$gate" "the IBus bridge never came up"
+
+    local compositor bridge
+    # Anchored: dbus-run-session's own command line holds the same words.
+    compositor=$(pgrep -f "^[^ ]*/tuna-compositor --backend winit --socket $socket( |$)" | head -1 || true)
+    bridge=$(pgrep -P "$compositor" -f '(^|/)tuna-ibus-bridge( |$)' | head -1 || true)
+    [ -n "$compositor" ] && [ -n "$bridge" ] || fail "$gate" "no compositor or bridge process"
+
+    # The bus file of this display names the daemon that owns the bus.
+    local busfile owner
+    busfile=$(grep -l -s "" "$XDG_CONFIG_HOME"/ibus/bus/*-"$socket" | head -1 || true)
+    [ -n "$busfile" ] || fail "$gate" "no IBus bus file for $socket"
+    owner=$(sed -n 's/^IBUS_DAEMON_PID=//p' "$busfile")
+    [ -n "$owner" ] || fail "$gate" "the bus file names no daemon pid"
+
+    # Every ibus-daemon for this display, whoever started it.
+    local daemons=() pid
+    for pid in $(pgrep -x ibus-daemon); do
+        if tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qx "WAYLAND_DISPLAY=$socket"; then
+            daemons+=("$pid")
+        fi
+    done
+    {
+        echo "bus file: $busfile (owner pid $owner)"
+        echo "ibus-daemon pids for $socket: ${daemons[*]:-}"
+        ps -o pid,ppid,pgid,sid,args -p "${daemons[*]:-0}" 2>&1 || true
+        echo "bridge pid $bridge, compositor pid $compositor"
+    } >"$dir/processes.txt"
+    [ "${#daemons[@]}" = 1 ] ||
+        fail "$gate" "expected one ibus-daemon for $socket, found ${#daemons[@]}: ${daemons[*]:-}"
+    [ "${daemons[0]}" = "$owner" ] ||
+        fail "$gate" "the one ibus-daemon (${daemons[0]}) is not the bus file's owner ($owner)"
+    local args
+    args=$(tr '\0' ' ' <"/proc/$owner/cmdline")
+    case "$args" in
+    *"--panel disable"*) ;;
+    *) fail "$gate" "ibus-daemon lost --panel disable: $args" ;;
+    esac
+    case "$args" in
+    *--daemonize* | *" -d "*) fail "$gate" "ibus-daemon is daemonized: $args" ;;
+    esac
+    local ppid pgid
+    read -r ppid pgid < <(ps -o ppid=,pgid= -p "$owner")
+
+    # The daemon's config component: ibus-dconf, or ibus-memconf where the
+    # daemon picks that. #1014's logout hang was one left in the scope.
+    local components=()
+    for _ in $(seq 1 40); do
+        mapfile -t components < <(pgrep -P "$owner" -x 'ibus-dconf|ibus-memconf' || true)
+        [ "${#components[@]}" -gt 0 ] && break
+        sleep 0.25
+    done
+    [ "${#components[@]}" -gt 0 ] || fail "$gate" "the daemon never started its config component"
+
+    if [ "$mode" = own ]; then
+        [ "$ppid" = "$bridge" ] ||
+            fail "$gate" "ibus-daemon's parent is $ppid, not the bridge ($bridge)"
+        [ "$pgid" = "$owner" ] ||
+            fail "$gate" "ibus-daemon does not lead its own process group ($pgid)"
+        pass "$gate" "one ibus-daemon (pid $owner) owns the bus file: the bridge's own non-daemonized child"
+    else
+        [ "$ppid" != "$bridge" ] && [ "$pgid" != "$bridge" ] ||
+            fail "$gate" "the bridge started a daemon beside its unit (parent $ppid group $pgid)"
+        local starts
+        starts=$(grep -c -- '--no-block start tuna-proof-ibus.service' "$STUB_DIR/calls" || true)
+        [ "$starts" = 1 ] ||
+            fail "$gate" "the unit was started $starts times, not once"
+        [ "$(cat "$STUB_DIR/probes")" -gt 3 ] ||
+            fail "$gate" "the unit was started before the session was up"
+        grep -q "no IBus unit" "$log" &&
+            fail "$gate" "the bridge started its own daemon in a session with a unit"
+        pass "$gate" "one ibus-daemon (pid $owner) owns the bus file: the unit's, started once after the session came up, none of the bridge's"
+    fi
+
+    # Session end, as logind's session stop does it.
+    kill -TERM "$compositor"
+    for _ in $(seq 1 60); do
+        kill -0 "$compositor" 2>/dev/null || break
+        sleep 0.5
+    done
+    kill -0 "$compositor" 2>/dev/null && fail "$gate" "the compositor did not exit on SIGTERM"
+
+    # Live ibus-* processes of this display, wherever they sit (a
+    # daemonized daemon leaves the bridge's group and session), plus
+    # whatever is still in the bridge's group or the daemon's, and the
+    # daemon and its config component themselves. A dead process awaiting
+    # its parent's reap is not running.
+    display_ibus() {
+        local pid stat
+        {
+            pgrep -g "$bridge" || true
+            pgrep -g "$owner" || true
+            echo "$owner"
+            printf '%s\n' "${components[@]}"
+            for pid in $(pgrep '^ibus' || true); do
+                if tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qx "WAYLAND_DISPLAY=$socket"; then
+                    echo "$pid"
+                fi
+            done
+        } | sort -u | while read -r pid; do
+            stat=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+            case "$stat" in "" | Z*) ;; *) echo "$pid" ;; esac
+        done | tr '\n' ' '
+    }
+    # Polls until display_ibus is empty or ~5 s pass; prints what is left.
+    settle() {
+        local left=""
+        for _ in $(seq 1 20); do
+            left=$(display_ibus)
+            left=${left% }
+            [ -z "$left" ] && break
+            sleep 0.25
+        done
+        echo "$left"
+    }
+    # What was left, for the artifacts.
+    record_left() {
+        if [ -n "$1" ]; then
+            ps -o pid,ppid,pgid,stat,args -p "$1" 2>&1 || true
+        else
+            echo "nothing left"
+        fi >"$dir/left-after-end.txt"
+    }
+
+    local left
+    if [ "$mode" = own ]; then
+        left=$(settle)
+        record_left "$left"
+        [ -z "$left" ] || fail "$gate-END" "ibus processes survived session end: $left"
+        grep -q "tuna-compositor: ime: bridge group retired pid=$bridge groups=2 " "$log" ||
+            fail "$gate-END" "the compositor never logged retiring the bridge's group and the daemon's"
+        pass "$gate-END" "no ibus-daemon, config component or other ibus process of the display remains after the compositor ends the session"
+    else
+        left=$(pgrep -g "$bridge" | tr '\n' ' ' || true)
+        left=${left% }
+        [ -z "$left" ] || fail "$gate-END" "the bridge's group still holds: $left"
+        grep -q "tuna-compositor: ime: bridge group retired pid=$bridge groups=1 " "$log" ||
+            fail "$gate-END" "the compositor did not retire the bridge's group alone"
+        kill -0 "$owner" 2>/dev/null ||
+            fail "$gate-END" "session end killed the manager's daemon (its manager stops it)"
+        # The stub manager stops its unit as systemd does: SIGTERM to
+        # everything the unit started (ibus-daemon leads its own group).
+        kill -TERM -- "-$owner" 2>/dev/null || true
+        left=$(settle)
+        record_left "$left"
+        [ -z "$left" ] || fail "$gate-END" "ibus processes survived the unit's stop: $left"
+        pass "$gate-END" "session end retired nothing of the manager's; once the manager stopped its unit no ibus process of the display remains"
+    fi
+    touch "$bus_done"
+    wait "$runner" 2>/dev/null || true
+    kill "$xvfb" 2>/dev/null || true
+    wait "$xvfb" 2>/dev/null || true
+    rm -rf "$run"
+}
+
+for mode in own unit; do
+    (session "$mode")
+done

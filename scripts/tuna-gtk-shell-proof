@@ -788,11 +788,6 @@ cleanup() {
     if [ -n "$OCCLUSION_PIDS" ]; then kill $OCCLUSION_PIDS 2>/dev/null || true; fi
     # shellcheck disable=SC2086
     if [ -n "$IME_PIDS" ]; then kill $IME_PIDS 2>/dev/null || true; fi
-    # The bridge daemonized ibus-daemon for this session's display.
-    if [ -n "${SOCKET_NAME:-}" ] && command -v ibus >/dev/null 2>&1; then
-        env -u DISPLAY -u IBUS_ADDRESS -u WAYLAND_SOCKET WAYLAND_DISPLAY="$SOCKET_NAME" \
-            ibus exit >/dev/null 2>&1 || true
-    fi
     if [ -n "$SCREENSAVER_PID" ]; then kill "$SCREENSAVER_PID" 2>/dev/null || true; fi
     if [ -n "$CAL_PID" ]; then kill "$CAL_PID" 2>/dev/null || true; fi
     for gsd_pid in $GSD_MEDIA_KEYS_PID $MPRIS_PID $GSD_BUS_PID $PW_PULSE_PID; do
