@@ -110,31 +110,31 @@ def _proc_basename_pids(name, uid):
 
 
 def admit_ibus_daemons(context):
-    """Admit the original-user IBus daemon principals as a set.
+    """Admit the original user's one IBus daemon principal.
 
-    The IBus bus implements no GetConnectionUnixProcessID, so daemons
-    cannot be identified through bus credentials; they are admitted
-    out-of-band instead. The bridge and the session manager can race at
-    login and leave two genuine daemons behind one bus file, so the set
-    admits every uid-owned ibus-daemon executable: each member is
+    The IBus bus implements no GetConnectionUnixProcessID, so the daemon
+    cannot be identified through bus credentials; it is admitted
+    out-of-band instead. The session has exactly one owner of its daemon
+    (#1014: the session's IBus unit, or the bridge only when no unit
+    exists), so exactly one uid-owned ibus-daemon executable must run: a
+    second is the login race come back, and is refused. The daemon is
     strictly identified and must be owned by the ibus package, which a
     spoof binary cannot satisfy. Swapping the serving daemon requires
-    replacing an admitted member, which the per-observation liveness
-    check detects; identical binaries are interchangeable by construction.
+    replacing the admitted one, which the per-observation liveness check
+    detects. Returned as a one-member list, the shape the run state keeps.
     """
     pids = _proc_exe_pids(IBUS_DAEMON_EXE, context.uid)
     if not pids:
         pids = _proc_basename_pids('ibus-daemon', context.uid)
     if not pids:
         raise RuntimeError('no original-user IBus daemon process')
-    daemons = []
-    for pid in pids:
-        identity = process(pid, context.uid)
-        package = context.command(['pacman', '-Qqo', identity['exe']]).stdout.strip()
-        if package != IBUS_DAEMON_PACKAGE:
-            raise RuntimeError('IBus daemon not owned by ibus package: ' + package)
-        daemons.append(identity | {'package': package})
-    return sorted(daemons, key=lambda daemon: daemon['pid'])
+    if len(pids) != 1:
+        raise RuntimeError('original-user IBus daemon not unique: ' + repr(sorted(pids)))
+    identity = process(pids[0], context.uid)
+    package = context.command(['pacman', '-Qqo', identity['exe']]).stdout.strip()
+    if package != IBUS_DAEMON_PACKAGE:
+        raise RuntimeError('IBus daemon not owned by ibus package: ' + package)
+    return [identity | {'package': package}]
 
 
 def check_preedit_sender(value, ibus_owner):

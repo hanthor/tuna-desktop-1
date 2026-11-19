@@ -387,12 +387,20 @@ class ImeDaemonAdmission(unittest.TestCase):
         self.assertEqual(daemons[0]['pid'], 4321)
         context.command.assert_called_once_with(['pacman', '-Qqo', '/usr/bin/ibus-daemon'])
 
-    def test_duplicate_daemons_admit_as_sorted_set(self):
+    def test_duplicate_daemons_refused(self):
+        # Two genuine packaged daemons are the #1014 login race: one owner only.
         context, daemons, error = self.admit([4322, 4321],
                                              [self.identity(4321), self.identity(4322)])
-        self.assertIsNone(error)
-        self.assertEqual([daemon['pid'] for daemon in daemons], [4321, 4322])
-        self.assertEqual(context.command.call_count, 2)
+        self.assertIsNone(daemons)
+        self.assertIn('IBus daemon not unique: [4321, 4322]', str(error))
+        context.command.assert_not_called()
+
+    def test_duplicate_relocated_daemons_refused(self):
+        _, daemons, error = self.admit([], [self.identity(4321, '/usr/libexec/ibus-daemon'),
+                                            self.identity(4322, '/usr/libexec/ibus-daemon')],
+                                       basename_pids=[4321, 4322])
+        self.assertIsNone(daemons)
+        self.assertIn('IBus daemon not unique', str(error))
 
     def test_missing_daemon_refused(self):
         _, _, error = self.admit([], [])
