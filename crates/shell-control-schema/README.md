@@ -61,6 +61,16 @@ before decoding.
   compositor admits D-Bus capture and Introspect calls as the shell only
   from names the supervised shell's pidfd-pinned control session declared,
   and denies the command from any other session (ADR 0010).
+- Remote access (0.53): `Message::RemoteAccess { handles }` (peers >=53
+  only) carries every active grant whole whenever the set changes, as
+  `RemoteAccessHandle { kind, id, owner, owner_name, recording, targets }`
+  (mutter's `MetaRemoteAccessHandle`: `RemoteAccessKind::ScreenCast`,
+  `RemoteDesktop` or `InputCapture`; `RemoteAccessOwner::Shell`, `Portal`
+  or `RemoteDesktopDaemon`; `RemoteAccessTarget::Monitor`, `Window`,
+  `Area` or `Input`). The shell's Stop answers
+  `CommandKind::StopRemoteAccess { kind, id }`, which revokes that grant
+  permanently. Bounded by `MAX_REMOTE_ACCESS_HANDLES`,
+  `MAX_REMOTE_ACCESS_TARGETS` and `MAX_TITLE_LEN`.
 - Messages: `Message`, `StateOp`, `CommandKind`, `CommandStatus`,
   `ErrorKind`.
 - State types: `WindowInfo`, `WorkspaceInfo`, `OutputInfo`, `PreviewInfo`,

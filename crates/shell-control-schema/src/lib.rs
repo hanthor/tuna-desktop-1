@@ -237,9 +237,13 @@ impl ProtocolVersion {
     /// pidfd-pinned socket, and the compositor recognises the shell on
     /// D-Bus by that unique name only (ADR 0010). Positional postcard peers
     /// must ship together.
+    /// `0.53` appends the active remote access grants (GNOME 51
+    /// `status/remoteAccess.js` over mutter's `MetaRemoteAccessHandle`s):
+    /// compositor-to-shell `RemoteAccess` and the shell-to-compositor
+    /// `StopRemoteAccess` (#1162 F2). Positional postcard peers must ship together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 52,
+        minor: 53,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -537,7 +541,85 @@ pub enum CommandKind {
     /// session that is not the supervised shell is denied. A later
     /// declaration replaces the earlier one.
     DeclareBusName { unique_name: String },
+    /// Since 0.53: the user stopped this remote access grant
+    /// (`meta_remote_access_handle_stop`, from GNOME 51
+    /// `ScreenSharingIndicator._stopSharing`). The compositor revokes the
+    /// grant permanently: its owner can use it no further and must ask
+    /// anew. Denied for a grant the compositor does not publish (already
+    /// gone, or never active).
+    StopRemoteAccess { kind: RemoteAccessKind, id: u64 },
 }
+
+/// Since 0.53: what a remote access grant is: the subclass of mutter 51's
+/// `MetaRemoteAccessHandle` its session announces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RemoteAccessKind {
+    /// `MetaScreenCastSessionHandle`: a started ScreenCast session, plain
+    /// or linked to a RemoteDesktop session.
+    ScreenCast,
+    /// `MetaRemoteDesktopSessionHandle`: a started RemoteDesktop session
+    /// (keyboard and pointer input).
+    RemoteDesktop,
+    /// `MetaInputCaptureSessionHandle`: an InputCapture session while it
+    /// captures the seat's input.
+    InputCapture,
+}
+
+/// Since 0.53: the authenticated desktop service holding a grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoteAccessOwner {
+    /// The supervised shell (GNOME Shell's in-process screen recorder).
+    Shell,
+    /// The installed xdg-desktop-portal-gnome backend, for an app the
+    /// user consented to.
+    Portal,
+    /// The installed gnome-remote-desktop daemon.
+    RemoteDesktopDaemon,
+}
+
+/// Since 0.53: what a grant reaches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoteAccessTarget {
+    /// A whole monitor's stream.
+    Monitor { connector: String },
+    /// One window's stream (the compositor's window id).
+    Window { window: WindowId },
+    /// Part of the screen, in global logical pixels.
+    Area {
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    },
+    /// The seat's input: a RemoteDesktop session's keyboard and pointer,
+    /// or the input an InputCapture session captures.
+    Input,
+}
+
+/// Since 0.53: one active remote access grant (mutter 51's
+/// `MetaRemoteAccessHandle`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAccessHandle {
+    pub kind: RemoteAccessKind,
+    /// The session's id, unique within `kind`; `StopRemoteAccess` names
+    /// the grant by both.
+    pub id: u64,
+    pub owner: RemoteAccessOwner,
+    /// The owner's unique D-Bus name.
+    pub owner_name: String,
+    /// The handle's `is-recording`: every stream of the ScreenCast
+    /// session was recorded with `is-recording` (screen recordings, which
+    /// GNOME shows with its record icon rather than the sharing button).
+    pub recording: bool,
+    /// At most [`MAX_REMOTE_ACCESS_TARGETS`].
+    pub targets: Vec<RemoteAccessTarget>,
+}
+
+/// Most handles one [`Message::RemoteAccess`] carries.
+pub const MAX_REMOTE_ACCESS_HANDLES: usize = 1024;
+/// Most targets one [`RemoteAccessHandle`] carries (mutter's per-session
+/// stream bound).
+pub const MAX_REMOTE_ACCESS_TARGETS: usize = 64;
 
 /// mutter 51 `MetaCloseDialogResponse`: what the user chose in the dialog
 /// shown for a window that stopped answering pings.
@@ -1209,6 +1291,12 @@ pub enum Message {
     /// each handshake snapshot while shown, only to peers advertising
     /// minor >= 51.
     LockScreenShown { shown: bool },
+    /// Since 0.53: every active remote access grant, whole, whenever the
+    /// set changes (mutter 51's remote access controller `new-handle` and
+    /// each handle's `stopped`); an empty list says none is left. Sent in
+    /// each handshake while any is active, only to peers advertising
+    /// minor >= 53. At most [`MAX_REMOTE_ACCESS_HANDLES`].
+    RemoteAccess { handles: Vec<RemoteAccessHandle> },
 }
 
 /// [`Message::WorkspaceProgress`] positions are workspace indices times
@@ -2447,6 +2535,28 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
             }
         }
         Message::HideCloseDialog { .. } | Message::LockScreenShown { .. } => {}
+        Message::RemoteAccess { handles } => {
+            if handles.len() > MAX_REMOTE_ACCESS_HANDLES {
+                return Err(DecodeError::CollectionTooLong {
+                    len: handles.len(),
+                    max: MAX_REMOTE_ACCESS_HANDLES,
+                });
+            }
+            for handle in handles {
+                check_title(&handle.owner_name)?;
+                if handle.targets.len() > MAX_REMOTE_ACCESS_TARGETS {
+                    return Err(DecodeError::CollectionTooLong {
+                        len: handle.targets.len(),
+                        max: MAX_REMOTE_ACCESS_TARGETS,
+                    });
+                }
+                for target in &handle.targets {
+                    if let RemoteAccessTarget::Monitor { connector } = target {
+                        check_title(connector)?;
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -2665,11 +2775,123 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_52() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 52));
-        // A 0.51 shell still negotiates; a newer minor does not.
-        assert!(ProtocolVersion::new(0, 51).is_compatible_with(&CURRENT_VERSION));
-        assert!(!ProtocolVersion::new(0, 53).is_compatible_with(&CURRENT_VERSION));
+    fn current_version_is_0_53() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 53));
+        // A 0.50 shell still negotiates; a newer minor does not.
+        assert!(ProtocolVersion::new(0, 50).is_compatible_with(&CURRENT_VERSION));
+        assert!(!ProtocolVersion::new(0, 54).is_compatible_with(&CURRENT_VERSION));
+    }
+
+    fn remote_access_handle(targets: Vec<RemoteAccessTarget>) -> RemoteAccessHandle {
+        RemoteAccessHandle {
+            kind: RemoteAccessKind::ScreenCast,
+            id: 4,
+            owner: RemoteAccessOwner::Portal,
+            owner_name: ":1.42".into(),
+            recording: false,
+            targets,
+        }
+    }
+
+    #[test]
+    fn remote_access_follows_lock_screen_shown_and_is_bounded() {
+        let tag = |bytes: &[u8]| bytes[0];
+        let mut buffer = [0_u8; 512];
+        let lock = tag(
+            postcard::to_slice(&Message::LockScreenShown { shown: true }, &mut buffer).unwrap(),
+        );
+        let message = Message::RemoteAccess {
+            handles: vec![
+                remote_access_handle(vec![
+                    RemoteAccessTarget::Monitor {
+                        connector: "Virtual-1".into(),
+                    },
+                    RemoteAccessTarget::Window { window: 9 },
+                    RemoteAccessTarget::Area {
+                        x: 1,
+                        y: 2,
+                        width: 3,
+                        height: 4,
+                    },
+                ]),
+                RemoteAccessHandle {
+                    kind: RemoteAccessKind::RemoteDesktop,
+                    owner: RemoteAccessOwner::RemoteDesktopDaemon,
+                    targets: vec![RemoteAccessTarget::Input],
+                    ..remote_access_handle(Vec::new())
+                },
+            ],
+        };
+        assert_eq!(
+            tag(postcard::to_slice(&message, &mut buffer).unwrap()),
+            lock + 1
+        );
+        assert_eq!(decode_frame(&encode_frame(&message)).unwrap(), message);
+        let empty = Message::RemoteAccess {
+            handles: Vec::new(),
+        };
+        assert_eq!(decode_frame(&encode_frame(&empty)).unwrap(), empty);
+        let too_many = Message::RemoteAccess {
+            handles: vec![remote_access_handle(Vec::new()); MAX_REMOTE_ACCESS_HANDLES + 1],
+        };
+        assert!(matches!(
+            decode_frame(&encode_frame(&too_many)),
+            Err(DecodeError::CollectionTooLong { .. })
+        ));
+        let streams = Message::RemoteAccess {
+            handles: vec![remote_access_handle(vec![
+                RemoteAccessTarget::Input;
+                MAX_REMOTE_ACCESS_TARGETS + 1
+            ])],
+        };
+        assert!(matches!(
+            decode_frame(&encode_frame(&streams)),
+            Err(DecodeError::CollectionTooLong { .. })
+        ));
+        for long in [
+            RemoteAccessHandle {
+                owner_name: "n".repeat(MAX_TITLE_LEN + 1),
+                ..remote_access_handle(Vec::new())
+            },
+            remote_access_handle(vec![RemoteAccessTarget::Monitor {
+                connector: "c".repeat(MAX_TITLE_LEN + 1),
+            }]),
+        ] {
+            let message = Message::RemoteAccess {
+                handles: vec![long],
+            };
+            assert!(matches!(
+                decode_frame(&encode_frame(&message)),
+                Err(DecodeError::TitleTooLong { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn stop_remote_access_follows_respond_close_dialog() {
+        let tag = |bytes: &[u8]| bytes[0];
+        let mut buffer = [0_u8; 64];
+        let respond = tag(postcard::to_slice(
+            &CommandKind::RespondCloseDialog {
+                window: 3,
+                response: CloseDialogResponse::Wait,
+            },
+            &mut buffer,
+        )
+        .unwrap());
+        for kind in [
+            RemoteAccessKind::ScreenCast,
+            RemoteAccessKind::RemoteDesktop,
+            RemoteAccessKind::InputCapture,
+        ] {
+            let stop = CommandKind::StopRemoteAccess { kind, id: 12 };
+            assert_eq!(
+                tag(postcard::to_slice(&stop, &mut buffer).unwrap()),
+                respond + 1
+            );
+            let command = Message::Command { id: 5, kind: stop };
+            assert_eq!(decode_frame(&encode_frame(&command)).unwrap(), command);
+        }
     }
 
     #[test]
