@@ -1279,7 +1279,7 @@ impl Runtime {
             |stream, runtime: &mut Runtime| {
                 let mut client_data = ClientState::native_connection(&stream);
                 // Layer-shell is the supervised shell's alone (#1048).
-                client_data.admit_supervised_shell(&stream, runtime.shell.child_pid());
+                client_data.admit_supervised_shell(runtime.shell.child_pid());
                 if runtime
                     .display
                     .handle()
@@ -1940,7 +1940,8 @@ impl Runtime {
         }
         // Input capture never survives the lock (#1040).
         self.input_capture.revoke_all();
-        self.capture_authority.publish(true, self.shell.child_pid());
+        self.capture_authority
+            .publish(true, self.control.shell_bus_names());
         self.state.set_shortcut_inhibition_locked(true);
         // A three-finger swipe under way is the unlocked session's: end
         // it cancelled, so its overview or workspace slide never resumes
@@ -5552,8 +5553,9 @@ impl Runtime {
         // ext-session-lock-v1: only the supervised shell may lock, and
         // locking through the protocol engages the compositor's own
         // flag. Anyone else's locker is dropped, which tells it the
-        // lock failed. Each waiting client gets its own verdict.
-        while let Some((locker, pid)) = self.state.take_lock_request() {
+        // lock failed. Only the shell's request is ever pending (others
+        // are refused on arrival), so there is at most one to judge.
+        if let Some((locker, pid)) = self.state.take_lock_request() {
             use crate::session_lock::{lock_request_verdict, LockVerdict};
             let verdict = lock_request_verdict(
                 pid,
@@ -5570,7 +5572,7 @@ impl Runtime {
                     eprintln!("tuna-compositor: session lock refused by administrator policy");
                 }
                 LockVerdict::RefusedForeign => {
-                    eprintln!("tuna-compositor: session lock refused for pid {pid:?}");
+                    eprintln!("tuna-compositor: session lock refused for pinned pid {pid:?}");
                 }
             }
             self.state
@@ -5713,8 +5715,6 @@ impl Runtime {
         }
         // Only the supervised shell may hold a control session (#30):
         // between restarts nobody may.
-        self.capture_authority
-            .publish(self.is_locked(), self.shell.child_pid());
         self.control.set_auth_owner(
             self.shell
                 .child_pid()
@@ -5725,6 +5725,10 @@ impl Runtime {
             Some(pid) => PeerGate::Pid(pid),
             None => PeerGate::Closed,
         });
+        // The shell is known on the session bus only by the unique names its
+        // current pinned control session declared (ADR 0010).
+        self.capture_authority
+            .publish(self.is_locked(), self.control.shell_bus_names());
         // Control EOF, manual/protocol/idle gates and shell PID gating are now current.
         // Never grant from a channel callback before those changes are observed.
         self.cancel_invalid_unlock();
