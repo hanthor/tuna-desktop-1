@@ -1202,9 +1202,7 @@ mod identity_tests {
 mod frame_tests {
     use super::{x11_wants_frame, X11Frame};
     use smithay::utils::{Logical, Rectangle, Size};
-    use smithay::xwayland::xwm::{
-        addresses_window, FrameBorder, FrameExtents, WmWindowType,
-    };
+    use smithay::xwayland::xwm::{addresses_window, FrameBorder, FrameExtents, WmWindowType};
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
         Rectangle::new((x, y).into(), (w, h).into())
