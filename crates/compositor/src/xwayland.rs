@@ -540,6 +540,8 @@ mod handlers {
                     );
                 }
 
+                // WM_CHANGE_STATE IconicState. Mutter ignores the NormalState
+                // form (unminimize_request): a client restores by mapping.
                 fn minimize_request(&mut self, _xwm: XwmId, window: X11Surface) {
                     push($state(self), X11ManagerEvent::Minimize(window.window_id()));
                 }
