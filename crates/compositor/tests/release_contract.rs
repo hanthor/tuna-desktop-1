@@ -241,10 +241,16 @@ fn packages_ship_the_login_screen_inactive() {
         "Before=gnome-session-initialized.target",
         "Restart=no",
     ] {
-        assert!(unit.lines().any(|l| l == line), "tuna-greeter.service: {line}");
+        assert!(
+            unit.lines().any(|l| l == line),
+            "tuna-greeter.service: {line}"
+        );
     }
     let drop_in = read_workspace("share/greeter/gnome-login.session.conf");
-    let requires: Vec<&str> = drop_in.lines().filter(|l| l.starts_with("Requires=")).collect();
+    let requires: Vec<&str> = drop_in
+        .lines()
+        .filter(|l| l.starts_with("Requires="))
+        .collect();
     assert_eq!(
         requires,
         [
