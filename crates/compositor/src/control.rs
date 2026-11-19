@@ -1243,7 +1243,7 @@ impl<'a> Session<'a> {
                     .write_frame(&Message::CommandResult { id, status })?;
                 Ok(Handled::CommandResult { id, applied })
             }
-                        Message::Command {
+            Message::Command {
                 id,
                 kind: CommandKind::BeginStartupSequence { app_id, wm_class },
             } => {

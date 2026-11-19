@@ -2730,8 +2730,8 @@ mod tests {
     #[test]
     fn current_version_is_0_53() {
         assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 53));
-        // A 0.51 shell still negotiates; a newer minor does not.
-        assert!(ProtocolVersion::new(0, 51).is_compatible_with(&CURRENT_VERSION));
+        // A 0.52 shell still negotiates; a newer minor does not.
+        assert!(ProtocolVersion::new(0, 52).is_compatible_with(&CURRENT_VERSION));
         assert!(!ProtocolVersion::new(0, 54).is_compatible_with(&CURRENT_VERSION));
     }
 
@@ -4334,5 +4334,30 @@ mod close_dialog_wire_tests {
         );
         let command = Message::Command { id: 12, kind };
         assert_eq!(decode_frame(&encode_frame(&command)).unwrap(), command);
+    }
+
+    #[test]
+    fn begin_startup_sequence_follows_declare_bus_name() {
+        let tag = |bytes: &[u8]| bytes[0];
+        let mut buffer = [0_u8; 64];
+        let declare = tag(postcard::to_slice(
+            &CommandKind::DeclareBusName {
+                unique_name: ":1.42".into(),
+            },
+            &mut buffer,
+        )
+        .unwrap());
+        for wm_class in [None, Some("gnome-text-editor".to_owned())] {
+            let kind = CommandKind::BeginStartupSequence {
+                app_id: "org.gnome.TextEditor".into(),
+                wm_class,
+            };
+            assert_eq!(
+                tag(postcard::to_slice(&kind, &mut buffer).unwrap()),
+                declare + 1
+            );
+            let command = Message::Command { id: 13, kind };
+            assert_eq!(decode_frame(&encode_frame(&command)).unwrap(), command);
+        }
     }
 }

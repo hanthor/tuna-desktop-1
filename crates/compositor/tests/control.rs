@@ -1126,3 +1126,50 @@ fn app_launch_startup_sequences_reach_the_hub_outcome() {
         assert_eq!(matches!(status, CommandStatus::Applied), applied);
     }
 }
+
+/// `BeginStartupSequence` is new in 0.53: a 0.52 peer gets
+/// `UnknownCommand`, a 0.53 peer's launch is applied.
+#[test]
+fn startup_sequences_require_minor53() {
+    for minor in [52, 53] {
+        let mut model = StateModel::new();
+        let (conn, mut client) = pair();
+        client_write(
+            &mut client,
+            &Message::Hello {
+                version: ProtocolVersion::new(0, minor),
+            },
+        );
+        let mut session = Session::handshake(conn, &model).unwrap();
+        assert!(matches!(client_read(&mut client), Message::Hello { .. }));
+        assert!(matches!(client_read(&mut client), Message::Snapshot { .. }));
+        client_write(
+            &mut client,
+            &Message::Command {
+                id: 31,
+                kind: CommandKind::BeginStartupSequence {
+                    app_id: "org.gnome.TextEditor".into(),
+                    wm_class: None,
+                },
+            },
+        );
+        session.handle_next(&mut model).unwrap();
+        if minor >= 53 {
+            assert_eq!(
+                client_read(&mut client),
+                Message::CommandResult {
+                    id: 31,
+                    status: CommandStatus::Applied,
+                }
+            );
+        } else {
+            assert!(matches!(
+                client_read(&mut client),
+                Message::Error {
+                    kind: ErrorKind::UnknownCommand,
+                    ..
+                }
+            ));
+        }
+    }
+}
