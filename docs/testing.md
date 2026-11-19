@@ -954,6 +954,7 @@ budget. The owner observation is null while locked.
 The compositor state (`TUNA_COMPOSITOR_STATE`) carries `frame_cost`, one
 entry per output describing its last drawn frame: `rendered` and `culled`
 element counts, `damage_rects` and `damage_area` against `output_area`,
+the box around the damage (`damage_bounds`, `[x, y, w, h]`),
 and the window ids the frame shows (`drawn_windows`) or wholly hides
 behind opaque surfaces (`culled_windows`). Both cover the whole output, so
 a frame that repaints only the panel or the cursor still lists the windows
@@ -966,6 +967,11 @@ told so gets no frame callbacks until it shows again.
 Proof `G-OCCLUSION-CULL` fullscreens an opaque window over another and
 requires the lower one to be culled and throttled, then drawn at full
 rate again once the upper window's translucent shadow returns.
+Proof `G-CLOCK-DAMAGE` (#1154) turns on clock-show-seconds and requires
+a frame whose damage lies inside the panel bar and covers under 2% of the
+output: the clock's rectangle. Before #1154 the nested output's buffer
+age read as 0 after every client commit, so each one repainted the whole
+output.
 
 ## Settings writes in proofs
 

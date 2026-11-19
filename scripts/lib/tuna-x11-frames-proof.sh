@@ -575,7 +575,7 @@ kill -KILL "$x11f_frames_pid"
 x11f_bare=""
 x11f_bare_end=$(($(date +%s) + 10))
 while [ "$(date +%s)" -le "$x11f_bare_end" ]; do
-    if cp "$CSTATE" "$ARTIFACTS/x11-frame-bare.json" 2>/dev/null &&
+    if snapshot_state "$CSTATE" "$ARTIFACTS/x11-frame-bare.json" 2>/dev/null &&
         jq -e "[.windows[] | select(.id == $x11f_xev or .id == $x11f_other)] | length == 2 and all(.[]; .x11_framed == false and .surface_rect != null)" "$ARTIFACTS/x11-frame-bare.json" >/dev/null 2>&1; then
         x11f_bare=1
         break

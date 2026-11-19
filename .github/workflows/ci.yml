@@ -235,6 +235,7 @@ jobs:
       - run: python3 scripts/tests/test_minimize_ci_freeze.py
       - run: python3 scripts/tests/test_minimize_brightness_controls.py
       - run: python3 scripts/tests/test_wb_shell_contract.py
+      - run: python3 scripts/tests/test_state_snapshot.py
       - run: python3 scripts/lib/window-lifecycle-proof-tests.py
       # Gate proofs and contract suites omitted from CI (#737).
       - run: python3 scripts/tests/test_wb_notice_button_mapping.py
@@ -679,7 +680,7 @@ jobs:
         with:
           tool: gtk4-layer-shell
           version: 4867d7b85cdf1e829fc1fd6f1d5f04c42cc99389
-      - run: shellcheck scripts/ci-install-vkms scripts/tuna-drm-smoke scripts/lib/colord-startup.sh scripts/tuna-frame-pacer-build
+      - run: shellcheck -x scripts/ci-install-vkms scripts/tuna-drm-smoke scripts/lib/colord-startup.sh scripts/tuna-frame-pacer-build
       - run: bash -n scripts/tuna-drm-smoke scripts/lib/colord-startup.sh
       - run: python3 scripts/tests/test_colord_startup.py
       - run: scripts/ci-install-vkms
@@ -940,7 +941,7 @@ jobs:
       # assertions.txt.
       - name: Prove multi-step and fingerprint lock authentication
         run: |
-          shellcheck scripts/tuna-lock-auth-proof
+          shellcheck -x scripts/tuna-lock-auth-proof
           /usr/bin/python3 scripts/tests/test_tuna_lock_auth_fixtures.py
           scripts/tuna-lock-auth-proof --artifacts gtk-shell-artifacts/lock-auth
         env:
@@ -1106,7 +1107,7 @@ jobs:
       # of the shell proof above, so it runs (and gates) even when that
       # one already failed the job.
       - if: ${{ !cancelled() }}
-        run: shellcheck scripts/tuna-magnifier-proof && scripts/tuna-magnifier-proof --artifacts gtk-shell-artifacts/magnifier
+        run: shellcheck -x scripts/tuna-magnifier-proof && scripts/tuna-magnifier-proof --artifacts gtk-shell-artifacts/magnifier
       # Window session save and restore (P-SY-08, #338): an
       # xdg-session-management client's windows come back, moved, resized,
       # maximized and on their workspace, after the nested compositor
@@ -1118,7 +1119,7 @@ jobs:
       # Independent of the proofs above, so it runs (and gates) even when
       # one of them already failed the job.
       - if: ${{ !cancelled() }}
-        run: shellcheck scripts/tuna-osk-proof && scripts/tuna-osk-proof --artifacts gtk-shell-artifacts/osk
+        run: shellcheck -x scripts/tuna-osk-proof && scripts/tuna-osk-proof --artifacts gtk-shell-artifacts/osk
       # Keep runnable binaries even when a later live proof assertion fails.
       - if: always()
         run: |
