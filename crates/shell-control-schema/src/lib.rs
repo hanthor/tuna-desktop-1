@@ -2732,7 +2732,7 @@ mod tests {
         assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 53));
         // A 0.51 shell still negotiates; a newer minor does not.
         assert!(ProtocolVersion::new(0, 51).is_compatible_with(&CURRENT_VERSION));
-        assert!(!ProtocolVersion::new(0, 53).is_compatible_with(&CURRENT_VERSION));
+        assert!(!ProtocolVersion::new(0, 54).is_compatible_with(&CURRENT_VERSION));
     }
 
     #[test]
