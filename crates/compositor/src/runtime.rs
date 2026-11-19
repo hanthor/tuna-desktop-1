@@ -6272,6 +6272,10 @@ impl Runtime {
         self.wallpaper.set_time(now);
         self.transitions
             .advance(now, locked, lock_ready, shell_ready);
+        // The shell reports the screen saver active only once the
+        // curtain has landed: gnome-settings-daemon blanks on it.
+        self.control
+            .set_lock_screen_shown(self.transitions.lock_shown());
         // While locked the curtain carries the lock surface and its
         // background; it never uncovers content (`show_content`).
         let lock_curtain = self.transitions.curtain().filter(|_| locked);
