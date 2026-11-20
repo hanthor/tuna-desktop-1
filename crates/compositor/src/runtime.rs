@@ -793,6 +793,8 @@ pub struct Runtime {
     /// An Escape press cancelled a client drag; its repeats and release
     /// belong to that cancel, not to the overview or a client.
     dnd_escape_held: bool,
+    /// A client's drag through the overview (#1189).
+    dnd_overview: crate::dnd_overview::DndOverview,
     /// PipeWire, connected on the first screen cast (#61).
     pipewire: Option<crate::screencast::PipeWire>,
     /// Running screen casts.
@@ -811,6 +813,9 @@ pub struct Runtime {
     /// The last dummy page flip while powered off
     /// ([`FRAME_INTERVAL`](crate::power_save::FRAME_INTERVAL)).
     power_save_beat: Option<Instant>,
+    /// The hidden windows the last power-save frame left to the hidden
+    /// beat (#1122): their callbacks do not wake the power-save beat.
+    power_save_throttled: Vec<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
     /// Night Light evaluation: settings, schedule, smear (#339).
     /// The controller also owns the live state shared with the D-Bus
     /// thread (active, temperature, "disabled until tomorrow").
@@ -1607,6 +1612,7 @@ impl Runtime {
             motion_queue: crate::motion_coalesce::MotionCoalescer::new(),
             osk: osk::RuntimeOsk::default(),
             dnd_escape_held: false,
+            dnd_overview: Default::default(),
             orca: crate::orca::Reader::new(&session.socket_name, a11y_keyboard.clone()),
             a11y_keyboard,
             pipewire: None,
@@ -1617,6 +1623,7 @@ impl Runtime {
             power_save: Default::default(),
             power_save_share,
             power_save_beat: None,
+            power_save_throttled: Vec::new(),
             night_light: crate::night_light::NightLightController::new(night_light_share.clone()),
             color: color_share.clone(),
             colord,
@@ -2283,6 +2290,17 @@ impl Runtime {
     /// breaking Super-combos); only Escape-closes is consumed, so a
     /// closing keypress never double-acts on client UI.
     fn dispatch_manager_input(&mut self, input: ManagerInput) {
+        self.client_dnd_sync();
+        let motion = matches!(input, ManagerInput::Motion { .. });
+        self.route_manager_input(input);
+        // The release or the Escape that ended a drag was routed above.
+        self.client_dnd_sync();
+        if motion {
+            self.client_dnd_motion();
+        }
+    }
+
+    fn route_manager_input(&mut self, input: ManagerInput) {
         if let Some(monitor) = &self.a11y_keyboard {
             monitor.set_locked(self.is_locked());
             if self
@@ -2402,7 +2420,8 @@ impl Runtime {
             return;
         }
         // Mutter's drag grab: Escape cancels a client drag-and-drop and
-        // is consumed, so the overview stays open and the release can
+        // is consumed, so the Escape does not also close the overview
+        // (the cancel does, see `client_dnd_sync`) and the release can
         // no longer drop (a Wayland drag owns the pointer, not the keys).
         if let ManagerInput::Key {
             keycode: ESCAPE_KEYCODE,
@@ -3389,6 +3408,110 @@ impl Runtime {
         }
     }
 
+    /// Activate workspace `ws` from the overview (a neighboring card, a
+    /// thumbnail). GNOME's trailing empty workspace is not in the model
+    /// yet: it sits right after the active (last) one, and stepping onto
+    /// it creates it.
+    fn overview_switch_workspace(&mut self, ws: u32) {
+        if !self.manager.switch_to_workspace(&mut self.state, ws) {
+            // From a thumbnail the active one need not be last.
+            if let Some(&last) = self.manager.model().workspaces().last() {
+                self.manager.switch_to_workspace(&mut self.state, last);
+            }
+            self.manager.switch_relative(&mut self.state, 1);
+        }
+    }
+
+    /// Follow whether a client's drag runs, and what it brings about: an
+    /// overview showing when it ends closes onto the workspace it began
+    /// on (#1189, overview.js `_onDragEnd`).
+    fn client_dnd_sync(&mut self) {
+        let active = !self.is_locked() && self.state.client_dnd_overview_active();
+        let actions = self.dnd_overview.sync(
+            active,
+            self.manager.model().active_workspace(),
+            self.control.overview_open(),
+        );
+        self.apply_dnd_actions(actions);
+    }
+
+    /// What a client's drag is over: the Activities control, and while
+    /// the overview shows its workspace thumbnails and window previews
+    /// (shell surfaces over them, and the search results, take the
+    /// hover as they take a press).
+    fn client_dnd_hover(&self) -> crate::dnd_overview::Hover {
+        let pos = self.manager.pointer_pos();
+        let activities = self.state.overview_activities_at(&self.triggers, pos);
+        let covered = self.overview_search
+            || crate::layer::topmost_layer_at(&self.state, pos.x as i32, pos.y as i32).is_some()
+            || self.manager.popup_at(&self.state, pos).is_some();
+        if !self.control.overview_open() || covered {
+            return crate::dnd_overview::Hover {
+                activities,
+                ..Default::default()
+            };
+        }
+        crate::dnd_overview::Hover::in_overview(&self.overview_layout(), pos, activities)
+    }
+
+    /// The drag moved (after `input` reached the window manager).
+    fn client_dnd_motion(&mut self) {
+        if !self.dnd_overview.active() {
+            return;
+        }
+        let hover = self.client_dnd_hover();
+        let actions = self.dnd_overview.motion(
+            hover,
+            self.manager.model().active_workspace(),
+            Instant::now(),
+        );
+        self.apply_dnd_actions(actions);
+    }
+
+    /// One tick of a client's drag through the overview: notice it, run
+    /// its due timers.
+    fn client_dnd_tick(&mut self) {
+        self.client_dnd_sync();
+        if !self.dnd_overview.active() {
+            return;
+        }
+        let actions = self.dnd_overview.poll(
+            self.client_dnd_hover(),
+            self.control.overview_open(),
+            Instant::now(),
+        );
+        self.apply_dnd_actions(actions);
+    }
+
+    fn apply_dnd_actions(&mut self, actions: Vec<crate::dnd_overview::DndAction>) {
+        use crate::dnd_overview::DndAction;
+        for action in actions {
+            match action {
+                DndAction::OpenOverview => {
+                    // The Activities control is not under a fullscreen
+                    // window, as the corner is not.
+                    if !self.manager.fullscreen_at(self.manager.pointer_pos()) {
+                        self.control.set_overview(true);
+                    }
+                }
+                DndAction::SwitchWorkspace(ws) => self.overview_switch_workspace(ws),
+                DndAction::ActivateWindow(id) => {
+                    // Main.activateWindow: the window's own workspace,
+                    // the window raised and focused, the overview away.
+                    let workspace = self.manager.model().window(id).map(|w| w.workspace);
+                    if let Some(workspace) = workspace {
+                        if workspace != self.manager.model().active_workspace() {
+                            self.manager.switch_to_workspace(&mut self.state, workspace);
+                        }
+                        self.manager.focus(&mut self.state, Some(id));
+                    }
+                    self.control.set_overview(false);
+                }
+                DndAction::CloseOverview => self.control.set_overview(false),
+            }
+        }
+    }
+
     /// A press while the overview is open that no shell surface took:
     /// focus the preview's window, switch to a neighbor card's
     /// workspace, or close the overview (GNOME shape). Returns whether
@@ -3411,18 +3534,7 @@ impl Runtime {
                 // release decides.
                 self.overview_drag = Some((id, pos, false));
             }
-            crate::overview::OverviewHit::Workspace(ws) => {
-                // GNOME's trailing empty workspace is not in the model
-                // yet: it sits right after the active (last) one, and
-                // stepping onto it creates it.
-                if !self.manager.switch_to_workspace(&mut self.state, ws) {
-                    // From a thumbnail the active one need not be last.
-                    if let Some(&last) = self.manager.model().workspaces().last() {
-                        self.manager.switch_to_workspace(&mut self.state, last);
-                    }
-                    self.manager.switch_relative(&mut self.state, 1);
-                }
-            }
+            crate::overview::OverviewHit::Workspace(ws) => self.overview_switch_workspace(ws),
             crate::overview::OverviewHit::Dismiss => self.control.set_overview(false),
         }
         true
@@ -4815,6 +4927,7 @@ impl Runtime {
                 }
                 self.winit_tracker = None;
                 self.winit_signature = None;
+                self.power_save_throttled.clear();
             }
         }
         self.active_at = Instant::now();
@@ -5122,7 +5235,12 @@ impl Runtime {
     }
 
     /// Whether anything on screen moves or was just touched: the loop
-    /// keeps the display rate and every tick draws.
+    /// keeps the display rate and every tick draws. The recovery overlay
+    /// is no motion: it is a still background (with the window list its
+    /// keys walk), and it stays up for as long as the session is locked,
+    /// where a display-rate loop would keep a blanked, shielded session
+    /// waking 60 times a second (#1122). The tick that shows or hides it
+    /// draws.
     fn in_motion(&self, now: Instant, clock: Duration) -> bool {
         now.saturating_duration_since(self.active_at) < ACTIVITY_LINGER
             || self.overview_motion.animating()
@@ -5145,7 +5263,6 @@ impl Runtime {
             })
             || self.state.protocols.bell.visual(now).is_some()
             || self.shell_swipe.active()
-            || self.overlay.visible
             || !self.casts.is_empty()
             // A running PAM worker publishes its terminal phase before
             // its wake; anything else is collected on the frame pace.
@@ -5208,7 +5325,13 @@ impl Runtime {
             self.manager.workspace_lease_deadline(),
             // Mutter's 3 s from hidden to suspended (#503).
             self.manager.suspend_deadline(),
-            self.wallpaper.maintenance_deadline(),
+            // The wallpaper is looked at again only as it is drawn: while
+            // the display power-save mode is not on nothing is (#355), and
+            // a past-due look-again would wake the loop every display frame
+            // (#1122). Powering on repaints every output in full.
+            self.wallpaper
+                .maintenance_deadline()
+                .filter(|_| self.power_save.is_on()),
             // Night Light (#339): exact preview expiry (or its past-due
             // restoring obligation) and the bounded settings re-read.
             self.night_light.next_deadline(),
@@ -5219,6 +5342,9 @@ impl Runtime {
             // Tablet and stylus settings: the bounded re-read.
             self.tablet_settings.next_deadline(now),
             self.manager.focus_deadline(),
+            // A client's drag resting on the Activities button or a
+            // window preview (#1189).
+            self.dnd_overview.deadline(),
             // Mutter's alive checks: a ping timing out, Wait, re-pings.
             self.manager.alive_deadline(),
             // Window sessions are written 3 s after a change (Mutter).
@@ -5368,6 +5494,9 @@ impl Runtime {
     fn run_tick(&mut self, idle: bool) -> Result<bool, RuntimeError> {
         // A full tick draws what the page flips it follows changed.
         self.flip_changed = false;
+        // The recovery overlay is no motion: the tick that shows or hides
+        // it draws.
+        let overlay_shown = self.overlay.visible;
         if self.blank_stale || !self.blank_watched {
             self.blank_stale = false;
             if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
@@ -5393,6 +5522,7 @@ impl Runtime {
         self.manager.reconcile(&mut self.state);
         self.state.window_sessions_mut().save_if_due(Instant::now());
         self.focus_policy_tick();
+        self.client_dnd_tick();
         self.alive_checks_tick();
         self.tablet_settings_tick();
         self.poll_input_aids();
@@ -5898,7 +6028,11 @@ impl Runtime {
         self.privacy_screen_tick();
         self.publish_display_state();
         self.publish_overview_previews();
-        if !idle || arrived || self.in_motion(Instant::now(), self.animation_clock.now()) {
+        if !idle
+            || arrived
+            || self.overlay.visible != overlay_shown
+            || self.in_motion(Instant::now(), self.animation_clock.now())
+        {
             let strip_was_animating = self.manager.strip_animating();
             self.render()?;
             // Rendering advances the strip's springs. Publish the terminal
@@ -6553,8 +6687,8 @@ impl Runtime {
         };
         let cursor_now = self.animation_clock.now();
         // Hidden windows' frame callbacks wait for the hidden beat; by
-        // themselves they never make an unchanged output repaint.
-        #[cfg(feature = "drm")]
+        // themselves they never make an unchanged output repaint. While
+        // locked every window is hidden (#1122).
         let throttled = throttled_surfaces(&self.state, &hidden_surfaces(&self.manager, &shown));
         // DisplayConfig PowerSaveMode (#355): the scene advanced above as
         // Mutter's stage does, but nothing is scanned out; frames complete
@@ -6562,7 +6696,7 @@ impl Runtime {
         if !self.power_save.is_on() {
             #[cfg(feature = "drm")]
             self.performance_trace.cancel();
-            self.power_save_frame_beat();
+            self.power_save_frame_beat(&throttled);
             return Ok(());
         }
         // Screen magnifier (#349): this frame's tracking points; the
@@ -7353,37 +7487,63 @@ impl Runtime {
     }
 
     /// While the display power-save mode is not on (#355), complete frames
-    /// on Mutter's dummy page flip: every surface's frame callbacks, fifo
-    /// barriers and commit timers at most once per
-    /// [`FRAME_INTERVAL`](crate::power_save::FRAME_INTERVAL). Hidden windows
-    /// are served by this beat too.
-    fn power_save_frame_beat(&mut self) {
-        self.hidden_waiting = false;
+    /// on Mutter's dummy page flip at most once per
+    /// [`FRAME_INTERVAL`](crate::power_save::FRAME_INTERVAL)
+    /// ([`power_save_flip`]). Hidden windows (`throttled`, every window
+    /// while locked) stay on their own slower beat (#1122).
+    fn power_save_frame_beat(
+        &mut self,
+        throttled: &[smithay::reexports::wayland_server::protocol::wl_surface::WlSurface],
+    ) {
+        self.hidden_frame_beat(throttled);
+        self.power_save_throttled = throttled.to_vec();
         let now = Instant::now();
         if self.power_save_beat.is_some_and(|last| {
             now.saturating_duration_since(last) < crate::power_save::FRAME_INTERVAL
         }) {
             return;
         }
-        let Some(output) = self.state.primary_output() else {
-            return;
-        };
-        send_frame_callbacks(&self.state, &self.manager, &[]);
-        let roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
-        let time = self.state.presentation_now();
-        self.state
-            .refresh_cycle(&roots, time, crate::frame_timing::refresh_of(&output));
-        self.power_save_beat = Some(now);
+        if power_save_flip(&mut self.state, &self.manager, throttled) {
+            self.power_save_beat = Some(now);
+        }
     }
 
     /// Whether a surface waits on the next power-save beat.
     fn power_save_waiting(&self) -> bool {
         !self.power_save.is_on()
-            && crate::frame_timing::pending_callbacks(&crate::frame_timing::frame_roots(
-                &self.state,
-                &self.manager,
-            ))
+            && power_save_pending(&self.state, &self.manager, &self.power_save_throttled)
     }
+}
+
+/// One dummy page flip while the display power-save mode is not on
+/// (#355): frame callbacks for every surface but the hidden windows'
+/// (`throttled`, #1122), and fifo barriers and commit timers for all.
+/// False without an output to flip.
+fn power_save_flip(
+    state: &mut State,
+    manager: &WindowManager,
+    throttled: &[smithay::reexports::wayland_server::protocol::wl_surface::WlSurface],
+) -> bool {
+    let Some(output) = state.primary_output() else {
+        return false;
+    };
+    send_frame_callbacks(state, manager, throttled);
+    let roots = crate::frame_timing::frame_roots(state, manager);
+    let time = state.presentation_now();
+    state.refresh_cycle(&roots, time, crate::frame_timing::refresh_of(&output));
+    true
+}
+
+/// Whether a surface [`power_save_flip`] serves holds a frame callback:
+/// hidden windows (`throttled`) wait on the hidden beat instead.
+fn power_save_pending(
+    state: &State,
+    manager: &WindowManager,
+    throttled: &[smithay::reexports::wayland_server::protocol::wl_surface::WlSurface],
+) -> bool {
+    let mut roots = crate::frame_timing::frame_roots(state, manager);
+    roots.retain(|root| !throttled.contains(root));
+    crate::frame_timing::pending_callbacks(&roots)
 }
 
 /// The tracker a committed touchpad swipe drives.
@@ -8692,9 +8852,10 @@ fn send_surface_scales(state: &State, manager: &WindowManager) {
 }
 
 /// Windows something on screen shows (#503): none while locked (GNOME
-/// Shell hides its window group under the lock screen), every window
-/// while window clones (overview, switcher) or casts show them, else the
-/// scene less what the last frame wholly culled
+/// Shell hides its window group under the lock screen, and Mutter sends
+/// an obscured surface no frame callbacks; #1122), every window while
+/// window clones (overview, switcher) or casts show them, else the scene
+/// less what the last frame wholly culled
 /// ([`shown_windows`](crate::occlusion::shown_windows)).
 fn shown_ids(
     manager: &WindowManager,
@@ -9233,5 +9394,262 @@ mod tests {
         assert!(share
             .preview_temperature(std::time::Instant::now())
             .is_some());
+    }
+}
+
+/// #1122: what the power-save dummy flip owes a real client's window,
+/// locked and unlocked, through the functions the runtime's frame path
+/// uses (`render`, `power_save_frame_beat`, `power_save_waiting`).
+#[cfg(test)]
+mod power_save_frame_tests {
+    use super::{
+        hidden_surfaces, power_save_flip, power_save_pending, send_frame_callbacks, shown_ids,
+        throttled_surfaces,
+    };
+    use std::os::fd::AsFd;
+    use std::os::unix::net::UnixStream;
+    use wayland_client::protocol::{
+        wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
+        wl_registry::WlRegistry, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface,
+    };
+    use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
+    use wayland_protocols::xdg::shell::client::{
+        xdg_surface::{self, XdgSurface},
+        xdg_toplevel::XdgToplevel,
+        xdg_wm_base::{self, XdgWmBase},
+    };
+
+    #[derive(Default)]
+    struct App {
+        compositor: Option<WlCompositor>,
+        shm: Option<WlShm>,
+        wm_base: Option<XdgWmBase>,
+        configure: Option<u32>,
+        synced: bool,
+        frames_done: u32,
+    }
+
+    impl Dispatch<WlRegistry, ()> for App {
+        fn event(
+            app: &mut Self,
+            registry: &WlRegistry,
+            event: wayland_client::protocol::wl_registry::Event,
+            _: &(),
+            _: &Connection,
+            qh: &QueueHandle<Self>,
+        ) {
+            if let wayland_client::protocol::wl_registry::Event::Global {
+                name, interface, ..
+            } = event
+            {
+                match interface.as_str() {
+                    "wl_compositor" => app.compositor = Some(registry.bind(name, 4, qh, ())),
+                    "wl_shm" => app.shm = Some(registry.bind(name, 1, qh, ())),
+                    "xdg_wm_base" => app.wm_base = Some(registry.bind(name, 1, qh, ())),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// `sync` callbacks carry `true`, frame callbacks `false`.
+    impl Dispatch<WlCallback, bool> for App {
+        fn event(
+            app: &mut Self,
+            _: &WlCallback,
+            event: wayland_client::protocol::wl_callback::Event,
+            sync: &bool,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+            if let wayland_client::protocol::wl_callback::Event::Done { .. } = event {
+                if *sync {
+                    app.synced = true;
+                } else {
+                    app.frames_done += 1;
+                }
+            }
+        }
+    }
+
+    impl Dispatch<XdgWmBase, ()> for App {
+        fn event(
+            _: &mut Self,
+            base: &XdgWmBase,
+            event: xdg_wm_base::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+            if let xdg_wm_base::Event::Ping { serial } = event {
+                base.pong(serial);
+            }
+        }
+    }
+
+    impl Dispatch<XdgSurface, ()> for App {
+        fn event(
+            app: &mut Self,
+            _: &XdgSurface,
+            event: xdg_surface::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+            if let xdg_surface::Event::Configure { serial } = event {
+                app.configure = Some(serial);
+            }
+        }
+    }
+
+    wayland_client::delegate_noop!(App: ignore WlCompositor);
+    wayland_client::delegate_noop!(App: ignore WlSurface);
+    wayland_client::delegate_noop!(App: ignore WlShm);
+    wayland_client::delegate_noop!(App: ignore WlShmPool);
+    wayland_client::delegate_noop!(App: ignore WlBuffer);
+    wayland_client::delegate_noop!(App: ignore XdgToplevel);
+
+    /// Everything both sides have sent is handled on the other: a sync
+    /// round trip through the manually pumped compositor.
+    fn sync(
+        comp: &mut crate::TestCompositor,
+        conn: &Connection,
+        queue: &mut EventQueue<App>,
+        app: &mut App,
+    ) {
+        app.synced = false;
+        conn.display().sync(&queue.handle(), true);
+        for _ in 0..200 {
+            queue.flush().unwrap();
+            comp.pump();
+            if let Some(guard) = queue.prepare_read() {
+                let _ = guard.read();
+            }
+            queue.dispatch_pending(app).unwrap();
+            if app.synced {
+                return;
+            }
+        }
+        panic!("the compositor never answered the sync");
+    }
+
+    #[test]
+    fn locked_power_save_withholds_a_hidden_windows_frames_until_unlock() {
+        use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
+        let mut comp = crate::TestCompositor::new();
+        let output = Output::new(
+            "tuna-0".to_owned(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Tuna Desktop".to_owned(),
+                model: "Test".to_owned(),
+            },
+        );
+        let mode = Mode {
+            size: (800, 600).into(),
+            refresh: 60_000,
+        };
+        output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
+        comp.state.add_output("tuna-0", Some(output), 800, 600);
+        let mut manager = comp.window_manager();
+
+        let (server, client) = UnixStream::pair().unwrap();
+        comp.add_client(server);
+        let conn = Connection::from_socket(client).unwrap();
+        let mut queue = conn.new_event_queue();
+        let qh = queue.handle();
+        let mut app = App::default();
+        conn.display().get_registry(&qh, ());
+        sync(&mut comp, &conn, &mut queue, &mut app);
+        let surface = app.compositor.as_ref().unwrap().create_surface(&qh, ());
+        let xdg = app
+            .wm_base
+            .as_ref()
+            .unwrap()
+            .get_xdg_surface(&surface, &qh, ());
+        let _toplevel = xdg.get_toplevel(&qh, ());
+        surface.commit();
+        sync(&mut comp, &conn, &mut queue, &mut app);
+        manager.reconcile(&mut comp.state);
+        sync(&mut comp, &conn, &mut queue, &mut app);
+        xdg.ack_configure(app.configure.expect("the initial configure"));
+        let (width, height) = (800, 600);
+        let file = tempfile::tempfile().unwrap();
+        file.set_len((width * height * 4) as u64).unwrap();
+        let pool = app
+            .shm
+            .as_ref()
+            .unwrap()
+            .create_pool(file.as_fd(), width * height * 4, &qh, ());
+        let buffer = pool.create_buffer(
+            0,
+            width,
+            height,
+            width * 4,
+            wayland_client::protocol::wl_shm::Format::Xrgb8888,
+            &qh,
+            (),
+        );
+        surface.attach(Some(&buffer), 0, 0);
+        surface.damage_buffer(0, 0, width, height);
+        surface.commit();
+        sync(&mut comp, &conn, &mut queue, &mut app);
+        manager.reconcile(&mut comp.state);
+        sync(&mut comp, &conn, &mut queue, &mut app);
+        // Acknowledge whatever the mapped window was configured to last:
+        // one still acknowledging a configure keeps full rate.
+        xdg.ack_configure(app.configure.expect("a configure"));
+        surface.commit();
+        sync(&mut comp, &conn, &mut queue, &mut app);
+        assert_eq!(manager.window_ids().count(), 1, "the window is managed");
+
+        let costs = std::collections::BTreeMap::new();
+        let throttled = |comp: &crate::TestCompositor,
+                         manager: &crate::windows::WindowManager,
+                         locked: bool| {
+            throttled_surfaces(
+                &comp.state,
+                &hidden_surfaces(manager, &shown_ids(manager, &costs, false, locked)),
+            )
+        };
+        let frame = |queue: &EventQueue<App>| {
+            surface.frame(&queue.handle(), false);
+            surface.commit();
+        };
+
+        // Locked and blanked: the window is hidden, so the power-save
+        // flip owes it nothing and its callback does not wake that beat.
+        let locked = throttled(&comp, &manager, true);
+        assert_eq!(
+            locked.len(),
+            1,
+            "every window is hidden while locked (hidden {})",
+            hidden_surfaces(&manager, &[]).len()
+        );
+        frame(&queue);
+        sync(&mut comp, &conn, &mut queue, &mut app);
+        assert!(!power_save_pending(&comp.state, &manager, &locked));
+        assert!(crate::frame_timing::pending_callbacks(&locked));
+        for _ in 0..3 {
+            assert!(power_save_flip(&mut comp.state, &manager, &locked));
+            sync(&mut comp, &conn, &mut queue, &mut app);
+        }
+        assert_eq!(app.frames_done, 0, "no frame while locked and blanked");
+
+        // Woken and unlocked: shown again, the first frame pays it.
+        let unlocked = throttled(&comp, &manager, false);
+        assert!(unlocked.is_empty(), "an unlocked window on screen is shown");
+        send_frame_callbacks(&comp.state, &manager, &unlocked);
+        sync(&mut comp, &conn, &mut queue, &mut app);
+        assert_eq!(app.frames_done, 1, "the first frame after unlock pays it");
+
+        // Mutter's dummy flip still serves a shown window in power save.
+        frame(&queue);
+        sync(&mut comp, &conn, &mut queue, &mut app);
+        assert!(power_save_pending(&comp.state, &manager, &unlocked));
+        assert!(power_save_flip(&mut comp.state, &manager, &unlocked));
+        sync(&mut comp, &conn, &mut queue, &mut app);
+        assert_eq!(app.frames_done, 2);
     }
 }

@@ -301,10 +301,13 @@ code as root inside its pod.
    address), the kubelet, other namespaces' pods and Services (corral-web,
    punjab, KubeVirt) and link-local metadata are unreachable.
 5. **Headroom.** ResourceQuota `runner-ceiling` caps the namespace at 14 pods,
-   56 CPU / 196 GiB limits, 28 CPU / 82 GiB requests: up to 14 runners
-   run at once (karnataka: 28 CPU / 125 GiB allocatable; punjab is sized at
-   12 cores / 24 GiB). Each runner asks for
-   1.5 CPU / 5 GiB and is limited to 4 CPU / 14 GiB. The 45 GiB
+   56 CPU / 276 GiB limits, 28 CPU / 82 GiB requests (karnataka: 28 CPU /
+   125 GiB allocatable; punjab is sized at 12 cores / 24 GiB). Each runner
+   asks for 1.5 CPU / 5 GiB and is limited to 4 CPU / 24 GiB (shellcheck on
+   `scripts/tuna-gtk-shell-proof` peaks near 14 GiB). The limit quota fits
+   every configured runner at its own limit: 8 tuna-desktop runners at 24 GiB
+   and 3 iso-gpu runners at 28 GiB; when it does not, ARC logs "exceeded
+   quota", creates no pod, and jobs queue behind idle slots. The 45 GiB
    ephemeral-storage limit covers the container writable layer/logs, **not**
    the separate scratch PVCs (see below). Runner pods use PriorityClass
    `tuna-ci-runner` (-100, never preempts): new VMs and cluster services
@@ -325,7 +328,8 @@ pods never mount it and cannot reach the API to read it.
 `/home/runner/work` (including Cargo targets and rust-cache restore),
 `/var/lib/containers`, and `/home/runner/.local/share/containers` are three
 fresh generic ephemeral volumes per runner, requesting 40 / 10 / 10 GiB.
-`/dev/shm` remains a 2 GiB memory emptyDir. All 14 runners request 840 GiB
+`/dev/shm` remains a 2 GiB memory emptyDir. At `maxRunners` (6 + 2) the
+8 runners request 480 GiB
 on the 900 GiB ext4 LV `vg1/tuna_ci_scratch`, mounted at
 `/var/lib/tuna-ci-scratch` on nvme1n1; nvme0n1 still holds the unchanged
 kubelet/containerd roots and unrelated workloads.
@@ -578,8 +582,9 @@ page), then run `.github/runners/deploy`: it upgrades the controller first.
 ## Scale
 
 `minRunners` (idle, pre-registered pods) and `maxRunners` live in the values
-files: 24.04 is 1–10, 26.04 is 0–4. Keep `maxRunners` of both sets within the
-quota's 14 pods; the scheduler can still withhold slots for VM reservations.
+files: 24.04 is 1–6, 26.04 is 0–2. Keep `maxRunners` of both sets within the
+quota's 14 pods and the limit quota's 276 GiB (each runner at its 24 GiB
+limit); the scheduler can still withhold slots for VM reservations.
 Change the quota in `cluster.yaml` only after checking punjab and KubeVirt
 (`kubectl describe node karnataka`). Apply guard rails with
 `kubectl --context karnataka-k3s apply -f .github/runners/cluster.yaml`, then
