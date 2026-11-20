@@ -4206,6 +4206,44 @@ class MediaVolumeAndLockRecords(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class ExplicitSyncRecord(unittest.TestCase):
+    """V-SYNCOBJ is recorded, never raised: main() writes assertions.txt and
+    the manifest after it, so an escaping blur-oracle AssertionError used to
+    end the lane with neither and the ledger without the gate."""
+
+    def records(self, manager_ready, prove):
+        results = []
+        lane.record_explicit_sync(lambda *entry: results.append(entry), manager_ready, prove)
+        return results
+
+    def test_a_failed_blur_pixel_check_is_a_recorded_failure_with_its_message(self):
+        import background_effect_oracle as background
+
+        def prove():
+            background.require(False, "blur leaks outside clipped/subtracted region: 12 pixels")
+
+        self.assertEqual(self.records(True, prove), [
+            ("V-SYNCOBJ", False,
+             "background-effect pixel check failed: blur leaks outside clipped/subtracted region: 12 pixels")])
+
+    def test_harness_failures_are_recorded_with_their_message(self):
+        def prove():
+            raise RuntimeError("native guest artifact differs from admitted original build: /usr/libexec/x")
+
+        self.assertEqual(self.records(True, prove), [
+            ("V-SYNCOBJ", False, "native guest artifact differs from admitted original build: /usr/libexec/x")])
+
+    def test_an_unadmitted_session_owner_fails_without_running_the_proof(self):
+        calls = []
+        self.assertEqual(self.records(False, lambda: calls.append(1)), [
+            ("V-SYNCOBJ", False, "native installed session owner admission failed")])
+        self.assertEqual(calls, [])
+
+    def test_a_completed_proof_passes(self):
+        [(name, ok, _)] = self.records(True, lambda: None)
+        self.assertEqual((name, ok), ("V-SYNCOBJ", True))
+
+
 class InterleavedShellStartup(unittest.TestCase):
     # Run 38102898073 repeat-04: serial/journal interleaving sheared the
     # shell's keybindings payload onto later records, leaving a bare
