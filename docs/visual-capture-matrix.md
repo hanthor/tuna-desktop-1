@@ -163,6 +163,7 @@ state records its state observation next to its stills and clips.
 | P-IN-07 | Busy cursor while a launch is pending | `unproven` | No adequate capture | the wait cursor is cargo-tested over theme cursors; no capture state films a pending launch's cursor yet |
 | P-WM-12 | Auto-maximize and edge resistance | `unproven` | No adequate capture | first-map maximize, pointer and keyboard move resistance are cargo-tested; no capture state films a large first map or a move held at an edge yet |
 | P-OV-07 | `overlay-key` rebinding | `nonvisual` | No adequate capture | which key toggles the overview has no pixels of its own; the overview it opens is covered by stage:overview |
+| P-OV-08 | App drag-and-drop through the overview | `unproven` | No adequate capture | the G-DND-* gates drive real GTK drags in the nested proof and read compositor state; no capture state films a drag held over the hot corner, Activities, a preview or a thumbnail yet |
 
 ## Walkthrough states
 

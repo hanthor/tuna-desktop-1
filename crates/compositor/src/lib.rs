@@ -100,6 +100,7 @@ pub mod cursor;
 mod cursor_svg;
 mod dbus_signals;
 pub mod display_config;
+pub mod dnd_overview;
 #[cfg(feature = "drm")]
 pub mod drm;
 pub mod edge_resistance;
@@ -250,6 +251,9 @@ pub struct State {
     /// The icon a client's drag-and-drop carries, drawn at the pointer
     /// until the drop.
     dnd_icon: Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
+    /// Whether the drag in progress is the supervised shell's own (its
+    /// dash and app grid), not an application's (#1189).
+    client_dnd_shell: bool,
     /// What the client under the pointer asked the cursor to be: a
     /// `wp_cursor_shape_v1` shape, its own surface, or hidden (#342).
     pub(crate) cursor_image: smithay::input::pointer::CursorImageStatus,
@@ -922,9 +926,24 @@ impl ClientDndGrabHandler for State {
         &mut self,
         _source: Option<smithay::reexports::wayland_server::protocol::wl_data_source::WlDataSource>,
         icon: Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
-        _seat: Seat<Self>,
+        seat: Seat<Self>,
     ) {
+        use smithay::reexports::wayland_server::Resource;
         self.dnd_icon = icon;
+        // The surface the drag was pressed on belongs to the client that
+        // started it; the grab is not installed yet, the press's is.
+        let origin = seat
+            .get_pointer()
+            .and_then(|pointer| pointer.grab_start_data())
+            .and_then(|start| start.focus)
+            .or_else(|| {
+                seat.get_touch()
+                    .and_then(|touch| touch.grab_start_data())
+                    .and_then(|start| start.focus)
+            });
+        self.client_dnd_shell = origin
+            .and_then(|(surface, _)| self.dh.get_client(surface.id()).ok())
+            .is_some_and(|client| ClientState::privileged(&client, |data| data.supervised_shell));
     }
 
     fn dropped(
@@ -934,6 +953,7 @@ impl ClientDndGrabHandler for State {
         _seat: Seat<Self>,
     ) {
         self.dnd_icon = None;
+        self.client_dnd_shell = false;
     }
 }
 
@@ -944,6 +964,13 @@ impl State {
     ) -> Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface> {
         use smithay::reexports::wayland_server::Resource;
         self.dnd_icon.clone().filter(|s| s.is_alive())
+    }
+
+    /// Whether a drag a client started is under way that the overview
+    /// answers (#1189): not the supervised shell's own, whose dash and
+    /// app-grid drags happen inside the overview and are the shell's.
+    pub fn client_dnd_overview_active(&self) -> bool {
+        !self.client_dnd_shell && self.client_dnd_active()
     }
 }
 impl ServerDndGrabHandler for State {}
@@ -1087,16 +1114,29 @@ impl State {
         true
     }
 
-    /// The session locks: GNOME's lock closes every open menu with its
-    /// grab, so `popup_done` goes to each grabbed popup (a GTK popover
-    /// holding its toolkit grab would otherwise keep the lock screen's
-    /// keys in the same client). Nothing is handed the keyboard back:
-    /// it is the lock's until `unlock_input`. Returns whether a
-    /// grab was dismissed.
-    pub fn dismiss_popup_grab_for_lock(&mut self) -> bool {
-        let dismissed = self.dismiss_popup_grab();
+    /// The session locks: GNOME closes its own shell menus (the date
+    /// menu, quick settings), so `popup_done` goes to each grabbed popup
+    /// of the supervised shell, newest first (a GTK popover holding its
+    /// toolkit grab would otherwise keep the lock screen's keys in the
+    /// same client). An application's grab is kept: GNOME's modal stage
+    /// grab revokes Mutter's Wayland popup grab without dismissing it,
+    /// so the lock holds the keyboard meanwhile and `unlock_input`
+    /// hands it back to that popup. Nothing is handed the keyboard back
+    /// here. Returns whether a shell grab was dismissed.
+    pub fn dismiss_shell_popup_grab_for_lock(&mut self) -> bool {
+        let (shell, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.popup_grab)
+            .into_iter()
+            .partition(|popup| {
+                popup.wl_surface().client().is_some_and(|client| {
+                    ClientState::privileged(&client, |data| data.supervised_shell)
+                })
+            });
+        self.popup_grab = kept;
+        for popup in shell.iter().rev() {
+            popup.send_popup_done();
+        }
         self.popup_refocus = false;
-        dismissed
+        !shell.is_empty()
     }
 
     /// Take the "hand keyboard focus back" flag (see `popup_refocus`).
@@ -1267,6 +1307,7 @@ impl State {
             }),
             data_device_state: DataDeviceState::new::<State>(dh),
             dnd_icon: None,
+            client_dnd_shell: false,
             cursor_image: smithay::input::pointer::CursorImageStatus::default_named(),
             tablet_cursor: None,
             tablet_cursor_images: std::collections::HashMap::new(),
@@ -1599,6 +1640,8 @@ impl State {
 
     /// Overview input uses the compositor's current logical output geometry,
     /// including primary changes, negative origins, scale changes and hotplug.
+    /// A client's drag-and-drop in progress lets the hot corner answer hover
+    /// (see [`State::client_dnd_overview_active`]).
     pub fn overview_trigger_action(
         &self,
         triggers: &mut crate::windows::TriggerState,
@@ -1606,9 +1649,27 @@ impl State {
         overview_open: bool,
         pointer: smithay::utils::Point<f64, smithay::utils::Logical>,
     ) -> crate::windows::TriggerAction {
+        triggers.set_client_drag(self.client_dnd_overview_active());
         triggers.feed_on_outputs(
             input,
             overview_open,
+            pointer,
+            self.outputs.iter().map(|entry| {
+                (
+                    smithay::utils::Rectangle::new(entry.loc.into(), entry.size),
+                    entry.primary,
+                )
+            }),
+        )
+    }
+
+    /// Whether `pointer` is on the primary output's Activities control.
+    pub fn overview_activities_at(
+        &self,
+        triggers: &crate::windows::TriggerState,
+        pointer: smithay::utils::Point<f64, smithay::utils::Logical>,
+    ) -> bool {
+        triggers.activities_at(
             pointer,
             self.outputs.iter().map(|entry| {
                 (

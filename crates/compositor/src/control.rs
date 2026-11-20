@@ -3583,6 +3583,14 @@ mod switcher_thumbnail_tests {
             .collect()
     }
 
+    /// The peer leaves. Shut the socket down rather than only dropping it:
+    /// a concurrently forked test child holds a duplicate of every open
+    /// descriptor until it execs, so a bare drop may not reach the hub as
+    /// EOF within `applied`'s rounds.
+    fn depart(client: ControlConn) {
+        client.stream.shutdown(std::net::Shutdown::Both).unwrap();
+    }
+
     #[test]
     fn a_departed_shell_takes_its_switcher_thumbnails_with_it() {
         let (_dir, mut hub, mut model) = setup();
@@ -3594,11 +3602,11 @@ mod switcher_thumbnail_tests {
         assert_eq!(drawn[0].len(), 2);
         assert_eq!(drain(&mut shell), [(1, CommandStatus::Applied)]);
         // Another peer leaving changes nothing.
-        drop(other);
+        depart(other);
         assert!(applied(&mut hub, &mut model).is_empty());
         assert_eq!(hub.sessions.len(), 1);
         // The shell dies mid-fade: the hub clears the drawn images once.
-        drop(shell);
+        depart(shell);
         assert_eq!(applied(&mut hub, &mut model), [Vec::new()]);
         assert!(hub.sessions.is_empty());
         assert!(applied(&mut hub, &mut model).is_empty());
@@ -3609,7 +3617,7 @@ mod switcher_thumbnail_tests {
         assert_eq!(applied(&mut hub, &mut model).len(), 1);
         send_thumbnails(&mut shell, 3, &[]);
         assert_eq!(applied(&mut hub, &mut model), [Vec::new()]);
-        drop(shell);
+        depart(shell);
         assert!(applied(&mut hub, &mut model).is_empty());
 
         // A replaced shell: the gate narrows to the new process and

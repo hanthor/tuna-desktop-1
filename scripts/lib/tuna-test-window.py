@@ -9,7 +9,9 @@ list that proves wheel scrolling. Exits when the window closes. With
 TUNA_TEST_POPOVER=1 the popover opens by itself once the window shows
 (parity captures cannot rely on headless input). TUNA_TEST_SIZE=WxH
 replaces the 640x420 default size, and TUNA_TEST_APP_ID the app id
-(tuna-test-<lowercased TITLE>).
+(tuna-test-<lowercased TITLE>). With TUNA_TEST_DRAG=LOG
+the big label starts a real GTK drag of its text and takes a drop of it,
+each step (drag-begin, drag-end, drag-cancel, drop) appended to LOG.
 """
 import os
 import sys
@@ -26,7 +28,8 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+gi.require_version("Gdk", "4.0")
+from gi.repository import Adw, Gdk, GLib, GObject, Gtk  # noqa: E402
 
 TITLE = sys.argv[1] if len(sys.argv) > 1 else "Tuna Desktop Test"
 COLOR = sys.argv[2] if len(sys.argv) > 2 else "#3584e4"
@@ -57,6 +60,20 @@ def build(loop):
     label.add_css_class("tuna-test")
     label.set_vexpand(True)
     box.append(label)
+    if drag_log := os.environ.get("TUNA_TEST_DRAG"):
+        def note(line):
+            with open(drag_log, "a") as log:
+                log.write(line + "\n")
+
+        source = Gtk.DragSource(actions=Gdk.DragAction.COPY)
+        source.set_content(Gdk.ContentProvider.new_for_value(GObject.Value(str, TITLE)))
+        source.connect("drag-begin", lambda *_: note("drag-begin"))
+        source.connect("drag-end", lambda *_: note("drag-end"))
+        source.connect("drag-cancel", lambda _s, _d, reason: note(f"drag-cancel {reason.value_nick}") or False)
+        label.add_controller(source)
+        target = Gtk.DropTarget.new(GObject.TYPE_STRING, Gdk.DragAction.COPY)
+        target.connect("drop", lambda _t, value, _x, _y: note(f"drop {value}") or True)
+        label.add_controller(target)
     rows = Gtk.ListBox()
     for i in range(60):
         rows.append(Gtk.Label(label=f"Row {i}"))
