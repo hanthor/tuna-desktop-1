@@ -120,6 +120,14 @@ class Selection(unittest.TestCase):
         # Control: a test only the always-on check job runs adds no lane.
         self.assertEqual(pr("scripts/tests/test_disk_guard.py"), [])
 
+    def test_uinput_emulators_run_drm_smoke_without_rotation(self):
+        # Only tuna-drm-smoke drives them; as code paths they rotated lanes
+        # and could skip drm-smoke.
+        for name in ("keyboard", "touchpad", "tablet"):
+            for run in range(len(m.ROTATION)):
+                self.assertEqual(pr(f"scripts/lib/tuna-uinput-{name}.py", run=run),
+                                 ["drm-smoke"], name)
+
     def test_pull_requests_never_rotate_the_push_only_image_lane(self):
         self.assertNotIn("marlin-image", m.ROTATION)
         for run in range(len(m.ROTATION)):
