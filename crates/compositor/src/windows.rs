@@ -756,6 +756,7 @@ impl WindowManager {
             x11_frames_client: false,
             #[cfg(feature = "xwayland")]
             x11_unmanaged: Vec::new(),
+            #[cfg(feature = "xwayland")]
             x11_iconic: HashSet::new(),
             stacking: Vec::new(),
             focus_history: Vec::new(),
