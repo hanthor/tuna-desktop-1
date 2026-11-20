@@ -61,6 +61,8 @@ class Selection(unittest.TestCase):
                           "arch-package", "marlin-vm", "parity-ledger"])
         self.assertEqual(pr("scripts/tuna-orca-speech-proof"), ["orca-speech"])
         self.assertEqual(pr("scripts/lib/tuna-orca-speech.py"), ["orca-speech"])
+        # G-CAMERA-INDICATOR's AT-SPI watcher runs only in the gtk-shell slice.
+        self.assertEqual(pr("scripts/lib/tuna-a11y-hide-watch.py"), ["gtk-shell"])
 
 
     def test_transition_policy_and_suite_always_run_journey(self):

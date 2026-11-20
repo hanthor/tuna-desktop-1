@@ -162,7 +162,7 @@ state records its state observation next to its stills and clips.
 | P-PN-08 | Background menu on the wallpaper | `unproven` | No adequate capture | G-BACKGROUND-MENU keeps a `background-menu.png` proof screenshot; no capture state yet |
 | P-DS-06 | Monitor labels for Settings › Displays | `unproven` | No adequate capture | G-MONITOR-LABELS keeps a `monitor-labels.png` proof screenshot on the single nested output; multi-monitor labels need Corral |
 | P-WM-13 | "Title" is ready attention notification | `unproven` | No adequate capture | G-WINDOW-ATTENTION keeps a `window-attention.png` proof screenshot; no capture state yet |
-| P-ST-13 | Camera-in-use indicator | `unproven` | No adequate capture | cargo-tested against PipeWire node state; a running camera node needs a fixture or hardware to show |
+| P-ST-13 | Camera-in-use indicator | `unproven` | No adequate capture | G-CAMERA-INDICATOR keeps a `camera-indicator.png` proof screenshot of the icon for a test-source Camera stream; no capture state yet |
 | P-SY-15 | Keyring system prompter dialogs | `unproven` | No adequate capture | G-KEYRING-PROMPTER keeps `keyring-password.png` and `keyring-new.png` proof screenshots; no capture state yet |
 
 ## Walkthrough states

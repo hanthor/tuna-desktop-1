@@ -28,8 +28,9 @@
 #   G-SHELL-STABLE only (needs pam_wrapper).
 #   --shell-gaps-only runs panel readiness, the GNOME 51 shell-gap gates
 #   (G-BACKGROUND-MENU, G-MONITOR-LABELS, G-WINDOW-ATTENTION,
-#   G-KEYRING-PROMPTER, G-KEYRING-ISOLATION) and
-#   G-SHELL-STABLE only.
+#   G-KEYRING-PROMPTER, G-KEYRING-ISOLATION, G-CAMERA-INDICATOR) and
+#   G-SHELL-STABLE only. Its shell reads the real PipeWire graph, not the
+#   audio fixture.
 #   --grid-cancel-only --grid-cancel-admission FILE is an exact CI comparison slice.
 #   --expect-grid-cancel-old-negative is permitted only in that admitted slice.
 #   Run at most one --*-only slice at a time.
@@ -1368,6 +1369,8 @@ cat >"$ARTIFACTS/bin/pw-dump" <<PW_DUMP
 #!/bin/sh
 for arg do
     if [ "\$arg" = --monitor ] || [ "\$arg" = -m ]; then
+        # G-CAMERA-INDICATOR's camera streams are real PipeWire nodes.
+        [ "$SHELL_GAPS_ONLY" = 1 ] && break
         exec "$PY" "$ROOT/scripts/lib/tuna-audio-fixture.py" "$ARTIFACTS"
     fi
 done
@@ -2383,6 +2386,97 @@ window_attention_proof() {
     wait "$wa_pid_c" 2>/dev/null || true
     pass G-WINDOW-ATTENTION "a refused xdg-activation token, or a window mapped behind the focused one after one, posts \"$wa_title\" under the app's name without moving focus; clicking it focuses the window; it is withdrawn once the window has focus or closes"
 }
+# GNOME 51 camera.js over Shell.CameraMonitor (shell-camera-monitor.c): a
+# running PipeWire node with media.role Camera shows the top bar's camera
+# icon at once; after the last one stops it hides only DISABLE_DELAY_MS
+# (500 ms) later. The camera is GStreamer's test source published as a
+# Video/Source node; the app is a pipewiresrc stream with media.role
+# Camera reading it, as a portal camera client's stream is. Both run on
+# the proof's private PipeWire, which this slice's shell reads.
+camera_indicator_proof() {
+    cam_label="Camera in use"
+    cam_source_pid=""
+    cam_app_pid=""
+    cam_watch_pid=""
+    cam_fail() {
+        for cam_pid in "$cam_source_pid" "$cam_app_pid" "$cam_watch_pid"; do
+            [ -n "$cam_pid" ] && kill "$cam_pid" 2>/dev/null || true
+        done
+        fail G-CAMERA-INDICATOR "$1"
+    }
+    cam_dump() {
+        "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-camera-$1.json" 20 >/dev/null ||
+            cam_fail "accessibility dump failed ($1)"
+    }
+    # cam_icon showing|hidden TAG: wait up to 10 s for the icon's state.
+    cam_icon() {
+        end=$(($(date +%s) + 10))
+        while [ "$(date +%s)" -le "$end" ]; do
+            cam_dump "$2"
+            "$1" "$ARTIFACTS/a11y-camera-$2.json" "$cam_label" && return 0
+            sleep 0.3
+        done
+        return 1
+    }
+    # cam_node FILTER TAG: wait up to 10 s for a node matching FILTER.
+    cam_node() {
+        end=$(($(date +%s) + 10))
+        while [ "$(date +%s)" -le "$end" ]; do
+            "$PW_DUMP_REAL" >"$ARTIFACTS/pipewire-camera-$2.json" 2>/dev/null &&
+                jq -e "any(.[]; .type == \"PipeWire:Interface:Node\" and ($1))" \
+                    "$ARTIFACTS/pipewire-camera-$2.json" >/dev/null && return 0
+            sleep 0.3
+        done
+        return 1
+    }
+    [ -n "$PW_PIDS" ] && [ -n "$PW_DUMP_REAL" ] && command -v gst-launch-1.0 >/dev/null 2>&1 &&
+        gst-inspect-1.0 pipewiresink >/dev/null 2>&1 && gst-inspect-1.0 videotestsrc >/dev/null 2>&1 ||
+        cam_fail "needs pipewire, wireplumber, pw-dump and gst-launch-1.0 with pipewiresink and videotestsrc"
+    cam_icon hidden idle || cam_fail "the camera icon showed with no camera in use"
+    gst-launch-1.0 -q videotestsrc is-live=true ! video/x-raw,width=320,height=240,framerate=15/1 ! \
+        pipewiresink mode=provide stream-properties="props,node.name=tuna-proof-camera,media.class=Video/Source" \
+        >"$ARTIFACTS/camera-source.log" 2>&1 &
+    cam_source_pid=$!
+    cam_node '.info.props["node.name"] == "tuna-proof-camera"' source ||
+        cam_fail "the test camera never appeared as a PipeWire node"
+    # The camera itself, idle and without the Camera role, is no camera in use.
+    sleep 1
+    cam_icon hidden source || cam_fail "an idle camera source with no Camera-role stream showed the icon"
+    # Without media.type Video, WirePlumber looks for an audio target.
+    gst-launch-1.0 -q pipewiresrc target-object=tuna-proof-camera \
+        stream-properties="props,node.name=tuna-proof-camera-app,media.type=Video,media.category=Capture,media.role=Camera" ! fakesink \
+        >"$ARTIFACTS/camera-app.log" 2>&1 &
+    cam_app_pid=$!
+    cam_node '.info.props["node.name"] == "tuna-proof-camera-app" and .info.props["media.role"] == "Camera" and .info.state == "running"' running ||
+        cam_fail "the Camera-role stream never ran"
+    cam_icon showing running || cam_fail "a running Camera-role stream did not show \"$cam_label\" in the top bar"
+    scrot "$ARTIFACTS/camera-indicator.png" >/dev/null
+    # Time the hide from the stream's end against GNOME's hold-off.
+    "$PY" "$ROOT/scripts/lib/tuna-a11y-hide-watch.py" tuna-shell-gtk "$cam_label" "$ARTIFACTS/camera-hide.json" 15 \
+        >"$ARTIFACTS/camera-hide-watch.log" 2>&1 &
+    cam_watch_pid=$!
+    end=$(($(date +%s) + 20))
+    until grep -qx ready "$ARTIFACTS/camera-hide-watch.log"; do
+        [ "$(date +%s)" -le "$end" ] && kill -0 "$cam_watch_pid" 2>/dev/null ||
+            cam_fail "the hide watcher never found the camera icon: $(tail -1 "$ARTIFACTS/camera-hide-watch.log")"
+        sleep 0.1
+    done
+    cam_stopped_ns=$(date +%s%N)
+    kill "$cam_app_pid" 2>/dev/null || true
+    wait "$cam_app_pid" 2>/dev/null || true
+    cam_app_pid=""
+    wait "$cam_watch_pid" || cam_fail "the camera icon stayed after the stream stopped: $(tail -1 "$ARTIFACTS/camera-hide-watch.log")"
+    cam_watch_pid=""
+    cam_hide_ms=$((($(jq -r .hidden_ns "$ARTIFACTS/camera-hide.json") - cam_stopped_ns) / 1000000))
+    [ "$cam_hide_ms" -ge 500 ] ||
+        cam_fail "the camera icon hid ${cam_hide_ms} ms after the stream stopped, inside GNOME's 500 ms hold-off"
+    [ "$cam_hide_ms" -le 5000 ] ||
+        cam_fail "the camera icon hid only ${cam_hide_ms} ms after the stream stopped"
+    cam_icon hidden stopped || cam_fail "the accessibility tree still shows the camera icon after the stream stopped"
+    kill "$cam_source_pid" 2>/dev/null || true
+    wait "$cam_source_pid" 2>/dev/null || true
+    pass G-CAMERA-INDICATOR "a running media.role=Camera PipeWire stream shows \"$cam_label\" in the top bar; an idle camera source alone does not; the icon hid ${cam_hide_ms} ms after the stream stopped (GNOME's 500 ms hold-off)"
+}
 if [ "$SHELL_GAPS_ONLY" = 1 ]; then
     cstate '.active_workspace != null and .locked == false' "shell gaps desktop ready" ||
         fail G-BACKGROUND-MENU "desktop never became ready"
@@ -2392,6 +2486,7 @@ if [ "$SHELL_GAPS_ONLY" = 1 ]; then
     monitor_labels_proof
     window_attention_proof
     keyring_prompter_proof
+    camera_indicator_proof
     grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
     shell_stable_gate
     exit 0

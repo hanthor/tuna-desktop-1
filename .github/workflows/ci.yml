@@ -1068,8 +1068,9 @@ jobs:
           TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
         run: scripts/tuna-gtk-shell-proof --window-leak-only --artifacts gtk-shell-artifacts/window-leak
       # GNOME 51 shell gaps (#1184-#1188): the background menu, monitor
-      # labels, window-attention notifications and the keyring prompter,
-      # each against the real compositor and shell in one nested session.
+      # labels, window-attention notifications, the keyring prompter and the
+      # camera indicator over real PipeWire camera streams, each against the
+      # real compositor and shell in one nested session.
       - name: GNOME 51 shell gaps
         if: ${{ !cancelled() }}
         timeout-minutes: 15

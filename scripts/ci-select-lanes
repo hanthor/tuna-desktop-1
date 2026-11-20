@@ -109,6 +109,7 @@ OWNED = [
     ("scripts/tuna-a11y-golden", ["gtk-shell"]),
     ("scripts/tuna-wayland-info-compare", ["gtk-shell"]),
     ("scripts/lib/tuna-a11y-proof-guard.py", ["gtk-shell"]),
+    ("scripts/lib/tuna-a11y-hide-watch.py", ["gtk-shell"]),
     ("docs/walkthrough*", ["gtk-shell"]),
     ("scripts/tuna-journey", ["journey"]),
     ("scripts/tuna-release", ["journey"]),
