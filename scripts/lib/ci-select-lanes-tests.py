@@ -56,6 +56,10 @@ class Selection(unittest.TestCase):
         self.assertEqual(pr("docs/walkthrough.tsv"), ["gtk-shell"])
         self.assertEqual(pr("packaging/marlin/vm-lane/Containerfile"),
                          ["arch-package", "marlin-image", "marlin-vm"])
+        # G-OSK-* live in the OSK proof the gtk-shell job runs.
+        for path in ("scripts/tuna-osk-proof", "scripts/lib/tuna-osk-probe.py",
+                     "scripts/lib/tuna-osk-proof.py"):
+            self.assertEqual(pr(path), ["gtk-shell"], path)
         self.assertEqual(pr("docs/parity-ledger.md"),
                          ["journey", "drm-smoke", "gtk-shell", "orca-speech",
                           "arch-package", "marlin-vm", "parity-ledger"])

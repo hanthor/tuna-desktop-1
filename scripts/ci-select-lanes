@@ -91,6 +91,9 @@ OWNED = [
     ("scripts/tuna-scale-proof", ["gtk-shell"]),
     ("scripts/tuna-slow-portal-proof", ["gtk-shell"]),
     ("scripts/tuna-session-restore-proof", ["gtk-shell"]),
+    # G-OSK-* (the IBus source path included, #981) and their helpers.
+    ("scripts/tuna-osk-proof", ["gtk-shell"]),
+    ("scripts/lib/tuna-osk-pro*.py", ["gtk-shell"]),
     ("scripts/tuna-walkthrough", ["gtk-shell"]),
     # scripts/tests/* run by a lane job (#1108): a test edit must run the lane
     # that executes it, or it first runs after merge.

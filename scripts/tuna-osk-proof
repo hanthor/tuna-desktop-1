@@ -21,6 +21,12 @@
 #              lock screen's keyboard types the password into the unlock
 #              prompt alone (it unlocks through PAM, pam_wrapper) and no
 #              text reaches the session's entries
+#   G-OSK-IBUS  with the distro libpinyin engine current, OSK letters reach
+#              it as preedit with candidates and Space commits 你好; a key
+#              the engine declines reaches the client once as a raw key;
+#              back on the XKB engine the text commits natively
+#   G-OSK-IBUS-REPEAT a held OSK Backspace repeats through a real libpinyin
+#              composition without deleting committed text
 # Writes assertions.txt for the parity ledger.
 set -eu
 
@@ -39,7 +45,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --display) DISPLAY_ARG="$2"; shift 2 ;;
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
-        --help|-h) sed -n '2,24p' "$0"; exit 0 ;;
+        --help|-h) sed -n '2,30p' "$0"; exit 0 ;;
         *) echo "tuna-osk-proof: unknown argument $1" >&2; exit 1 ;;
     esac
 done
