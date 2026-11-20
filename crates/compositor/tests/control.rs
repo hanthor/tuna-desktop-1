@@ -643,6 +643,67 @@ fn hub_broadcasts_seat_touch_mode_changes_and_hands_newcomers_the_value() {
     assert_eq!(client_read(&mut old), Message::Overview { open: true });
 }
 
+/// Whether the lock screen is shown (the curtain landed) decides when the
+/// shell reports the screen saver active: the hub sends a change once,
+/// stays quiet while it holds, gives a newcomer the value while shown,
+/// and never sends it to a peer older than 0.51.
+#[test]
+fn hub_broadcasts_lock_screen_shown_and_hands_newcomers_the_value() {
+    let dir = private_tempdir();
+    let path = dir.path().join("control.sock");
+    let mut hub =
+        ControlHub::bind(path.clone(), std::rc::Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
+    let mut model = StateModel::new();
+    let mut client = hub_client(&path);
+    hub_handshake(&mut hub, &mut model, &mut client);
+
+    hub.set_lock_screen_shown(true);
+    hub.poll(&mut model);
+    assert_eq!(
+        client_read(&mut client),
+        Message::LockScreenShown { shown: true }
+    );
+    hub.set_lock_screen_shown(true);
+    hub.poll(&mut model);
+    client.set_nonblocking(true).unwrap();
+    let mut prefix = [0u8; 4];
+    match client.read_exact(&mut prefix) {
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        other => panic!("an unchanged lock screen must stay quiet, got {other:?}"),
+    }
+    client.set_nonblocking(false).unwrap();
+
+    let mut newcomer = hub_client(&path);
+    hub_handshake(&mut hub, &mut model, &mut newcomer);
+    assert_eq!(
+        client_read(&mut newcomer),
+        Message::LockScreenShown { shown: true }
+    );
+
+    hub.set_lock_screen_shown(false);
+    hub.poll(&mut model);
+    for client in [&mut client, &mut newcomer] {
+        assert_eq!(
+            client_read(client),
+            Message::LockScreenShown { shown: false }
+        );
+    }
+
+    let (conn, mut old) = pair();
+    client_write(
+        &mut old,
+        &Message::Hello {
+            version: ProtocolVersion::new(CURRENT_VERSION.major, 50),
+        },
+    );
+    let mut session = Session::handshake(conn, &StateModel::new()).unwrap();
+    assert!(matches!(client_read(&mut old), Message::Hello { .. }));
+    assert!(matches!(client_read(&mut old), Message::Snapshot { .. }));
+    session.send_lock_screen_shown(true).unwrap();
+    session.send_overview(true).unwrap();
+    assert_eq!(client_read(&mut old), Message::Overview { open: true });
+}
+
 /// Temp dir with owner-only permissions: the control socket refuses to
 /// bind anywhere less private (#30).
 fn private_tempdir() -> tempfile::TempDir {
@@ -683,7 +744,7 @@ fn screenshot_pointer_command_rejects_negative_local_coordinates() {
 
 #[test]
 fn native_owner_inventory_is_minor_gated_and_empty_revocation_is_real_wire() {
-    let owner = tuna_shell_control::NativeOutputInfo {
+    let owner = tuna_output::NativeOutputInfo {
         name: "eDP-1".into(),
         drm_device: libc::makedev(226, 0),
         connector_id: 39,
@@ -876,4 +937,147 @@ fn accelerator_release_and_typed_grabs_require_minor38() {
             assert_eq!(session.take_accelerators(), None);
         }
     }
+}
+
+/// The close dialog over a hung window (#1035): broadcast to live shells,
+/// replayed to a shell that (re)connects while it is shown, gone once
+/// hidden, and never sent to a peer older than 0.50.
+#[test]
+fn hub_replays_shown_close_dialogs_to_newcomers_and_gates_minor50() {
+    let show = Message::ShowCloseDialog {
+        window: 7,
+        app_id: Some("org.gnome.TextEditor".into()),
+        connector: None,
+        x: 0,
+        y: 32,
+        width: 800,
+        height: 600,
+    };
+    let hide = Message::HideCloseDialog { window: 7 };
+    let dir = private_tempdir();
+    let path = dir.path().join("control.sock");
+    let mut hub =
+        ControlHub::bind(path.clone(), std::rc::Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
+    let mut model = StateModel::new();
+    let mut client = hub_client(&path);
+    hub_handshake(&mut hub, &mut model, &mut client);
+    hub.queue_message(show.clone());
+    hub.poll(&mut model);
+    assert_eq!(client_read(&mut client), show);
+
+    let mut newcomer = hub_client(&path);
+    hub_handshake(&mut hub, &mut model, &mut newcomer);
+    assert_eq!(client_read(&mut newcomer), show);
+
+    hub.queue_message(hide.clone());
+    hub.poll(&mut model);
+    for client in [&mut client, &mut newcomer] {
+        assert_eq!(client_read(client), hide);
+    }
+    let mut late = hub_client(&path);
+    hub_handshake(&mut hub, &mut model, &mut late);
+    late.set_nonblocking(true).unwrap();
+    let mut prefix = [0u8; 4];
+    match late.read_exact(&mut prefix) {
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        other => panic!("a hidden dialog is not replayed, got {other:?}"),
+    }
+
+    let (conn, mut old) = pair();
+    client_write(
+        &mut old,
+        &Message::Hello {
+            version: ProtocolVersion::new(CURRENT_VERSION.major, 49),
+        },
+    );
+    let mut session = Session::handshake(conn, &StateModel::new()).unwrap();
+    assert!(matches!(client_read(&mut old), Message::Hello { .. }));
+    assert!(matches!(client_read(&mut old), Message::Snapshot { .. }));
+    session.send_window_menu(&show).unwrap();
+    session.send_window_menu(&hide).unwrap();
+    session.send_overview(true).unwrap();
+    assert_eq!(client_read(&mut old), Message::Overview { open: true });
+}
+
+/// Force Quit and Wait reach the window manager for a known window only.
+#[test]
+fn close_dialog_answers_reach_the_hub_outcome_for_known_windows() {
+    use tuna_shell_control::CloseDialogResponse;
+    let dir = private_tempdir();
+    let path = dir.path().join("control.sock");
+    let mut hub =
+        ControlHub::bind(path.clone(), std::rc::Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
+    let mut model = StateModel::new();
+    let window = model.insert("editor", Some("org.gnome.TextEditor"), 1);
+    let mut client = hub_client(&path);
+    hub_handshake(&mut hub, &mut model, &mut client);
+    for (id, target, response, applied) in [
+        (1, window, CloseDialogResponse::ForceClose, true),
+        (2, window + 1000, CloseDialogResponse::Wait, false),
+        (3, window, CloseDialogResponse::Wait, true),
+    ] {
+        client_write(
+            &mut client,
+            &Message::Command {
+                id,
+                kind: CommandKind::RespondCloseDialog {
+                    window: target,
+                    response,
+                },
+            },
+        );
+        let outcome = hub.poll(&mut model);
+        let expected = if applied {
+            vec![(target, response)]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(outcome.close_dialog_responses, expected);
+        let Message::CommandResult { id: reply, status } = client_read(&mut client) else {
+            panic!("expected command result");
+        };
+        assert_eq!(reply, id);
+        assert_eq!(matches!(status, CommandStatus::Applied), applied);
+    }
+}
+
+/// #503: a hub round reports whether anything arrived on its sockets, so
+/// the runtime's idle tick can tell a round that read something (which may
+/// change what is drawn) from one that only looked.
+#[test]
+fn hub_round_reports_whether_anything_arrived_on_its_sockets() {
+    let dir = private_tempdir();
+    let path = dir.path().join("control.sock");
+    let mut hub =
+        ControlHub::bind(path.clone(), std::rc::Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
+    let mut model = StateModel::new();
+    assert!(!hub.poll(&mut model).received, "nobody is connected");
+
+    let mut client = hub_client(&path);
+    assert!(hub.poll(&mut model).received, "a peer connected");
+    client_write(&mut client, &hello_current());
+    assert!(hub.poll(&mut model).received, "its handshake was due");
+    assert!(matches!(client_read(&mut client), Message::Hello { .. }));
+    assert!(matches!(client_read(&mut client), Message::Snapshot { .. }));
+    assert!(matches!(client_read(&mut client), Message::Overview { .. }));
+    for _ in 0..3 {
+        assert!(
+            !hub.poll(&mut model).received,
+            "a silent session is not an arrival"
+        );
+    }
+
+    client_write(
+        &mut client,
+        &Message::Command {
+            id: 1,
+            kind: CommandKind::ToggleOverview,
+        },
+    );
+    assert!(hub.poll(&mut model).received, "a command frame was read");
+    assert!(!hub.poll(&mut model).received, "and only once");
+
+    drop(client);
+    assert!(hub.poll(&mut model).received, "the hang-up was read");
+    assert!(!hub.poll(&mut model).received);
 }

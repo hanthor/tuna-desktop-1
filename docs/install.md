@@ -5,8 +5,8 @@
 > as a GDM session or from a TTY, and as a nested window otherwise. A hardware
 > session needs a seat from logind or seatd. Hardware support is new: it is
 > proven on the kernel's virtual KMS device in CI (`scripts/tuna-drm-smoke`)
-> and not yet qualified on real GPUs; the cursor is drawn in software and
-> client cursor images are not composited yet.
+> and not yet qualified on real GPUs. The compositor draws the cursor,
+> including client cursor images, into each frame; no KMS cursor plane is used.
 
 ## Test-drive in a VM (one command)
 
@@ -24,6 +24,8 @@ curl -fsSL https://raw.githubusercontent.com/tuna-os/tuna-desktop/main/scripts/t
 ```
 
 This downloads Corral (checksum-verified), pulls and cosign-verifies the published TunaOS image, and launches Tuna Desktop in local QEMU with a local-only browser console over noVNC. Stop anytime with Ctrl-C. See `scripts/try-tuna-desktop` for options (`TRY_TUNA_MEM`, `TRY_TUNA_PORT`, etc.).
+
+If it stops with `no signatures published for ...`, the pipeline published that build unsigned: the script checks signatures before the multi-GB download and refuses an image that cannot pass verification. Retry when a signed build publishes, or set `TRY_TUNA_IMAGE` to a signed build.
 
 ## From the Debian-format package
 
@@ -43,7 +45,11 @@ sudo apt install ./tuna-desktop_X.Y.Z_amd64.deb
 ```
 
 Dependencies resolve automatically on a target with the declared runtime
-packages available. After installing, the Tuna Desktop session is
+packages available: GTK at least 4.14, libadwaita, gtk4-layer-shell,
+libgweather 4.4 and `python3` for the shipped GeoClue agent-policy helper. Location services
+need `geoclue-2.0`, which the package recommends rather than requires;
+without it the session runs and hides the location indicator. After
+installing, the Tuna Desktop session is
 selectable from the login screen. Upgrading installs the newer package over
 the older one; the [legacy-upgrade guide](legacy-upgrade.md) explains the
 temporary two-file bridge, explicit session reselection, preserved settings
@@ -61,9 +67,9 @@ Install the complete package list in
 matching the CI `check` job). The compositor builds its DRM and PipeWire
 features by default, so it needs the libseat, libinput, libudev, GBM, libdrm,
 PipeWire, libclang and xkbcommon development packages
-(`crates/compositor/Cargo.toml`); the GTK shell and greeter need GTK 4,
-libadwaita and gtk4-layer-shell (`crates/shell-gtk/Cargo.toml`,
-`crates/greeter/Cargo.toml`). Where the distribution has no gtk4-layer-shell
+(`crates/compositor/Cargo.toml`); the GTK shell needs GTK 4, libadwaita,
+gtk4-layer-shell and, for the date menu's world clocks and weather,
+libgweather 4 (`crates/shell-gtk/Cargo.toml`). Where the distribution has no gtk4-layer-shell
 package, `scripts/ci-install-gtk4-layer-shell` builds it. At run time the
 nested backend additionally dlopens the EGL/Mesa display libraries
 (`libegl1`, `libgl1-mesa-dri`, `libgbm1` on Ubuntu).
@@ -103,14 +109,20 @@ on the login screen. The entry's `Exec=` line is `tuna-session`, never the
 compositor directly, so shell supervision stays in the loop, and
 `X-GDM-SessionRegisters=true` tells GDM the session registers itself.
 
-The lock screen authenticates through the `tuna-lock` PAM service. The
-packages install it; a source install needs it too, or PAM falls back to the
-`other` service (deny on most distributions) and a locked session cannot be
-unlocked:
+The lock screen authenticates through the `tuna-lock` PAM service, and
+fingerprint unlock through `tuna-lock-fingerprint` (`pam_fprintd` plus your
+`login` account stack, like GDM's `gdm-fingerprint`). The packages install
+both; a source install needs them too. Without `tuna-lock`, PAM falls back to
+the `other` service (deny on most distributions) and a locked session cannot
+be unlocked; without `tuna-lock-fingerprint`, only fingerprint unlock fails:
 
 ```sh
 install -Dm0644 share/pam.d/tuna-lock /etc/pam.d/tuna-lock
+install -Dm0644 share/pam.d/tuna-lock-fingerprint /etc/pam.d/tuna-lock-fingerprint
 ```
+
+Fingerprint unlock also needs `pam_fprintd.so`: the `libpam-fprintd`
+package on Debian and Ubuntu, `fprintd` on Arch.
 
 ## When something goes wrong
 

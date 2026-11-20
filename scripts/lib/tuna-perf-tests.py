@@ -380,7 +380,7 @@ class KernelBuildEvidence(unittest.TestCase):
                            capture_writers_after_stop=[], guest_kernel_provenance=kernel)
                 with patch.object(host, "guest_probe", side_effect=chunk):
                     with self.assertRaisesRegex(ValueError, "kernel provenance"):
-                        host.retain_gnome_trace(None, out, row)
+                        host.retain_gnome_trace(None, out, row, "diagnostic")
                 self.assertEqual((out / "gnome-overview.syscap").read_bytes(), raw)
                 self.assertEqual(json.loads((out / "gnome-overview-source.json").read_text()), row)
                 self.assertTrue((out / "gnome-overview-marks.json").is_file())
@@ -407,7 +407,7 @@ class CaptureClosure(unittest.TestCase):
                 if writers is not None:
                     row["capture_writers_after_stop"] = writers
                 with self.subTest(writers=writers), self.assertRaisesRegex(ValueError, "writer did not close"):
-                    host.retain_gnome_trace(None, out, row)
+                    host.retain_gnome_trace(None, out, row, "diagnostic")
                 self.assertEqual((out / "gnome-overview.syscap").read_bytes(), raw)
                 self.assertTrue((out / "gnome-overview-marks.json").exists())
                 self.assertFalse((out / "gnome-overview-frame-ownership.json").exists())
@@ -415,7 +415,7 @@ class CaptureClosure(unittest.TestCase):
             # its writer passes the fence but cannot bypass semantic checks.
             with self.assertRaisesRegex(ValueError, "lacks actual event"):
                 host.retain_gnome_trace(None, out,
-                        dict(metadata, capture_writers_after_stop=[]))
+                        dict(metadata, capture_writers_after_stop=[]), "diagnostic")
 
 
 class DiagnosticSourceEvidence(unittest.TestCase):
@@ -489,7 +489,7 @@ class RejectedPresentationCapture(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory, patch.object(host, "guest_probe", chunk):
             out = Path(directory)
-            host.retain_gnome_trace(None, out, metadata)
+            host.retain_gnome_trace(None, out, metadata, "diagnostic")
             self.assertEqual((out / "gnome-overview.syscap").read_bytes(), raw)
             self.assertEqual(json.loads((out / "gnome-overview-source.json").read_text()), metadata)
             self.assertTrue((out / "gnome-overview-marks.json").exists())
@@ -859,6 +859,42 @@ class Accounting(unittest.TestCase):
                 with self.subTest(maximum=maximum, token=token[:20]):
                     self.assertEqual(guest.diagnostic_counter([token], 0, maximum), expected)
             self.assertIsNone(guest.diagnostic_counter([], 0, maximum))
+
+    def test_a_gnome_sized_sample_fits_the_hosts_observer_record_bound(self):
+        # Stock GNOME runs ~90 session processes; with the PSS breakdown its
+        # records reached 33149 bytes and the host refused every stock pair
+        # (run 43449826443). 100 processes with wide values and the record's
+        # other fields (1 KiB) must still fit.
+        import perf_budget
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index in range(100):
+                path = self.process(root, 100000 + index, 99999, 1000, 0, 1234567 + index)
+                (path / 'smaps_rollup').write_text(
+                    'Rss: 412345 kB\nPss: 312345 kB\nPss_Anon: 212345 kB\nPss_File: 99999 kB\n'
+                    'Pss_Shmem: 12345 kB\nPrivate_Dirty: 212345 kB\n')
+                (path / 'cmdline').write_bytes(b'/usr/libexec/gsd-screensaver-proxy\0')
+            result = guest.sample(1000, root)
+            self.assertEqual(result['process_count'], 100)
+            size = len(json.dumps(result, separators=(',', ':')))
+            self.assertLessEqual(size + 1024, perf_budget.OBSERVER_RECORD_BYTES)
+
+    def test_a_process_row_carries_the_kernels_pss_breakdown_when_it_gives_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            split = self.process(root, 1, 0, 1000, 60, 55)
+            (split / 'smaps_rollup').write_text(
+                'Rss: 90 kB\nPss: 60 kB\nPss_Dirty: 31 kB\nPss_Anon: 30 kB\nPss_File: 20 kB\n'
+                'Pss_Shmem: 10 kB\nPrivate_Dirty: 28 kB\n')
+            self.process(root, 2, 0, 1000, 10, 56)  # an older kernel: Pss and Rss only
+            result = guest.sample(1000, root)
+            rows = {row['pid']: row for row in result['processes']}
+            self.assertEqual({key: rows[1][key] for key in ('pss_kib', 'rss_kib', 'pss_anon_kib', 'pss_file_kib',
+                                                           'pss_shmem_kib', 'private_dirty_kib')},
+                             dict(pss_kib=60, rss_kib=90, pss_anon_kib=30, pss_file_kib=20,
+                                  pss_shmem_kib=10, private_dirty_kib=28))
+            self.assertFalse({'pss_anon_kib', 'pss_file_kib', 'pss_shmem_kib', 'private_dirty_kib'} & rows[2].keys())
+            self.assertEqual((result['pss_kib'], result['unreadable']), (70, []))
 
     def test_failure_metadata_capture_does_not_change_accounting(self):
         for flags, threads in (('4194308', '3'), ('private', '-1')):

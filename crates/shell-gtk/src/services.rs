@@ -242,6 +242,67 @@ pub fn watch_name(conn: &gio::DBusConnection, name: &str, f: impl Fn(bool) + 'st
     );
 }
 
+/// Where [`bus_watch_name`] watches: a bus GLib connects to, or a
+/// connection the caller made.
+pub enum WatchBus<'a> {
+    Type(gio::BusType),
+    Connection(&'a gio::DBusConnection),
+}
+
+/// A `g_bus_watch_name` watch. Dropping it keeps watching; only
+/// [`NameWatch::unwatch`] stops.
+pub struct NameWatch(u32);
+
+impl NameWatch {
+    pub fn unwatch(self) {
+        unsafe { gio::ffi::g_bus_unwatch_name(self.0) }
+    }
+}
+
+/// `g_bus_watch_name`: `appeared` when `name` gains an owner, `vanished`
+/// when it has none. GLib calls the vanished handler with a NULL
+/// connection once the bus connection closes (session end) or could not
+/// be made, which `gio::bus_watch_name` unwraps and panics on; these
+/// handlers take no connection.
+pub fn bus_watch_name(
+    bus: WatchBus,
+    name: &str,
+    flags: gio::BusNameWatcherFlags,
+    appeared: impl Fn() + 'static,
+    vanished: impl Fn() + 'static,
+) -> NameWatch {
+    use glib::translate::{IntoGlib, ToGlibPtr};
+    let appeared = glib::Closure::new_local(move |_| {
+        appeared();
+        None
+    });
+    let vanished = glib::Closure::new_local(move |_| {
+        vanished();
+        None
+    });
+    let id = unsafe {
+        match bus {
+            WatchBus::Type(bus_type) => gio::ffi::g_bus_watch_name_with_closures(
+                bus_type.into_glib(),
+                name.to_glib_none().0,
+                flags.into_glib(),
+                appeared.to_glib_none().0,
+                vanished.to_glib_none().0,
+            ),
+            WatchBus::Connection(connection) => {
+                gio::ffi::g_bus_watch_name_on_connection_with_closures(
+                    connection.to_glib_none().0,
+                    name.to_glib_none().0,
+                    flags.into_glib(),
+                    appeared.to_glib_none().0,
+                    vanished.to_glib_none().0,
+                )
+            }
+        }
+    };
+    NameWatch(id)
+}
+
 fn dict_bool(d: &glib::VariantDict, key: &str) -> Option<bool> {
     d.lookup_value(key, None).and_then(|v| v.get::<bool>())
 }
@@ -863,6 +924,8 @@ struct AudioUi {
     syncing: Cell<bool>,
     process: RefCell<Option<gio::Subprocess>>,
     stopping: Cell<bool>,
+    /// Waits for PipeWire's socket after pw-dump found none.
+    socket_watch: RefCell<Option<gio::FileMonitor>>,
     sound: Option<gio::Settings>,
     privacy: Option<gio::Settings>,
     enforcer: RefCell<crate::privacy::Tracker>,
@@ -870,6 +933,67 @@ struct AudioUi {
     last_unclassified_video_sources: RefCell<Vec<u64>>,
     queue: RefCell<crate::privacy::ActionQueue>,
     drain_pending: Cell<bool>,
+}
+
+/// Where pw-dump finds PipeWire, as libpipewire resolves it:
+/// `PIPEWIRE_REMOTE` (a name, or an absolute path), else `pipewire-0`, in
+/// `PIPEWIRE_RUNTIME_DIR`, else `XDG_RUNTIME_DIR`. `None` without a
+/// directory.
+fn pipewire_socket(var: impl Fn(&str) -> Option<String>) -> Option<std::path::PathBuf> {
+    let set = |key: &str| var(key).filter(|value| !value.is_empty());
+    let remote = std::path::PathBuf::from(set("PIPEWIRE_REMOTE").unwrap_or("pipewire-0".into()));
+    if remote.is_absolute() {
+        return Some(remote);
+    }
+    let dir = set("PIPEWIRE_RUNTIME_DIR").or_else(|| set("XDG_RUNTIME_DIR"))?;
+    Some(std::path::PathBuf::from(dir).join(remote))
+}
+
+/// Run `appeared` once when `path` is created (or moved or renamed into
+/// place) in its directory, from the inotify watch GLib's directory
+/// monitor places, on the thread-default context; at once (on that
+/// context) when it exists by the time the watch is in place. `None` when
+/// the directory cannot be watched.
+fn when_created(
+    path: &std::path::Path,
+    appeared: impl FnOnce() + 'static,
+) -> Option<gio::FileMonitor> {
+    let name = path.file_name()?.to_owned();
+    let monitor = gio::File::for_path(path.parent()?)
+        .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
+        .ok()?;
+    let appeared = Rc::new(RefCell::new(Some(appeared)));
+    let fire = {
+        let appeared = appeared.clone();
+        move |monitor: &gio::FileMonitor| {
+            monitor.cancel();
+            let appeared = appeared.borrow_mut().take();
+            if let Some(appeared) = appeared {
+                appeared();
+            }
+        }
+    };
+    let named = move |file: Option<&gio::File>| {
+        file.and_then(|file| file.basename())
+            .is_some_and(|base| base.as_os_str() == name.as_os_str())
+    };
+    let on_event = fire.clone();
+    monitor.connect_changed(move |monitor, file, other, event| {
+        let landed = match event {
+            gio::FileMonitorEvent::Created | gio::FileMonitorEvent::MovedIn => named(Some(file)),
+            gio::FileMonitorEvent::Renamed => named(other),
+            _ => false,
+        };
+        if landed {
+            on_event(monitor);
+        }
+    });
+    // Created between the caller's look and the watch.
+    if path.exists() {
+        let monitor = monitor.clone();
+        glib::MainContext::ref_thread_default().spawn_local(async move { fire(&monitor) });
+    }
+    Some(monitor)
 }
 
 /// Dispatch budget per enforcement tick. Graphs are small; on a
@@ -1144,6 +1268,26 @@ impl AudioUi {
         if self.stopping.get() {
             return;
         }
+        // Without PipeWire's socket a new pw-dump only fails again: start it
+        // when the socket appears, through one inotify watch on its
+        // directory, instead of every 2 s (#503). A socket that exists (a
+        // pw-dump that failed for another reason) or a directory that
+        // cannot be watched keeps the 2 s retry.
+        if let Some(socket) = pipewire_socket(|key| std::env::var(key).ok()) {
+            if !socket.exists() {
+                let weak = Rc::downgrade(self);
+                let watch = when_created(&socket, move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.socket_watch.take();
+                        ui.start();
+                    }
+                });
+                if watch.is_some() {
+                    *self.socket_watch.borrow_mut() = watch;
+                    return;
+                }
+            }
+        }
         let weak = Rc::downgrade(self);
         glib::timeout_add_seconds_local_once(2, move || {
             if let Some(ui) = weak.upgrade() {
@@ -1263,6 +1407,7 @@ fn audio(w: &Rc<Widgets>) {
         syncing: Cell::new(false),
         process: RefCell::new(None),
         stopping: Cell::new(false),
+        socket_watch: RefCell::new(None),
         sound: crate::media_keys::sound_settings(),
         privacy: privacy_settings(),
         enforcer: RefCell::default(),
@@ -1531,5 +1676,167 @@ mod battery_tests {
             battery_summary(82, 1, 1800),
             "82% · Charging · 0∶30 until full"
         );
+    }
+}
+
+#[cfg(test)]
+mod pipewire_socket_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_socket_resolves_as_libpipewire_does() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        assert_eq!(
+            pipewire_socket(env(&[("XDG_RUNTIME_DIR", "/run/user/7")])),
+            Some("/run/user/7/pipewire-0".into())
+        );
+        assert_eq!(
+            pipewire_socket(env(&[
+                ("XDG_RUNTIME_DIR", "/run/user/7"),
+                ("PIPEWIRE_RUNTIME_DIR", "/pw"),
+                ("PIPEWIRE_REMOTE", "pipewire-1"),
+            ])),
+            Some("/pw/pipewire-1".into())
+        );
+        assert_eq!(
+            pipewire_socket(env(&[("PIPEWIRE_REMOTE", "/elsewhere/pw")])),
+            Some("/elsewhere/pw".into())
+        );
+        assert_eq!(pipewire_socket(env(&[])), None);
+    }
+
+    /// Iterate the thread-default context until `done` or `limit`.
+    fn run_until(context: &glib::MainContext, limit: Duration, done: &dyn Fn() -> bool) {
+        let deadline = Instant::now() + limit;
+        while !done() && Instant::now() < deadline {
+            if !context.iteration(false) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+
+    /// #503: pw-dump restarts when PipeWire's socket is created, from the
+    /// directory watch, instead of every 2 s while there is none.
+    #[test]
+    fn a_created_socket_restarts_at_once_and_nothing_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("pipewire-0");
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let fired = Rc::new(Cell::new(0));
+                let count = fired.clone();
+                let _watch = when_created(&socket, move || count.set(count.get() + 1))
+                    .expect("a temporary directory can be watched");
+                std::fs::write(dir.path().join("pipewire-0.lock"), b"").unwrap();
+                run_until(&context, Duration::from_millis(300), &|| fired.get() > 0);
+                assert_eq!(fired.get(), 0, "another name is not the socket");
+
+                let created = Instant::now();
+                std::os::unix::net::UnixListener::bind(&socket).unwrap();
+                run_until(&context, Duration::from_secs(5), &|| fired.get() > 0);
+                assert_eq!(fired.get(), 1, "the socket's creation restarts pw-dump");
+                assert!(
+                    created.elapsed() < Duration::from_secs(1),
+                    "well before the former 2 s retry: {:?}",
+                    created.elapsed()
+                );
+                std::fs::remove_file(&socket).unwrap();
+                std::os::unix::net::UnixListener::bind(&socket).unwrap();
+                run_until(&context, Duration::from_millis(300), &|| fired.get() > 1);
+                assert_eq!(fired.get(), 1, "one restart per watch");
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_socket_that_is_already_there_restarts_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("pipewire-0");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let fired = Rc::new(Cell::new(false));
+                let set = fired.clone();
+                let _watch = when_created(&socket, move || set.set(true)).unwrap();
+                run_until(&context, Duration::from_secs(5), &|| fired.get());
+                assert!(fired.get());
+            })
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod bus_watch_tests {
+    use super::*;
+    use std::io::BufRead;
+    use std::time::{Duration, Instant};
+
+    /// Iterate the thread-default context until `done` or `limit`.
+    fn run_until(context: &glib::MainContext, limit: Duration, done: &dyn Fn() -> bool) {
+        let deadline = Instant::now() + limit;
+        while !done() && Instant::now() < deadline {
+            if !context.iteration(false) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+
+    /// Session end: the bus goes away under a watch, and GLib reports the
+    /// name vanished with a NULL connection. gio's own watcher panicked
+    /// there (`tuna-privacy-portal` at logout, the lifecycle lane's
+    /// V-NOPANIC); this one reports it.
+    #[test]
+    fn a_closed_bus_reports_the_name_vanished() {
+        let mut daemon = std::process::Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("the test needs dbus-daemon");
+        let mut address = String::new();
+        std::io::BufReader::new(daemon.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let connection = gio::DBusConnection::for_address_sync(
+                    address.trim(),
+                    gio::DBusConnectionFlags::AUTHENTICATION_CLIENT
+                        | gio::DBusConnectionFlags::MESSAGE_BUS_CONNECTION,
+                    None,
+                    None::<&gio::Cancellable>,
+                )
+                .unwrap();
+                let (appeared, vanished) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+                let watch = {
+                    let (appeared, vanished) = (appeared.clone(), vanished.clone());
+                    bus_watch_name(
+                        WatchBus::Connection(&connection),
+                        "org.freedesktop.DBus",
+                        gio::BusNameWatcherFlags::NONE,
+                        move || appeared.set(appeared.get() + 1),
+                        move || vanished.set(vanished.get() + 1),
+                    )
+                };
+                run_until(&context, Duration::from_secs(5), &|| appeared.get() > 0);
+                assert_eq!((appeared.get(), vanished.get()), (1, 0));
+
+                daemon.kill().unwrap();
+                daemon.wait().unwrap();
+                run_until(&context, Duration::from_secs(5), &|| vanished.get() > 0);
+                assert_eq!((appeared.get(), vanished.get()), (1, 1));
+                watch.unwatch();
+            })
+            .unwrap();
     }
 }

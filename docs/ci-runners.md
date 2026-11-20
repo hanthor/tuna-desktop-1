@@ -35,7 +35,7 @@ schedule, dispatch or a pull request whose head repository is
 
 | Runner | Lanes |
 | --- | --- |
-| `tuna-ci-24.04` | select-lanes, check, fprint-phase-proof, app-content, scroll-proof, grid-cancel-comparison, gtk-shell, native-reference-context, parity-ledger, docs-shots, ci-gate |
+| `tuna-ci-24.04` | select-lanes, check, app-content, scroll-proof, grid-cancel-comparison, gtk-shell, native-reference-context, parity-ledger, docs-shots, ci-gate |
 | `tuna-ci-26.04` | journey, orca-speech, portal-security, remote-security, niri-parity |
 | GitHub-hosted, always | arch-package, drm-smoke, marlin-vm (pull requests: the primary lifecycle leg only; push, schedule and dispatch add the Orca 51 leg and both paired reference members), marlin-image (push, schedule and dispatch only), gdm51-native-package |
 
@@ -94,6 +94,18 @@ dumps are disabled for this dependency fixture. This toolkit regression proof
 is not product acceptance: the old-negative/fixed-positive Escape comparison
 and all selected exact-head lanes must still pass.
 
+The old role is the pinned pre-#674 source, whose page hint widens while its
+preview icons slide in. A pointer parked by a motion that lands in that slide
+is counted as dwelling on the next-page hint, and the page turns a second
+later (main run
+[`43259379979`](https://github.com/tuna-os/tuna-desktop/actions/runs/43259379979):
+`actual carousel page changed before Escape`). In that role only, the harness
+delivers one more real motion inside the admitted neutral gap after the slide,
+so the old pager tests its settled hint; the fixed role and the `gtk-shell`
+gate keep the pointer parked, and every later check is the same for both.
+A role that fails prints the end of its `output-<role>.txt`, including the
+proof's `FAIL` line, in the job log.
+
 ## Keep required checks on the workflow's tested source
 
 The `check` job uses `actions/checkout`'s default PR merge ref, like the
@@ -105,7 +117,7 @@ but the explicit older head checkout lacked it, so `check` stopped with
 `[Errno 2] No such file or directory`. Checking out the merge ref preserves
 the real predicate suite instead of adding a placeholder or making it
 optional. The check job exports its actual checked commit as `tested_sha`;
-the authentication, fingerprint and grid comparison proofs check out that
+the authentication and grid comparison proofs check out that
 exact output. Their admission receipts bind it to the checkout and commit
 tree separately from the API's triggering `head_sha` (the PR head, not its
 merge tree). Lane selection remains head-only because it computes the PR
@@ -289,10 +301,13 @@ code as root inside its pod.
    address), the kubelet, other namespaces' pods and Services (corral-web,
    punjab, KubeVirt) and link-local metadata are unreachable.
 5. **Headroom.** ResourceQuota `runner-ceiling` caps the namespace at 14 pods,
-   56 CPU / 196 GiB limits, 28 CPU / 82 GiB requests: up to 14 runners
-   run at once (karnataka: 28 CPU / 125 GiB allocatable; punjab is sized at
-   12 cores / 24 GiB). Each runner asks for
-   1.5 CPU / 5 GiB and is limited to 4 CPU / 14 GiB. The 45 GiB
+   56 CPU / 276 GiB limits, 28 CPU / 82 GiB requests (karnataka: 28 CPU /
+   125 GiB allocatable; punjab is sized at 12 cores / 24 GiB). Each runner
+   asks for 1.5 CPU / 5 GiB and is limited to 4 CPU / 24 GiB (shellcheck on
+   `scripts/tuna-gtk-shell-proof` peaks near 14 GiB). The limit quota fits
+   every configured runner at its own limit: 8 tuna-desktop runners at 24 GiB
+   and 3 iso-gpu runners at 28 GiB; when it does not, ARC logs "exceeded
+   quota", creates no pod, and jobs queue behind idle slots. The 45 GiB
    ephemeral-storage limit covers the container writable layer/logs, **not**
    the separate scratch PVCs (see below). Runner pods use PriorityClass
    `tuna-ci-runner` (-100, never preempts): new VMs and cluster services
@@ -532,9 +547,9 @@ for ubuntu in 24.04 26.04; do
     ssh karnataka "sudo k3s ctr -n k8s.io run --rm '$ref' \
       'tuna-runner-smoke-${ubuntu//./-}' /bin/sh -ec '
         pkg-config --exists libseat libinput libudev gbm libdrm xkbcommon \
-          wayland-client gtk4 libadwaita-1 libpipewire-0.3
+          wayland-client gtk4 libadwaita-1 gweather4 libpipewire-0.3
         dpkg-query -W libpam0g-dev libpam-wrapper libgtk-4-dev \
-          libadwaita-1-dev libglib2.0-dev meson xwayland
+          libadwaita-1-dev libgweather-4-dev libglib2.0-dev meson xwayland
         test -x /opt/tuna-ci/job-started.sh
         if [ \"$ubuntu\" = 26.04 ]; then
           pkg-config --atleast-version=1.1 gtk4-layer-shell-0

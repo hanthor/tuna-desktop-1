@@ -16,6 +16,11 @@ before decoding.
   `ProtocolVersion::CURRENT` in `src/lib.rs`, whose doc comment lists every
   minor; the wire-change rules are in the
   [API stability policy](../../docs/api-stability.md#shell-control-protocol-tuna-shell-control).
+- Workspace swipe progress (0.48): `Message::WorkspaceProgress { position,
+  duration_us }` (peers >=48 only) carries a finger-following workspace
+  swipe's position in `WORKSPACE_PROGRESS_SCALE`ths of a workspace on begin,
+  each update and release (with the settle duration), so the shell's
+  Activities dots follow the fingers as GNOME 51's do.
 - Display-change confirmation (0.42): `Message::ConfirmDisplayChange
   { timeout_secs }` (sent only to peers advertising minor >=42) asks the shell
   for GNOME's "Keep these display settings?" dialog; the shell answers with
@@ -33,11 +38,34 @@ before decoding.
 - Dash targets: `WindowIconGeometry`, `MAX_WINDOW_ICON_GEOMETRIES`, and
   appended `CommandKind::SetWindowIconGeometries` full replacements. Unknown
   windows are ignored by the compositor; an empty list selects monitor fallback.
+- Overview swipe (0.49): `Message::OverviewSwipe { state, settle_us }`
+  (peers >=49 only) carries GNOME's overview controls state while a
+  touchpad swipe holds it (`settle_us: None`) and where and how fast its
+  release settles, in `OVERVIEW_STATE_SCALE`ths up to `MAX_OVERVIEW_STATE`
+  (the app grid); the shell's app grid follows it above the window picker.
+- Close dialog (0.50): `Message::ShowCloseDialog { window, app_id,
+  connector, x, y, width, height }` (peers >=50 only) asks for gnome-shell's
+  "“%s” Is Not Responding" dialog over a window that missed mutter's
+  `check-alive-timeout`, resent as the window moves; `HideCloseDialog
+  { window }` dismisses it (a late pong, the window gone or hidden, the
+  lock). The shell answers `CommandKind::RespondCloseDialog { window,
+  response }` with `CloseDialogResponse::ForceClose` or `Wait`. Texts are
+  bounded by `MAX_TITLE_LEN`, sides by `MAX_CLOSE_DIALOG_SIDE`.
+- Lock screen shown (0.51): `Message::LockScreenShown { shown }` (peers
+  >=51 only) says the session is locked and the lock curtain has landed
+  (screenShield.js `_lockScreenShown`); `false` once it unlocks. The shell
+  reports `org.gnome.ScreenSaver` active only while it is shown, because
+  gnome-settings-daemon blanks the screen on `ActiveChanged(true)`.
+- Shell bus identity (0.52): `CommandKind::DeclareBusName { unique_name }`
+  (peers >=52 only) names the shell's session-bus connection. The
+  compositor admits D-Bus capture and Introspect calls as the shell only
+  from names the supervised shell's pidfd-pinned control session declared,
+  and denies the command from any other session (ADR 0010).
 - Messages: `Message`, `StateOp`, `CommandKind`, `CommandStatus`,
   `ErrorKind`.
 - State types: `WindowInfo`, `WorkspaceInfo`, `OutputInfo`, `PreviewInfo`,
-  `NativeOutputInfo`, `InputSettings`, `WindowId`, `WorkspaceId`,
-  `dynamic_workspace_count`.
+  `NativeOutputInfo` (re-exported from `tuna-output`), `InputSettings`,
+  `WindowId`, `WorkspaceId`, `dynamic_workspace_count`.
 - Pointer devices: `InputSettings::mouse_accel_profile` plus the appended
   `touchpad`, `mouse`, `trackball` and `pointing_stick` groups
   (`TouchpadSettings`, `MouseSettings`, `TrackballSettings`,

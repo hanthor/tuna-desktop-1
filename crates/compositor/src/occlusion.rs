@@ -142,12 +142,16 @@ impl Occlusion {
 }
 
 /// Draw one planned pass bottom to top. Each element gets only its
-/// visible damage.
+/// visible damage. With `opaque`, what an element drawn pixel for pixel
+/// declares opaque is drawn without blending, as Mutter draws opaque
+/// regions: on llvmpipe a blended pixel also reads the one beneath it
+/// (#503).
 pub(crate) fn draw_planned<R, E>(
     frame: &mut R::Frame<'_, '_>,
     scale: f64,
     elements: &[E],
     plan: &[Vec<PhysicalRect>],
+    opaque: bool,
 ) -> Result<(), R::Error>
 where
     R: Renderer,
@@ -166,9 +170,20 @@ where
                 r
             })
             .collect();
-        // No opaque regions: GLES would draw them with blending off, and
-        // on the nested (flipped) target that blanked the wrong pixels.
-        element.draw(frame, element.src(), geometry, &damage, &[])?;
+        // Only on a target without a transform: on the nested (flipped)
+        // target GLES left the opaque regions in the wrong place. And only
+        // for an element drawn pixel for pixel from its buffer: a scaled
+        // one (an overview preview, a window opening) rounds its opaque
+        // region out over edge pixels it covers only in part.
+        let src = element.src().size;
+        let one_to_one = (src.w - f64::from(geometry.size.w)).abs() < 0.5
+            && (src.h - f64::from(geometry.size.h)).abs() < 0.5;
+        let opaque_regions = if opaque && one_to_one {
+            element.opaque_regions(scale.into())
+        } else {
+            Default::default()
+        };
+        element.draw(frame, element.src(), geometry, &damage, &opaque_regions)?;
     }
     Ok(())
 }
@@ -191,6 +206,9 @@ pub(crate) struct FrameCost {
     pub culled: usize,
     pub damage_rects: usize,
     pub damage_area: i64,
+    /// The box around this frame's damage, in output pixels before any
+    /// rotation: what the frame repainted lies inside it (#1154).
+    pub damage_bounds: Option<PhysicalRect>,
     pub output_area: i64,
     /// Windows with at least one element showing on the output, whether
     /// or not this frame's damage repainted them.
@@ -230,6 +248,7 @@ impl FrameCost {
             culled: drawn.culled,
             damage_rects: damage.len(),
             damage_area: area(damage),
+            damage_bounds: damage.iter().copied().reduce(Rectangle::merge),
             output_area: i64::from(output.w.max(0)) * i64::from(output.h.max(0)),
             drawn_windows,
             culled_windows,
@@ -242,6 +261,7 @@ impl FrameCost {
             "culled": self.culled,
             "damage_rects": self.damage_rects,
             "damage_area": self.damage_area,
+            "damage_bounds": self.damage_bounds.map(|r| [r.loc.x, r.loc.y, r.size.w, r.size.h]),
             "output_area": self.output_area,
             "drawn_windows": self.drawn_windows,
             "culled_windows": self.culled_windows,
@@ -252,7 +272,8 @@ impl FrameCost {
 /// How often a hidden window's surfaces get frame callbacks (#503).
 /// Mutter sends an obscured surface none until it shows again; a slow
 /// beat instead keeps clients that wait on a callback before acting on
-/// anything (a configure's commit, a hidden video's position) live.
+/// anything (a configure's commit, a hidden video's position) live,
+/// until they are told they are suspended (`crate::suspend`).
 pub(crate) const HIDDEN_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(995);
 
 /// Windows something on screen shows: drawn on some output, or in the
@@ -464,6 +485,23 @@ mod tests {
         let json = cost.to_json();
         assert_eq!(json["culled"], 3);
         assert_eq!(json["culled_windows"], serde_json::json!([5]));
+    }
+
+    #[test]
+    fn frame_cost_bounds_the_damage_it_repainted() {
+        let drawn = Drawn::default();
+        // The bar clock's tick and a pointer move: two small rectangles,
+        // published with the box around them (#1154).
+        let damage = [rect(594, 10, 94, 11), rect(637, 399, 24, 24)];
+        let cost = FrameCost::new(&drawn, &[], &damage, OUTPUT.into());
+        assert_eq!(cost.damage_area, 94 * 11 + 24 * 24);
+        assert_eq!(cost.damage_bounds, Some(rect(594, 10, 94, 413)));
+        assert_eq!(
+            cost.to_json()["damage_bounds"],
+            serde_json::json!([594, 10, 94, 413])
+        );
+        let idle = FrameCost::new(&drawn, &[], &[], OUTPUT.into());
+        assert_eq!(idle.to_json()["damage_bounds"], serde_json::Value::Null);
     }
 
     #[test]

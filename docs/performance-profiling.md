@@ -13,14 +13,16 @@ scripts are authoritative.
 ## What "faster" means here
 
 The v1 target is to match or beat GNOME 51 on CPU, frame pacing and overview
-response on the same Marlin VM ([#503](https://github.com/tuna-os/tuna-desktop/issues/503),
-[roadmap](roadmap.md)). Only a paired run counts toward that target: the
-performance-baseline workflow measures GNOME 51 and Tuna Desktop on the same
-runner, image and VM profile. Local numbers are useful for finding hotspots
+response, and to use no more memory, on the same Marlin VM
+([#503](https://github.com/tuna-os/tuna-desktop/issues/503),
+[roadmap](roadmap.md), [v1 checklist](v1.md)). Only a paired run counts
+toward that target: the performance-baseline workflow measures GNOME 51 and
+Tuna Desktop on the same runner, image and VM profile. Local numbers are
+useful for finding hotspots
 and checking a fix. They are not parity evidence, because the hardware, GL
 driver and workload differ.
 
-The gated metrics (`scripts/tuna-perf-gate`, budgets in
+The gate's metrics (`scripts/tuna-perf-gate`, budgets in
 [docs/perf/budgets.json](perf/budgets.json)) are:
 
 - `cpu.<phase>.<role>.<stat>`: CPU in percent of one core, per workload phase
@@ -29,11 +31,25 @@ The gated metrics (`scripts/tuna-perf-gate`, budgets in
   frame-pacer probe.
 - `overview.response_ms.<stat>`: QMP-observed overview response (an upper
   bound, not input-to-frame tracing).
+- `pss.<scope>.<role>.<stat>`: memory as PSS in MiB, per workload phase or
+  for the `whole` run, and per process role. These are reported but **not
+  enforced yet**; see [Memory in the gate](#memory-in-the-gate).
 
 The phases and roles are listed in the
 [perf README's regression gate section](perf/README.md#regression-gate-315).
-Memory (PSS/RSS) is sampled but not yet budgeted. #315 tracks memory and
-growth budgets.
+Growth (soak) budgets are tracked in #315.
+
+`scripts/tuna-shell-memory-profile --display :5N --artifacts DIR` replays the
+gate's workload in a nested session with real X input and records, for the
+shell and the compositor after every phase, `Pss`, `Pss_Anon`, `Pss_File`,
+`Pss_Shmem`, `Private_Dirty` and `AnonHugePages` plus heap, arena and anonymous
+totals from `smaps` (`--summarize DIR --against DIR` compares two runs). Read
+`Pss_Anon` and `Pss_Shmem`: `Pss_File` moves with whatever else on the host
+maps the same libraries. `--thp collapsed` gives the session transparent huge
+pages as `transparent_hugepage/enabled=always` does on the perf image (most
+development hosts keep `madvise`), which is where a sparse heap shows as
+resident memory; `--trim` reports how much of the shell's heap is freed but
+retained.
 
 ## Local CPU profiling
 
@@ -127,13 +143,16 @@ drawn frame (`FrameCost` in `crates/compositor/src/occlusion.rs`):
 | `rendered` | Scene elements repainted in that frame |
 | `culled` | Elements skipped because they are wholly under opaque elements |
 | `damage_rects`, `damage_area` | Number and total area (physical pixels) of damaged rectangles |
+| `damage_bounds` | `[x, y, w, h]` box around the damaged rectangles (output pixels, before rotation), or `null` |
 | `output_area` | The output's area, for the damage ratio |
 | `drawn_windows` | Window ids with any element showing on the output, repainted or not |
 | `culled_windows` | Window ids entirely hidden behind opaque surfaces |
 
 `throttled_windows` sits next to it. It lists windows whose frame callbacks
-run at the hidden rate (about 1 Hz). [docs/testing.md](testing.md#frame-cost)
-covers both fields and the `G-OCCLUSION-CULL` proof that checks them.
+run at the hidden rate (about 1 Hz), or not at all once `suspended_windows`
+lists them and their client was told ([protocols](protocols.md#suspended-windows)).
+[docs/testing.md](testing.md#frame-cost) covers both fields and the
+`G-OCCLUSION-CULL` proof that checks them.
 
 ```bash
 TUNA_COMPOSITOR_STATE="$PWD/state.json" target/release/tuna-compositor \
@@ -182,14 +201,63 @@ client-accounted bytes, not unique physical usage. For growth, compare the
 settle phase against idle within one run. Long-run soak lanes live in
 `scripts/tuna-vm-soak`. No soak memory budget exists yet (#315).
 
+### Memory in the gate
+
+v1 requires memory no worse than GNOME 51. The gate measures that from the
+same one-second samples as CPU (`pss_series` in `scripts/lib/perf_budget.py`):
+
+- Each sample's PSS is summed by process role. `desktop` is compositor plus
+  shell, the same processes as the CPU `desktop` role, and `total` is every
+  process of the session user.
+- A phase takes the samples collected wholly inside it. `whole` takes every
+  sample of the run.
+- The budgeted statistic is p50, which one transient spike does not move.
+  p95 is reported as the near-peak.
+- Each pair gives a Tuna / GNOME ratio, and the gate takes the median over
+  the three stock pairs, as for CPU.
+- A process that exits stops counting from the next sample. A sample with
+  an unreadable process, or without a PSS value for one, makes its phase
+  and the whole run unmeasured for that session. It never counts as less
+  memory.
+
+The criterion is four metrics at a ratio of 1.00 or below:
+`pss.idle.desktop.p50`, `pss.idle.total.p50`, `pss.whole.desktop.p50` and
+`pss.whole.total.p50`.
+
+**None of them is enforced yet.** Their budgets are provisional
+(`enforced: false`), and their `max_ratio` is the 1.00 target, not a
+calibrated budget. [ADR 0009](adr/0009-performance-regression-budgets.md)
+enforces a budget only after a paired run measured it in three stock
+pairs, and enforcing it is a ratchet step that cites that run. Until
+then:
+
+- The report's "Memory (PSS) against the v1 criterion" section starts with
+  "The memory criterion is not enforced by this gate" and marks each of
+  the four metrics `met` or `not met`.
+- Their rows in the budget table read `not enforced`, and `check` repeats
+  them on stderr.
+- The exit status neither passes nor fails memory. Do not cite a green
+  gate as memory parity.
+
+To find where a difference comes from, read the role table in the same
+section (GNOME, Tuna and Tuna − GNOME in MiB for idle, settle and the
+whole run) and the table of each desktop's largest processes.
+`perf-gate.json` has every phase under `memory.by_role_mib` and every
+process under `memory.by_process_mib`. The session total also contains the
+workload's three apps and the session services, so check the role table
+before attributing a `total` difference to the desktop. The
+[perf README](perf/README.md#memory-criterion) records the first replayed
+values.
+
 ## Comparing against GNOME 51
 
 The comparison runs in the `Marlin performance samples` workflow
 (`.github/workflows/performance-baseline.yml`):
 
-1. It builds one Marlin image upgraded to GNOME Shell 51.0 from a pinned
-   Arch Linux Archive snapshot (`packaging/marlin/perf/Containerfile.baseline`),
-   then installs a Tuna Desktop package from a trusted main CI run on top.
+1. It builds one image from a pinned Marlin platform digest, synced to GNOME
+   Shell 51.0 from a pinned Arch Linux Archive snapshot
+   (`packaging/marlin/perf/Containerfile.baseline`), then installs a Tuna
+   Desktop package from a trusted main CI run on top.
 2. `scripts/tuna-perf-profile-pairs diagnostic`, then `stock`, run three
    alternating GNOME/Tuna pairs per profile. Each session uses
    `scripts/tuna-vm-perf` in the same QEMU/KVM profile (6 GiB, four vCPUs,
@@ -239,7 +307,9 @@ Normalization rules:
   file locally with `scripts/tuna-perf-gate validate`.
 - **Nightly at 03:23 UTC and on dispatch**: the paired run enforces
   budgets. It fails on any enforced metric that exceeds its budget or has
-  fewer than three stock pairs.
+  fewer than three stock pairs. Budgets that are not enforced, currently
+  the four memory budgets, are reported as `not enforced` and never change
+  the result.
 - **PRs that change measurement code**: the paired run executes in
   report-only mode.
 
@@ -265,6 +335,7 @@ Avoid these mistakes:
 - Comparing across host CPU classes.
 - Summing RSS across processes.
 - Treating a report-only green run as a budget pass.
+- Reading a `not enforced` row, or a green gate, as memory parity.
 - Enabling observer diagnostics in the stock profile. Per-thread
   diagnostics stalled GNOME sessions (#782).
 - Loosening a budget to make CI green.

@@ -53,7 +53,7 @@ class PortalSessionTests(unittest.TestCase):
                 guest.sh.return_value = (1, json.dumps({
                     'ready': False, 'error': 'requires an unlocked session',
                     'session_state': [{'phase': 'before-request', 'exit': 0, 'stdout': '(true,)'}]}), '')
-                run = journey.Journey(SimpleNamespace(), guest, console, receipt, Path(tmp))
+                run = journey.Journey(SimpleNamespace(qualification_only=True), guest, console, receipt, Path(tmp))
                 run.step = lambda sid, title, action: action(lambda name, ok, observed: ok) if sid == target else None
                 run.run()
                 console.activity.assert_called_once()
@@ -73,33 +73,41 @@ class PortalSessionTests(unittest.TestCase):
         console.page.keyboard.press.assert_not_called()
 
     def test_active_grant_uses_two_exchanges_then_immediate_real_lock(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            events, receipt = [], {}
-            guest, console = Mock(), Mock()
-            reports = [
-                {'ready': True, 'finished': False, 'root': '/run/user/1000/owned',
-                 'session_state': [{'phase': 'before-request', 'exit': 0, 'stdout': '(false,)'}]},
-                {'input': {'exit': 0}, 'active': True, 'observer_armed': True, 'armed_at': 'recorded',
-                 'session_state': [{'phase': 'after-response', 'exit': 0, 'stdout': '(false,)'}]}]
-            def shell(cmd, **kw):
-                events.append(('ssh', cmd))
-                return 0, json.dumps(reports.pop(0)), ''
-            guest.sh.side_effect = shell
-            console.grab.side_effect = lambda path: path.write_bytes(b'prompt-frame')
-            console.key.side_effect = lambda chord, **kw: events.append(('key', chord))
-            run = journey.Journey(SimpleNamespace(), guest, console, receipt, Path(tmp))
-            def step(sid, title, action):
-                if sid == 'portal-screencast':
-                    action(lambda name, ok, observed: ok)
-                    events.append(('collect', 'step screenshot/journal'))
-            run.step = step
-            run.run()
-            self.assertEqual(guest.sh.call_count, 2)
-            self.assertEqual(events[-2:], [('key', 'Meta+l'), ('collect', 'step screenshot/journal')])
-            self.assertIn(' consent ', events[1][1])
-            guest.out.assert_not_called()
-            self.assertTrue(receipt['portal_screencast']['lock_input']['observer_armed'])
-            self.assertFalse(receipt['portal_screencast']['frame_validated'])
+        # The full tour reaches the screencast from the open date menu and closes
+        # it with Escape first; qualification-core mode arrives with nothing open.
+        for qualification_only, leading_keys in ((True, []), (False, [('key', 'Escape')])):
+            with self.subTest(qualification_only=qualification_only), tempfile.TemporaryDirectory() as tmp:
+                events, receipt = [], {}
+                guest, console = Mock(), Mock()
+                reports = [
+                    {'ready': True, 'finished': False, 'root': '/run/user/1000/owned',
+                     'session_state': [{'phase': 'before-request', 'exit': 0, 'stdout': '(false,)'}]},
+                    {'input': {'exit': 0}, 'active': True, 'observer_armed': True, 'armed_at': 'recorded',
+                     'session_state': [{'phase': 'after-response', 'exit': 0, 'stdout': '(false,)'}]}]
+                def shell(cmd, **kw):
+                    events.append(('ssh', cmd))
+                    return 0, json.dumps(reports.pop(0)), ''
+                guest.sh.side_effect = shell
+                console.grab.side_effect = lambda path: path.write_bytes(b'prompt-frame')
+                console.key.side_effect = lambda chord, **kw: events.append(('key', chord))
+                run = journey.Journey(SimpleNamespace(qualification_only=qualification_only),
+                                      guest, console, receipt, Path(tmp))
+                def step(sid, title, action):
+                    if sid == 'portal-screencast':
+                        action(lambda name, ok, observed: ok)
+                        events.append(('collect', 'step screenshot/journal'))
+                run.step = step
+                run.run()
+                self.assertEqual(guest.sh.call_count, 2)
+                prefix = len(leading_keys)
+                self.assertEqual(events[:prefix], leading_keys)
+                self.assertEqual([kind for kind, _ in events[prefix:]], ['ssh', 'ssh', 'key', 'collect'])
+                self.assertIn(' launch ', events[prefix][1])
+                self.assertIn(' consent ', events[prefix + 1][1])
+                self.assertEqual(events[-2:], [('key', 'Meta+l'), ('collect', 'step screenshot/journal')])
+                guest.out.assert_not_called()
+                self.assertTrue(receipt['portal_screencast']['lock_input']['observer_armed'])
+                self.assertFalse(receipt['portal_screencast']['frame_validated'])
 
     def test_screenshot_retains_native_failure_before_locked_response_precondition(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -111,7 +119,7 @@ class PortalSessionTests(unittest.TestCase):
                     'response': {'response': 2, 'results': {}}, 'input': {'exit': 0},
                     'session_state': [{'phase': 'after-response', 'exit': 0, 'stdout': '(true,)'}]}), '')]
             console.grab.side_effect = lambda path: path.write_bytes(b'prompt-frame')
-            run = journey.Journey(SimpleNamespace(), guest, console, receipt, Path(tmp))
+            run = journey.Journey(SimpleNamespace(qualification_only=True), guest, console, receipt, Path(tmp))
             run.step = lambda sid, title, action: action(lambda name, ok, observed: ok) if sid == 'portal-screenshot' else None
             with self.assertRaisesRegex(RuntimeError, 'after-response requires an unlocked session'):
                 run.run()
@@ -266,31 +274,34 @@ class CanonicalCallerTests(unittest.TestCase):
 class ConsentVisibilityTests(unittest.TestCase):
     def consent(self, active=False, error=None, stale=False, expired=False):
         action = Mock()
-        button = SimpleNamespace(name='Share', childCount=0,
-                                 getRoleName=lambda: 'push button',
-                                 getState=lambda: SimpleNamespace(contains=lambda state: True),
-                                 queryAction=lambda: action)
+        button = SimpleNamespace(get_name=lambda: 'Share', get_child_count=lambda: 0,
+                                 get_role_name=lambda: 'push button',
+                                 get_state_set=lambda: SimpleNamespace(contains=lambda state: True),
+                                 get_action_iface=lambda: action)
         buttons = [button]
         if stale:
-            buttons.insert(0, SimpleNamespace(name='Allow', childCount=0,
-                getRoleName=lambda: 'push button',
-                getState=lambda: SimpleNamespace(contains=lambda state: True),
-                queryAction=lambda: action.stale))
-        app = SimpleNamespace(name='xdg-desktop-portal-gnome', childCount=len(buttons),
-                              getRoleName=lambda: 'application',
-                              getState=lambda: SimpleNamespace(contains=lambda state: False),
-                              getChildAtIndex=lambda index: buttons[index])
-        desktop = SimpleNamespace(childCount=1, getChildAtIndex=lambda index: app)
-        pyatspi = SimpleNamespace(Registry=SimpleNamespace(getDesktop=lambda index: desktop),
-                                  STATE_SHOWING=1, STATE_SENSITIVE=2)
+            buttons.insert(0, SimpleNamespace(get_name=lambda: 'Allow', get_child_count=lambda: 0,
+                get_role_name=lambda: 'push button',
+                get_state_set=lambda: SimpleNamespace(contains=lambda state: True),
+                get_action_iface=lambda: action.stale))
+        app = SimpleNamespace(get_name=lambda: 'xdg-desktop-portal-gnome', get_child_count=lambda: len(buttons),
+                              get_role_name=lambda: 'application',
+                              get_state_set=lambda: SimpleNamespace(contains=lambda state: False),
+                              get_child_at_index=lambda index: buttons[index])
+        desktop = SimpleNamespace(get_child_count=lambda: 1, get_child_at_index=lambda index: app)
+        atspi = SimpleNamespace(get_desktop=lambda index: desktop,
+                                StateType=SimpleNamespace(SHOWING=1, SENSITIVE=2, CHECKED=3))
         bus = Mock()
         bus.call_sync.return_value.unpack.return_value = (active,)
         bus.call_sync.side_effect = error
         gio = SimpleNamespace(bus_get_sync=lambda *args: bus, BusType=SimpleNamespace(SESSION=0),
                               DBusCallFlags=SimpleNamespace(NONE=0))
+        gi = ModuleType('gi')
+        gi.require_version = Mock()
         repository = ModuleType('gi.repository')
-        repository.Gio, repository.GLib = gio, SimpleNamespace()
-        modules = {'pyatspi': pyatspi, 'gi': ModuleType('gi'), 'gi.repository': repository}
+        repository.Atspi, repository.Gio, repository.GLib = atspi, gio, SimpleNamespace()
+        # pyatspi is absent on published images (Orca 51 dropped python-atspi).
+        modules = {'pyatspi': None, 'gi': gi, 'gi.repository': repository}
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / 'tree.json'
             exit_path = Path(tmp) / 'requester.exit'
@@ -311,33 +322,72 @@ class ConsentVisibilityTests(unittest.TestCase):
         self.assertIsInstance(result, RuntimeError)
         self.assertIn('hidden by a locked session', str(result))
         self.assertTrue(tree[-1]['showing'], 'regression: AT-SPI still marks the hidden button showing')
-        action.doAction.assert_not_called()
+        action.do_action.assert_not_called()
         self.assertEqual(bus.call_sync.call_args.args[3], 'GetActive')
 
     def test_unlocked_visible_share_uses_the_actual_action(self):
         action, _, result, _ = self.consent(active=False)
         self.assertIsInstance(result, SystemExit)
         self.assertEqual(result.code, 0)
-        action.doAction.assert_called_once_with(0)
+        action.do_action.assert_called_once_with(0)
 
     def test_lock_query_failure_never_grants_consent(self):
         action, _, result, _ = self.consent(error=RuntimeError('bus unavailable'))
         self.assertIn('bus unavailable', str(result))
-        action.doAction.assert_not_called()
+        action.do_action.assert_not_called()
 
     def test_screencast_never_activates_a_stale_screenshot_allow(self):
         action, _, result, _ = self.consent(stale=True)
         self.assertIsInstance(result, SystemExit)
         self.assertEqual(result.code, 0)
-        action.doAction.assert_called_once_with(0)
-        action.stale.doAction.assert_not_called()
+        action.do_action.assert_called_once_with(0)
+        action.stale.do_action.assert_not_called()
 
     def test_exited_requester_never_activates_any_accessible_picker(self):
         action, bus, result, _ = self.consent(expired=True)
         self.assertIsInstance(result, RuntimeError)
         self.assertIn('refusing a stale portal picker', str(result))
-        action.doAction.assert_not_called()
+        action.do_action.assert_not_called()
         bus.call_sync.assert_not_called()
+
+
+class FreshAccountSessionTests(unittest.TestCase):
+    """#1050: a fresh account's first GDM login must default to Tuna."""
+
+    def defaults(self, version, conf, template='', record=None):
+        raw = ['@@version', version, '@@custom.conf', *conf.splitlines()]
+        if record is not None:
+            raw += ['@@user', *record.splitlines()]
+        for kind in ('standard', 'administrator'):
+            raw += [f'@@template-{kind}-path', f'/etc/accountsservice/user-templates/{kind}',
+                    f'@@template-{kind}', *template.splitlines()]
+        guest = journey.Guest(Mock())
+        with patch.object(journey.Guest, 'out', return_value='\n'.join(raw)):
+            return guest.session_defaults()
+
+    def effective(self, result):
+        return {kind: t['effective'] for kind, t in result['templates'].items()}
+
+    def test_gdm51_empty_template_uses_daemon_fallback(self):
+        result = self.defaults('GDM 51.1', '[daemon]\nFallbackSession=tuna\n[security]\n',
+                               template='[User]\nSession=\n')
+        self.assertEqual(self.effective(result), {'standard': 'tuna', 'administrator': 'tuna'})
+        self.assertEqual(result['saved'], {'record': False, 'session': None})
+        self.assertEqual(result['templates']['standard']['path'], '/etc/accountsservice/user-templates/standard')
+
+    def test_older_gdm_uses_template_session(self):
+        result = self.defaults('GDM 47.0', '[daemon]\n', template='[User]\nSession=tuna\n')
+        self.assertEqual(self.effective(result), {'standard': 'tuna', 'administrator': 'tuna'})
+
+    def test_fallback_outside_daemon_or_on_older_gdm_is_not_tuna(self):
+        self.assertEqual(set(self.effective(self.defaults('GDM 51.1', '[security]\nFallbackSession=tuna\n')).values()),
+                         {None})
+        self.assertEqual(set(self.effective(self.defaults('GDM 47.0', '[daemon]\nFallbackSession=tuna\n')).values()),
+                         {None})
+
+    def test_saved_record_is_reported(self):
+        result = self.defaults('GDM 51.1', '[daemon]\nFallbackSession=tuna\n', record='[User]\nSession=gnome\n')
+        self.assertEqual(result['saved'], {'record': True, 'session': 'gnome'})
 
 
 if __name__ == '__main__':

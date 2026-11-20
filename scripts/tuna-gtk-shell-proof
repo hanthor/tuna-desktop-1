@@ -5,24 +5,59 @@
 #   scripts/tuna-gtk-shell-proof [--display :N] [--artifacts DIR]
 #   --screenshot-keys-only runs panel readiness and actual keyboard captures only.
 #   --a11y-focus-only runs panel readiness, G-FOCUS-RING, G-FOCUS-RING-TIMEOUT,
-#   G-A11Y-MENU-RESTART and G-SHELL-STABLE only.
+#   G-A11Y-MENU-CLOSE-STABLE, G-A11Y-MENU-RESTART and G-SHELL-STABLE only.
+#   --notify-lock-only runs panel readiness and the lock-screen notification
+#   and notification sound gates only (needs pam_wrapper).
+#   --tray-only runs panel readiness and the AppIndicator pointer, library,
+#   keyboard and X11 tray gates only.
+#   --x11-iconic-only runs panel readiness and G-X11-ICONIC (a minimized
+#   X11 window is IconicState with _NET_WM_STATE_HIDDEN, #1078) only.
 #   --grid-hover-only runs panel readiness, G-GRID-HOVER, G-GRID-REORDER,
-#   and G-SHELL-STABLE only.
+#   G-GRID-ON-DEMAND and G-SHELL-STABLE only.
 #   --keyboard-routes-only runs panel readiness and the P-A11Y-02 keyboard
 #   route gates (G-PANEL-MENU-KEYS, G-QS-MENU-KEY, G-NOTIFICATION-KEYS,
 #   G-SCREENSHOT-CTRL-C) only.
+#   --datemenu-only runs panel readiness, G-CLOCK-DAMAGE, the date menu's
+#   gates (G-CAL-OPEN, G-CAL-EVENTS, G-CAL-PREFS, G-CAL-LAUNCH,
+#   G-DATEMENU-WORLD-CLOCKS, G-DATEMENU-WEATHER), its accessibility golden
+#   and G-SHELL-STABLE only.
+#   --search-leak-only runs panel readiness, G-SEARCH-LEAK (50 searches with
+#   results leave shm mappings and descriptors where they were, #1084) and
+#   G-SHELL-STABLE only.
+#   --window-leak-only runs panel readiness, G-WINDOW-LEAK (100 libadwaita
+#   windows opened and closed leave the compositor's memory within a fixed
+#   bound of its warm state, #1088) and G-SHELL-STABLE only.
+#   --lock-menu-only runs panel readiness, G-LOCK-WITH-MENU-OPEN and
+#   G-SHELL-STABLE only (needs pam_wrapper).
 #   --grid-cancel-only --grid-cancel-admission FILE is an exact CI comparison slice.
 #   --expect-grid-cancel-old-negative is permitted only in that admitted slice.
+#   Run at most one --*-only slice at a time.
+# end of --help
 #
 # Runs the nested compositor with tuna-shell-gtk as its supervised shell
 # on a private session bus with the AT-SPI accessibility bus, then:
 #   G-PANEL     the panel maps (frame differs from the bare session)
 #   A11Y-PANEL  the panel controls are exposed to screen readers by name
+#   G-SHELL-CAIRO on software GL the compositor starts the shell with
+#               GSK_RENDERER=cairo and the shell loads no Mesa rasterizer (#503)
+#   G-CLOCK-DAMAGE a clock tick repaints the clock's rectangle in the bar,
+#               under 2% of the output, not the whole output (#1154)
 #   G-CAL-EVENTS the calendar server's events for today list in the date
 #               menu's events card, timed as GNOME formats them
 #   G-CAL-OPEN  clicking the clock opens the calendar popover (xdg popup
 #               on the layer surface, #88)
 #   G-CAL-PREFS live first-weekday and ISO-week changes, plus locale reset
+#   G-DATEMENU-WORLD-CLOCKS installing GNOME Clocks shows the World
+#               Clocks card; its clocks follow gnome-shell's setting, the
+#               Locations a running Clocks exports, clock-format and the
+#               minute live, sorted by UTC offset in aligned columns;
+#               the card activates Clocks (P-PN-04)
+#   G-DATEMENU-WEATHER installing GNOME Weather shows the Weather card:
+#               location prompt, loading, offline, unavailable, five
+#               hourly forecasts from now in even columns; with all three
+#               cards the menu stays on the output and its displays
+#               section scrolls; the card activates Weather; both cards
+#               hide again when their apps go (P-PN-04)
 #   G-QS-OPEN   clicking the system indicators opens quick settings
 #   A11Y-QS     quick-settings toggles and the volume slider are exposed
 #   G-WINDOWS   three libadwaita app windows map
@@ -33,6 +68,10 @@
 #   G-GRID-DRAG-PAGE a dragged app held at the grid's edge turns the page
 #   G-GRID-REORDER  an app dropped on a tile's edge moves there (saved
 #                   to app-picker-layout)
+#   G-GRID-ON-DEMAND the app grid's tiles exist only while it shows: none
+#                   on the window picker or after close; a held swipe up
+#                   and Show Apps list an app installed meanwhile; Down
+#                   and Right walk the tiles (#503)
 #   G-FOLDER-DND    dragging an app onto another makes a GNOME folder of
 #                   them; dragging one out of the folder dialog removes it
 #   G-APP-GRID-PAGES enough apps page the grid: indicators and arrows show,
@@ -52,6 +91,11 @@
 #   G-GRID-ACTIVATE-RUNNING a running app's grid tile raises its window
 #                  without launching it again or zooming; Ctrl+click
 #                  opens a new window with the zoom (AppIcon.activate)
+#   G-DASH-MOTION  dash items zoom and fade in and out over 200 ms
+#                  ease-out-quad (a leaving item reverses from where it
+#                  stands) and hover labels fade in over 150 ms after
+#                  300 ms and out over 100 ms; Reduced Motion only
+#                  fades, animations off are instant (frozen proof clock)
 #   G-GRID-FADE    Show Apps fades the grid in over 400 ms after 100 ms
 #   G-APP-FOLDERS  GNOME's app-folders settings group the app grid: the
 #                  folder replaces its apps and opens to show them
@@ -64,7 +108,19 @@
 #   G-NOTIFY-DND     with Do Not Disturb on, no banner, but listed
 #   G-NOTIFY-GROUP   two from one app group, collapsed; pressing expands
 #   G-NOTIFY-POLICY  per-app policy (#348): first notify registers the app,
-#                    disabling it drops banners and list entries
+#                    disabling it keeps banners and list entries away
+#   G-NOTIFY-LOCK    while locked, allowed apps show name and count on the
+#                    lock screen, details only with details-in-lock-screen;
+#                    other apps are absent from the accessible tree (#348)
+#   G-NOTIFY-LOCK-PIXELS a redacted source's pixels do not depend on its
+#                    text; details change them and taking them back
+#                    restores the frame
+#   G-NOTIFY-LOCK-LIVE arrivals and policy keys reach the locked screen at
+#                    once; unlocking brings the queued banners and sounds
+#   G-NOTIFY-SOUND   banners play sound-name / sound-file as they show,
+#                    silenced by enable-sound-alerts or event-sounds off
+#   G-NOTIFY-RESTORE re-enabling a disabled app brings what it sent while
+#                    disabled back to the list, with no banner
 #   G-QS-SERVICES    quick settings shows the tiles of the services on
 #                    the bus (stub daemons on a private system bus, #55)
 #   G-QS-WIFI-MENU   the Wi-Fi menu scans, lists NetworkManager's networks
@@ -107,11 +163,16 @@
 #                    (tests/protocols/gnome51-globals.tsv, P-SY-06)
 #   G-OV-SHELL-UI  the overview shows the search entry and the dash
 #   G-OV-SEARCH typing lists matching apps (#57)
+#   G-OV-SEARCH-STILL the focused, unchanged overview search draws no
+#               frames: the shell's caret is steady, as GNOME's (#503);
+#               the window never spans the panel clock's minute turn
 #   G-OV-LAUNCH Enter launches the top result and closes the overview
 #   G-OV-APPGRID Show Apps opens the app grid
 #   G-X11-APP      XWayland is on by default: an X11 app launched from
 #                  overview search gets DISPLAY and maps a window (#59)
 #   G-X11-INPUT-FOCUS the X server's input focus is the focused X11 window
+#   G-X11-ICONIC a minimized X11 window is WM_STATE IconicState with
+#                  _NET_WM_STATE_HIDDEN, and NormalState without once restored
 #   G-SETTINGS-CLOCK GNOME's clock-show-seconds key changes the panel clock
 #   G-SETTINGS-INPUT GNOME's input sources set the keymap (Super+Space
 #                  switches), repeat-interval the repeat rate, and
@@ -210,8 +271,14 @@
 #                  with animations off
 #   G-LOCK-SLIDE   the lock curtain lowers on lock and lifts after PAM
 #                  unlocks, fades only under Reduced Motion, instant
-#                  with animations off
+#                  with animations off; the screen saver goes active only
+#                  once the curtain has landed (gnome-settings-daemon
+#                  blanks on ActiveChanged(true))
 #                  (these sample TUNA_ANIMATION_CLOCK at exact delays)
+#   G-LOCK-WITH-MENU-OPEN Super+L with the date menu (then quick
+#                  settings) open closes the menu; the very next typed
+#                  password and Return unlock through PAM, and the menu
+#                  stays closed after unlocking
 #   G-DISPLAY-SETTINGS GNOME Settings' DisplayConfig as Mutter 51 answers
 #                  it: modes and scales listed, verify/stale/bad-mode
 #                  errors, temporary changes unsaved, persistent ones
@@ -236,6 +303,30 @@
 #                  manager, which asks the logind stub itself (Reboot,
 #                  PowerOff) or, for Log Out (last), ends the compositor
 #                  through its orderly shutdown (#589)
+#   G-END-SESSION-USERS Restart… and Power Off… list the other users'
+#                  logind sessions under "Other users are logged in" as
+#                  GNOME 51 titles them (graphical by user name, console
+#                  and remote by real name), leaving out the greeter's,
+#                  the closing one and this one; Log Out… lists none
+#   G-END-SESSION-REALNAME Log Out… names the user by their
+#                  AccountsService real name ("Log Out Proof Person");
+#                  without AccountsService the plain strings stay
+#   G-END-SESSION-BATTERY with gnome-software's offline update prepared
+#                  and UPower's display device discharging below 30 %,
+#                  "Install pending software updates" starts unchecked
+#                  and checking it shows the low-battery warning; a
+#                  scheduled update turns Restart… into "Restart &
+#                  Install Updates" with the warning, which hides live
+#                  once charging; without updates no warning shows;
+#                  cancelling leaves gnome-software untouched
+#   G-END-SESSION-ASYNC delayed gnome-software replies cannot reopen a
+#                  closed dialog, replace a newer Open, or confirm a
+#                  newer request with an older confirmation
+#   G-END-SESSION-BOOT-OPTIONS where logind can reboot into the boot
+#                  loader menu, holding Alt swaps Restart for Boot Options
+#                  (not on Power Off…); releasing it swaps back; Boot
+#                  Options has the shell set logind's 60 s boot loader
+#                  menu before the manager's Reboot(true)
 #   G-LOCKDOWN-LOG-OUT disable-log-out flipped live removes Log Out…,
 #                  Restart… and Power Off… from the open power menu,
 #                  keeps Suspend, and restores them (#357)
@@ -307,6 +398,20 @@
 #                  stretching new content; fade-only under Reduced Motion,
 #                  instant with animations off
 #   G-WS-POPUP     a workspace key shows the workspace switcher popup
+#   G-WS-POPUP-CLOCK the popup fades in 100 ms ease-out-quad (0/50/100 ms),
+#                  holds 600 ms and fades out, sampled on the frozen clock;
+#                  a key on the first workspace redisplays it opaque at
+#                  once and restarts the hold (workspaceSwitcherPopup.js 51)
+#   G-WS-POPUP-POLICY Reduced Motion keeps the popup's fade; animations
+#                  off show and hide it at once
+#   G-WS-DOTS-CLOCK the Activities dots match panel.js 51 at 0/125/250 ms
+#                  of a key switch each way on the frozen clock
+#   G-WS-DOTS-POLICY Reduced Motion and animations off move the dots at once
+#   G-WS-DOTS-SWIPE the dots follow a held three-finger swipe and settle
+#                  with the strip's release time and ease-out cubic (#596)
+#   G-WS-DOTS-SWIPE-POLICY a held swipe slides the strip and moves the
+#                  dots under Reduced Motion and animations off too; the
+#                  release snaps the dots
 #   G-WS-THUMBS    three workspaces put GNOME's thumbnails strip in the
 #                  overview, and a thumbnail click switches workspace
 #   G-OV-DND       dragging a window's preview onto the next workspace's
@@ -354,6 +459,11 @@
 #   G-FOCUS-RING-TIMEOUT keyboard-focus-visible-timeout clears a real
 #                  key's indication at the toolkit's 3 s by default, at
 #                  2 s and 5 s when set, never at 0, with focus kept
+#   G-A11Y-MENU-CLOSE-STABLE two readers walk the shell's whole AT-SPI tree
+#                  in a loop across 20 rounds of the window menu, quick
+#                  settings, the calendar and a banner opening and closing;
+#                  the shell process survives and no accessible object path
+#                  is NULL (#1077, GNOME/gtk#8444)
 #   G-A11Y-MENU-RESTART a menu row toggled with real keys persists across
 #                  one deliberate shell restart and the restarted menu
 #                  follows the settings live
@@ -375,6 +485,17 @@
 #   G-TRAY      an AppIndicator item shows in the panel with its
 #               tooltip, its menu row reaches the item, and the row
 #               leaves the panel when the item exits (P-TR-01)
+#   G-TRAY-POINTER the AppIndicator extension's pointer: middle click is
+#               SecondaryActivate, the wheel Scroll, a double click
+#               Activate without the menu, single and secondary
+#               clicks the menu (P-TR-01)
+#   G-TRAY-AYATANA a real libayatana-appindicator item: label, keyboard
+#               route (Ctrl+Alt+Tab, Enter, arrows, Right into a
+#               submenu), check state, live menu/label/attention/
+#               Passive updates, middle click and scroll reach the
+#               library, and the item leaves on exit (P-TR-01, P-A11Y-02)
+#   G-TRAY-X11  the same library item from an XWayland (GDK_BACKEND=x11)
+#               client shows and fires its menu (P-TR-01)
 #   G-SWITCHER-GROUP Alt+Above_Tab shows an app's windows as thumbnails
 #               inside the output and steps through them; W closes the
 #               focused one
@@ -405,6 +526,8 @@ if [ -z "${TUNA_PROOF_PRIVATE_BUS:-}" ] && command -v dbus-run-session >/dev/nul
 fi
 unset CDPATH
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+# shellcheck source=scripts/lib/tuna-state-snapshot.sh
+. "$ROOT/scripts/lib/tuna-state-snapshot.sh"
 DISPLAY_ARG=""
 ARTIFACTS="$ROOT/gtk-shell-artifacts"
 WIDTH=1280
@@ -412,40 +535,79 @@ HEIGHT=800
 INSTALLED_PACKAGE=0
 SCREENSHOT_KEYS_ONLY=0
 A11Y_FOCUS_ONLY=0
+NOTIFY_LOCK_ONLY=0
+TRAY_ONLY=0
+X11_ICONIC_ONLY=0
 GRID_HOVER_ONLY=0
 KEYBOARD_ROUTES_ONLY=0
+DATEMENU_ONLY=0
+SEARCH_LEAK_ONLY=0
+WINDOW_LEAK_ONLY=0
+LOCK_MENU_ONLY=0
 GRID_CANCEL_ONLY=0
 GRID_CANCEL_OLD_NEGATIVE=0
 GRID_CANCEL_ADMISSION=""
 COMPANIONS="${TUNA_PROOF_COMPANIONS:-$ROOT/target/debug/examples}"
+# Focused slices: each --*-only case arm calls only_mode with its flag and
+# what it leaves out of the full run's setup, so a new slice touches only
+# its own arm. Traits: source-build (refuses --installed-package),
+# no-media-source (no GTK media-source receipt), no-examples (no
+# icon-probe or shortcut-inhibit-client build), no-camera-policy (the
+# camera is not disabled first).
+ONLY_MODES=""
+ONLY_SOURCE_BUILD=""
+ONLY_NO_MEDIA_SOURCE=0
+ONLY_NO_EXAMPLES=0
+ONLY_NO_CAMERA_POLICY=0
+only_mode() {
+    ONLY_MODES="${ONLY_MODES:+$ONLY_MODES }$1"
+    only_flag="$1"
+    shift
+    for only_trait in "$@"; do
+        case "$only_trait" in
+            source-build) ONLY_SOURCE_BUILD="$only_flag" ;;
+            no-media-source) ONLY_NO_MEDIA_SOURCE=1 ;;
+            no-examples) ONLY_NO_EXAMPLES=1 ;;
+            no-camera-policy) ONLY_NO_CAMERA_POLICY=1 ;;
+            *) echo "tuna-gtk-shell-proof: unknown slice trait $only_trait" >&2; exit 1 ;;
+        esac
+    done
+}
 while [ $# -gt 0 ]; do
     case "$1" in
         --installed-package) INSTALLED_PACKAGE=1; shift ;;
-        --grid-cancel-only) GRID_CANCEL_ONLY=1; shift ;;
+        --grid-cancel-only) GRID_CANCEL_ONLY=1; only_mode "$1" no-media-source; shift ;;
         --expect-grid-cancel-old-negative) GRID_CANCEL_OLD_NEGATIVE=1; shift ;;
         --grid-cancel-admission) GRID_CANCEL_ADMISSION="$2"; shift 2 ;;
-        --screenshot-keys-only) SCREENSHOT_KEYS_ONLY=1; shift ;;
-        --a11y-focus-only) A11Y_FOCUS_ONLY=1; shift ;;
-        --grid-hover-only) GRID_HOVER_ONLY=1; shift ;;
-        --keyboard-routes-only) KEYBOARD_ROUTES_ONLY=1; shift ;;
+        --screenshot-keys-only) SCREENSHOT_KEYS_ONLY=1; only_mode "$1" no-media-source no-examples no-camera-policy; shift ;;
+        --a11y-focus-only) A11Y_FOCUS_ONLY=1; only_mode "$1" no-media-source no-examples no-camera-policy; shift ;;
+        --notify-lock-only) NOTIFY_LOCK_ONLY=1; only_mode "$1"; shift ;;
+        --tray-only) TRAY_ONLY=1; only_mode "$1"; shift ;;
+        --grid-hover-only) GRID_HOVER_ONLY=1; only_mode "$1" no-examples; shift ;;
+        --keyboard-routes-only) KEYBOARD_ROUTES_ONLY=1; only_mode "$1" no-media-source; shift ;;
+        --datemenu-only) DATEMENU_ONLY=1; only_mode "$1" source-build no-media-source no-examples no-camera-policy; shift ;;
+        --search-leak-only) SEARCH_LEAK_ONLY=1; only_mode "$1" no-media-source no-examples; shift ;;
+        --window-leak-only) WINDOW_LEAK_ONLY=1; only_mode "$1" no-media-source no-examples; shift ;;
+        --lock-menu-only) LOCK_MENU_ONLY=1; only_mode "$1" no-media-source no-examples; shift ;;
+        --x11-iconic-only) X11_ICONIC_ONLY=1; only_mode "$1"; shift ;;
         --display) DISPLAY_ARG="$2"; shift 2 ;;
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
-        --help|-h) sed -n '2,22p' "$0"; exit 0 ;;
+        --help|-h) sed -n '2,/^# end of --help$/{/^# end of --help$/!p;}' "$0"; exit 0 ;;
         *) echo "tuna-gtk-shell-proof: unknown argument $1" >&2; exit 1 ;;
     esac
 done
-if [ "$GRID_HOVER_ONLY" = 1 ] && { [ "$SCREENSHOT_KEYS_ONLY" = 1 ] || [ "$A11Y_FOCUS_ONLY" = 1 ] || [ "$GRID_CANCEL_ONLY" = 1 ] || [ "$GRID_CANCEL_OLD_NEGATIVE" = 1 ] || [ -n "$GRID_CANCEL_ADMISSION" ]; }; then
-    echo "--grid-hover-only cannot be combined with other focused or grid admission flags" >&2; exit 1
+case "$ONLY_MODES" in
+    *" "*) echo "$ONLY_MODES: run one --*-only slice at a time" >&2; exit 1 ;;
+esac
+if [ "$INSTALLED_PACKAGE" = 1 ] && [ -n "$ONLY_SOURCE_BUILD" ]; then
+    echo "$ONLY_SOURCE_BUILD cannot be combined with --installed-package" >&2; exit 1
 fi
 if [ "$GRID_CANCEL_ONLY" = 1 ]; then
-    if [ "$INSTALLED_PACKAGE" != 0 ] || [ "$SCREENSHOT_KEYS_ONLY" != 0 ] || [ "$A11Y_FOCUS_ONLY" != 0 ] || [ "$KEYBOARD_ROUTES_ONLY" != 0 ] || [ -z "$GRID_CANCEL_ADMISSION" ]; then
+    if [ "$INSTALLED_PACKAGE" != 0 ] || [ -z "$GRID_CANCEL_ADMISSION" ]; then
         echo "grid comparison requires an admitted source-mode tuple" >&2; exit 1
     fi
 elif [ "$GRID_CANCEL_OLD_NEGATIVE" = 1 ] || [ -n "$GRID_CANCEL_ADMISSION" ]; then
     echo "old-negative/admission flags require --grid-cancel-only" >&2; exit 1
-fi
-if [ "$SCREENSHOT_KEYS_ONLY" = 1 ] && [ "$A11Y_FOCUS_ONLY" = 1 ]; then
-    echo "--screenshot-keys-only and --a11y-focus-only are separate slices" >&2; exit 1
 fi
 mkdir -p "$ARTIFACTS"
 ARTIFACTS="$(cd "$ARTIFACTS" && pwd)"
@@ -547,6 +709,26 @@ cat >"$ARTIFACTS/config/mimeapps.list" <<EOF
 [Default Applications]
 x-scheme-handler/calendar=tuna-calendar-probe.desktop;
 EOF
+# GNOME Clocks and GNOME Weather stay "not installed" until
+# G-DATEMENU-WORLD-CLOCKS installs probes for them: a Hidden entry masks
+# any host copy, so the date menu's earlier frames and goldens show the
+# same cards on every host.
+datemenu_mask() {
+    printf '[Desktop Entry]\nType=Application\nName=Masked\nExec=true\nHidden=true\n' >"$ARTIFACTS/$1.desktop"
+    mv "$ARTIFACTS/$1.desktop" "$XDG_DATA_HOME/applications/$1.desktop"
+}
+datemenu_mask org.gnome.clocks
+datemenu_mask org.gnome.Weather
+# The Weather card's location and forecast come from this file (the
+# shell's TUNA_WEATHER_FIXTURE hook, read each time the card is shown),
+# never from the network.
+TUNA_WEATHER_FIXTURE="$ARTIFACTS/weather-fixture.json"
+weather_fixture() {
+    printf '%s\n' "$1" >"$TUNA_WEATHER_FIXTURE.tmp"
+    mv "$TUNA_WEATHER_FIXTURE.tmp" "$TUNA_WEATHER_FIXTURE"
+}
+weather_fixture '{"state": "none"}'
+export TUNA_WEATHER_FIXTURE
 # A GNOME Shell search provider owned by the probe app (#57).
 SEARCH_MARKER="$ARTIFACTS/search-marker"
 rm -f "$SEARCH_MARKER"
@@ -589,6 +771,7 @@ SCREENSAVER_PID=""
 ICON_PID=""
 HINTS_PID=""
 PERMISSIONS_PID=""
+DATEMENU_STUB_PID=""
 INHIBITOR_PID=""
 SCROLL_PROBE_PID=""
 SET_FONTS_PID=""
@@ -608,6 +791,7 @@ cleanup() {
     if [ -n "$HINTS_PID" ]; then kill "$HINTS_PID" 2>/dev/null || true; fi
     if [ -n "$INHIBITOR_PID" ]; then kill "$INHIBITOR_PID" 2>/dev/null || true; fi
     if [ -n "$PERMISSIONS_PID" ]; then kill "$PERMISSIONS_PID" 2>/dev/null || true; fi
+    if [ -n "$DATEMENU_STUB_PID" ]; then kill "$DATEMENU_STUB_PID" 2>/dev/null || true; fi
     if [ -n "$SCROLL_PROBE_PID" ]; then kill "$SCROLL_PROBE_PID" 2>/dev/null || true; fi
     if [ -n "$SET_FONTS_PID" ]; then kill "$SET_FONTS_PID" 2>/dev/null || true; fi
     if [ -n "$HOT_CORNER_PID" ]; then kill "$HOT_CORNER_PID" 2>/dev/null || true; fi
@@ -806,9 +990,91 @@ xdotool key Escape
 cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-GRID-REORDER "overview stayed open"; }
 }
 
+# G-GRID-ON-DEMAND (#503): the app grid's tiles (one per installed app)
+# exist only while the grid shows. Opening the overview on the window
+# picker builds none; the grid a held swipe up draws part way, and Show
+# Apps, list an app installed while the overview was closed; Down from
+# the search entry focuses a tile and Right the next; closing drops them.
+# A hidden window is not in the accessible tree, so building and dropping
+# are read from the shell's grid trace (TUNA_GRID_TRACE).
+grid_traced() {
+    tail -c +"$(($1 + 1))" "$LOG" | grep -c -- "grid-anim $2" || true
+}
+grid_tiles() {
+    "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-grid-$1.json" 20 ||
+        fail G-GRID-ON-DEMAND "accessibility dump failed ($1)"
+}
+grid_focused_tile() {
+    jq -r '[.[] | select(.focused and .showing and (.role == "push button" or .role == "button") and (.name | startswith("AAA Move")))][0].name // empty' "$1"
+}
+grid_swipe() {
+    grid_swipe_sequence=$((grid_swipe_sequence + 1))
+    printf '{"phase":"%s","dy":%s,"time":%s,"sequence":%s}\n' \
+        "$1" "$2" "$3" "$grid_swipe_sequence" >"$TUNA_PROOF_SWIPE_INPUT.tmp"
+    mv "$TUNA_PROOF_SWIPE_INPUT.tmp" "$TUNA_PROOF_SWIPE_INPUT"
+    cstate ".proof_swipe_sequence == $grid_swipe_sequence" "swipe phase consumed" 5 ||
+        fail G-GRID-ON-DEMAND "the compositor never read synthetic swipe phase $grid_swipe_sequence"
+    sleep 0.2
+}
+grid_on_demand_proof() {
+grid_swipe_sequence=9000
+printf '[Desktop Entry]\nName=AAA Move Late\nExec=true\nType=Application\n' \
+    >"$XDG_DATA_HOME/applications/tuna-move-Late.desktop"
+sleep 1.5
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+grid_mark="$(wc -c <"$LOG")"
+xdotool key Super_L
+cstate '.overview_open and .overview_progress == 1 and (.overview_app_grid | not)' "window picker" ||
+    fail G-GRID-ON-DEMAND "Super did not open the overview on the window picker"
+sleep 1
+[ "$(grid_traced "$grid_mark" grid-build)" = 0 ] ||
+    fail G-GRID-ON-DEMAND "opening the overview on the window picker built app grid tiles nobody sees"
+# Fingers held up from the window picker draw the grid part way
+# (overviewControls.js `_updateAppDisplayVisibility`), before Show Apps.
+grid_swipe begin 0 80000
+grid_swipe update -90 80010
+cstate '.touchpad_swipe.active and .overview_state > 1.299 and .overview_state < 1.301 and (.layers | any(.namespace == "tuna-shell-appgrid"))' "app grid held part way" ||
+    fail G-GRID-ON-DEMAND "a held swipe up from the window picker did not draw the app grid"
+[ "$(grid_traced "$grid_mark" grid-build)" = 1 ] ||
+    fail G-GRID-ON-DEMAND "the held swipe built the grid $(grid_traced "$grid_mark" grid-build) times, not once"
+grid_tiles swipe-held
+button_showing "$ARTIFACTS/a11y-grid-swipe-held.json" "AAA Move Late" ||
+    fail G-GRID-ON-DEMAND "the held grid lacks the app installed while the overview was closed"
+grid_swipe update -60 80020
+grid_swipe end 0 80030
+cstate '.overview_open and .overview_state == 2 and .overview_app_grid and (.layers | any(.namespace == "tuna-shell-appgrid"))' "app grid settled" ||
+    fail G-GRID-ON-DEMAND "the swipe did not settle on the app grid"
+sleep 1
+xdotool key Down
+sleep 0.6
+grid_tiles key-down
+grid_first="$(grid_focused_tile "$ARTIFACTS/a11y-grid-key-down.json")"
+[ -n "$grid_first" ] || fail G-GRID-ON-DEMAND "Down from the search entry focused no grid tile"
+button_showing "$ARTIFACTS/a11y-grid-key-down.json" "AAA Move Late" ||
+    fail G-GRID-ON-DEMAND "Show Apps lacks the app installed while the overview was closed"
+xdotool key Right
+sleep 0.6
+grid_tiles key-right
+grid_second="$(grid_focused_tile "$ARTIFACTS/a11y-grid-key-right.json")"
+if [ -z "$grid_second" ] || [ "$grid_second" = "$grid_first" ]; then
+    fail G-GRID-ON-DEMAND "Right did not move the focus from '$grid_first' to the next tile (got '$grid_second')"
+fi
+xdotool key Escape
+cstate '.overview_open | not' "closed" 3 || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-GRID-ON-DEMAND "overview stayed open"; }
+sleep 1
+[ "$(grid_traced "$grid_mark" grid-drop)" = 1 ] ||
+    fail G-GRID-ON-DEMAND "the app grid's tiles outlived the overview"
+rm -f "$XDG_DATA_HOME/applications/tuna-move-Late.desktop"
+pass G-GRID-ON-DEMAND "no grid tiles on the window picker or after close; a held swipe and Show Apps list an app installed meanwhile; Down and Right walk the tiles"
+}
+
 . "$ROOT/scripts/lib/tuna-screenshot-keys-proof.sh"
 . "$ROOT/scripts/lib/tuna-a11y-focus-proof.sh"
+. "$ROOT/scripts/lib/tuna-notify-lock-proof.sh"
 . "$ROOT/scripts/lib/tuna-keyboard-routes-proof.sh"
+. "$ROOT/scripts/lib/tuna-datemenu-proof.sh"
+. "$ROOT/scripts/lib/tuna-search-leak-proof.sh"
+. "$ROOT/scripts/lib/tuna-window-leak-proof.sh"
 
 # Compositor-side state (overview, focus, previews) for app stages.
 CSTATE="$ARTIFACTS/compositor-state.json"
@@ -999,6 +1265,16 @@ if ! gsettings range org.gnome.desktop.calendar week-start-day >/dev/null 2>&1; 
     GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas"
     export GSETTINGS_SCHEMA_DIR
 fi
+# gnome-shell's copies of Clocks' and Weather's settings (P-PN-04), for
+# hosts without gnome-shell's schema.
+if ! gsettings list-schemas 2>/dev/null | grep -qx org.gnome.shell.world-clocks; then
+    mkdir -p "$ARTIFACTS/schemas"
+    cp "$ROOT/tests/settings/gnome51-shell-datemenu.gschema.xml" "$ARTIFACTS/schemas/"
+    glib-compile-schemas --strict "$ARTIFACTS/schemas"
+    GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas"
+    export GSETTINGS_SCHEMA_DIR
+fi
+gsettings reset org.gnome.shell.world-clocks locations
 # Wellbeing schemas for hosts without gsettings-desktop-schemas 51 (#354).
 # The shell reads them live from startup, so they must exist before the
 # nested session launches; after that the gates drive the real keys.
@@ -1116,6 +1392,13 @@ case "\$*" in
 esac
 "$PY" "$ROOT/scripts/lib/tuna-audio-fixture.py" "$ARTIFACTS" --event
 PW_CLI
+# libcanberra's player stand-in: every event sound the shell or compositor
+# plays (volume feedback, bell, notifications) is one line here.
+cat >"$ARTIFACTS/bin/canberra-gtk-play" <<CANBERRA
+#!/bin/sh
+printf '%s %s\n' "\$(date +%s%N)" "\$*" >>"$ARTIFACTS/canberra-calls"
+CANBERRA
+chmod +x "$ARTIFACTS/bin/canberra-gtk-play"
 chmod +x "$ARTIFACTS/bin/wpctl" "$ARTIFACTS/bin/pw-dump" "$ARTIFACTS/bin/pw-cli"
 PATH="$ARTIFACTS/bin:$PATH"
 export PATH
@@ -1215,6 +1498,9 @@ export TUNA_GRID_TRACE
 # settled (G-TRANSIENT-*).
 TUNA_TRANSIENT_TRACE=1
 export TUNA_TRANSIENT_TRACE
+# The dash logs its item and label eases, frame by frame (G-DASH-MOTION).
+TUNA_DASH_TRACE=1
+export TUNA_DASH_TRACE
 TUNA_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
 export TUNA_PROOF_SWIPE_INPUT
 # G-ANIMATION-CLOCK drives compositor animation time through this file;
@@ -1227,9 +1513,8 @@ export TUNA_ANIMATION_CLOCK
 # overrides remain useful diagnostics but cannot qualify canonical media.
 MEDIA_SOURCE=0
 "$PY" "$ROOT/scripts/lib/gtk_media_source.py" invalidate "$ROOT" "$ARTIFACTS"
-if [ "$INSTALLED_PACKAGE" = 0 ] && [ "$SCREENSHOT_KEYS_ONLY" = 0 ] &&
-   [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$KEYBOARD_ROUTES_ONLY" = 0 ] &&
-   [ "$GRID_CANCEL_ONLY" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ] &&
+if [ "$INSTALLED_PACKAGE" = 0 ] && [ "$ONLY_NO_MEDIA_SOURCE" = 0 ] &&
+   [ -z "${TUNA_PROOF_BIN_DIR:-}" ] &&
    [ -z "${TUNA_PROOF_SHELL_BIN:-}" ] && [ -z "${TUNA_SHELL_BIN:-}" ] &&
    [ -n "${GITHUB_RUN_ID:-}" ] && [ -n "${GITHUB_RUN_ATTEMPT:-}" ] &&
    [ -n "${GITHUB_SHA:-}" ]; then
@@ -1238,7 +1523,7 @@ if [ "$INSTALLED_PACKAGE" = 0 ] && [ "$SCREENSHOT_KEYS_ONLY" = 0 ] &&
 fi
 if [ "$INSTALLED_PACKAGE" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ]; then
     cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor -p tuna-wallpaper-svg -p tuna-shell-gtk -p tuna-shell-host
-    if [ "$SCREENSHOT_KEYS_ONLY" = 0 ] && [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$GRID_HOVER_ONLY" = 0 ]; then
+    if [ "$ONLY_NO_EXAMPLES" = 0 ]; then
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example icon-probe
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example shortcut-inhibit-client
     fi
@@ -1251,7 +1536,7 @@ fi
 : >"$LOG"
 # Persist the disabled policy before the GTK publisher starts. The portal
 # probe must observe it on first acquisition, before testing live toggles.
-if [ "$SCREENSHOT_KEYS_ONLY" != 1 ] && [ "$A11Y_FOCUS_ONLY" != 1 ]; then
+if [ "$ONLY_NO_CAMERA_POLICY" = 0 ]; then
     gsettings set org.gnome.desktop.privacy disable-camera true
 fi
 if [ -n "$PAM_ON" ]; then
@@ -1299,7 +1584,7 @@ if [ "$INSTALLED_PACKAGE" = 1 ]; then
         [ "$(date +%s)" -le "$end" ] || fail G-INSTALLED-START "installed startup overview never became ready"
         sleep 0.3
     done
-    cp "$CSTATE" "$ARTIFACTS/installed-startup-overview.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/installed-startup-overview.json"
     scrot "$ARTIFACTS/installed-startup-overview.png" >/dev/null
     installed_focus="$(timeout 5 xdotool getwindowfocus)"
     installed_host_pid="$(timeout 5 xdotool getwindowpid "$WID")"
@@ -1317,13 +1602,397 @@ if [ "$INSTALLED_PACKAGE" = 1 ]; then
         sleep 0.3
     done
     python3 "$ROOT/scripts/lib/installed-deb-proof.py" stable "$COMPOSITOR_PID" "tuna-gtk-proof-$$" "$ARTIFACTS/installed-package.json" "$ARTIFACTS/installed-start.json" "$ARTIFACTS/installed-after-escape.json"
-    cp "$CSTATE" "$ARTIFACTS/installed-desktop-before-panel.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/installed-desktop-before-panel.json"
 fi
+
+# Tray helpers: dump the shell, wait for a node, aim at a node's live
+# accessibility bounds (the panel surface sits at the output origin),
+# and wait for a fixture's marker line.
+tray_dump() {
+    "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/$1" 20 >/dev/null 2>&1
+}
+tray_wait() {
+    for _ in $(seq 1 30); do
+        tray_dump "$1"
+        "$3" "$ARTIFACTS/$1" "$2" && return 0
+        sleep 0.5
+    done
+    return 1
+}
+tray_point() {
+    jq -er --arg n "$2" '[.[] | select(.showing and .name == $n and ((.bounds[2] // 0) > 0) and ((.bounds[3] // 0) > 0))][0].bounds | "\((.[0] + .[2] / 2) | floor) \((.[1] + .[3] / 2) | floor)"' "$ARTIFACTS/$1"
+}
+tray_marker() {
+    end=$(($(date +%s) + 10))
+    until grep -q -- "$2" "$1" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+    grep -q -- "$2" "$1" 2>/dev/null
+}
+tray_checked() {
+    jq -e --arg n "$2" --argjson c "$3" 'any(.[]; .name == $n and .showing and .checked == $c)' "$1" >/dev/null
+}
+
+tray_pointer_gate() {
+# Tray pointer (P-TR-01), as the AppIndicator extension's
+# indicatorStatusIcon.js vfunc_button_press_event/vfunc_scroll_event.
+TRAY_MARKER="$ARTIFACTS/tray-pointer-marker"
+rm -f "$TRAY_MARKER"
+"$PY" "$ROOT/scripts/lib/tuna-tray-item-stub.py" "$TRAY_MARKER" >"$ARTIFACTS/tray-pointer.log" 2>&1 &
+TRAY_PID=$!
+tray_wait a11y-tray-pointer.json "Tuna Desktop Tray Probe" showing ||
+    fail G-TRAY-POINTER "the item never showed in the panel"
+tray_xy="$(tray_point a11y-tray-pointer.json "Tuna Desktop Tray Probe")" ||
+    fail G-TRAY-POINTER "the item has no showing bounds"
+# shellcheck disable=SC2086
+xdotool mousemove --window "$WID" $tray_xy click 2
+tray_marker "$TRAY_MARKER" '^secondary$' || fail G-TRAY-POINTER "middle click did not reach SecondaryActivate"
+xdotool click 4
+tray_marker "$TRAY_MARKER" '^scroll -[1-9][0-9]* vertical$' || fail G-TRAY-POINTER "the wheel did not reach Scroll"
+xdotool click --repeat 2 --delay 60 1
+tray_marker "$TRAY_MARKER" '^activated$' || fail G-TRAY-POINTER "a double click did not Activate"
+sleep 1
+tray_dump a11y-tray-double.json
+hidden "$ARTIFACTS/a11y-tray-double.json" "Open Probe" ||
+    fail G-TRAY-POINTER "a double click opened the menu as well"
+xdotool click 1
+tray_wait a11y-tray-single.json "Open Probe" showing ||
+    fail G-TRAY-POINTER "a single click never opened the menu"
+scrot "$ARTIFACTS/03c-tray-pointer-menu.png" >/dev/null
+xdotool key Escape
+tray_wait a11y-tray-single-closed.json "Open Probe" hidden || fail G-TRAY-POINTER "Escape left the menu open"
+xdotool click 3
+tray_wait a11y-tray-secondary.json "Open Probe" showing ||
+    fail G-TRAY-POINTER "a secondary click never opened the menu"
+xdotool key Escape
+tray_wait a11y-tray-secondary-closed.json "Open Probe" hidden || fail G-TRAY-POINTER "Escape left the menu open"
+[ "$(grep -c '^activated$' "$TRAY_MARKER")" = 1 ] ||
+    fail G-TRAY-POINTER "single or secondary clicks activated the item"
+kill "$TRAY_PID" 2>/dev/null || true
+tray_wait a11y-tray-pointer-gone.json "Tuna Desktop Tray Probe" hidden ||
+    fail G-TRAY-POINTER "the item stayed after it exited"
+pass G-TRAY-POINTER "middle click, wheel, double, single and secondary clicks follow the AppIndicator extension"
+}
+
+tray_ayatana_gate() {
+# A real libayatana-appindicator item (P-TR-01): the library Ubuntu and
+# Fedora apps use, registering by object path and exporting a GtkMenu
+# through libdbusmenu. Driven from the keyboard (P-A11Y-02).
+if "$PY" -c 'import gi; gi.require_version("Gtk", "3.0"); gi.require_version("AyatanaAppIndicator3", "0.1")' 2>/dev/null; then
+    AYATANA_MARKER="$ARTIFACTS/tray-ayatana-marker"
+    rm -f "$AYATANA_MARKER"
+    env -u DISPLAY GDK_BACKEND=wayland WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/tuna-tray-ayatana.py" "$AYATANA_MARKER" >"$ARTIFACTS/tray-ayatana.log" 2>&1 &
+    AYATANA_PID=$!
+    tray_marker "$AYATANA_MARKER" '^ready$' || fail G-TRAY-AYATANA "the library item never started"
+    tray_wait a11y-ayatana.json "Tuna Ayatana Probe" showing ||
+        fail G-TRAY-AYATANA "the path-registered library item never showed"
+    jq -e 'any(.[]; .role == "label" and .name == "7" and .showing)' "$ARTIFACTS/a11y-ayatana.json" >/dev/null ||
+        fail G-TRAY-AYATANA "the item's label is not shown beside its icon"
+    scrot "$ARTIFACTS/03d-tray-ayatana.png" >/dev/null
+    # Ctrl+Alt+Tab into the bar, Tab to the item, Enter opens its menu.
+    # A fired row returns focus to the client (G-PANEL-FOCUS), so each
+    # visit walks in again.
+    ayatana_open() {
+        xdotool key ctrl+alt+Tab
+        sleep 1
+        for _ in $(seq 1 12); do
+            tray_dump "a11y-ayatana-walk-$1.json"
+            focused "$ARTIFACTS/a11y-ayatana-walk-$1.json" "Tuna Ayatana Probe" && break
+            xdotool key Tab
+            sleep 0.7
+        done
+        focused "$ARTIFACTS/a11y-ayatana-walk-$1.json" "Tuna Ayatana Probe" ||
+            fail G-TRAY-AYATANA "the bar's focus walk never reached the item"
+        xdotool key Return
+        tray_wait "a11y-ayatana-menu-$1.json" "Ayatana Open" showing || fail G-TRAY-AYATANA "Enter did not open the menu"
+        cp "$ARTIFACTS/a11y-ayatana-menu-$1.json" "$ARTIFACTS/a11y-ayatana-menu.json"
+    }
+    ayatana_open first
+    showing "$ARTIFACTS/a11y-ayatana-menu.json" "Ayatana More" || fail G-TRAY-AYATANA "the submenu row is missing"
+    tray_checked "$ARTIFACTS/a11y-ayatana-menu.json" "Ayatana Check" true ||
+        fail G-TRAY-AYATANA "the check item is not shown checked"
+    hidden "$ARTIFACTS/a11y-ayatana-menu.json" "Ayatana Deep" || fail G-TRAY-AYATANA "the submenu opened by itself"
+    scrot "$ARTIFACTS/03e-tray-ayatana-menu.png" >/dev/null
+    for _ in $(seq 1 8); do
+        tray_dump a11y-ayatana-down.json
+        focused "$ARTIFACTS/a11y-ayatana-down.json" "Ayatana More" && break
+        xdotool key Down
+        sleep 0.5
+    done
+    focused "$ARTIFACTS/a11y-ayatana-down.json" "Ayatana More" || fail G-TRAY-AYATANA "Down never reached the submenu row"
+    xdotool key Right
+    tray_wait a11y-ayatana-sub.json "Ayatana Deep" showing || fail G-TRAY-AYATANA "Right did not open the submenu"
+    tray_wait a11y-ayatana-sub-focus.json "Ayatana Deep" focused || fail G-TRAY-AYATANA "Right did not focus the submenu's row"
+    scrot "$ARTIFACTS/03f-tray-ayatana-submenu.png" >/dev/null
+    xdotool key Return
+    tray_marker "$AYATANA_MARKER" '^activate Ayatana Deep$' || fail G-TRAY-AYATANA "Enter on the submenu row never reached the app"
+    tray_wait a11y-ayatana-fired.json "Ayatana Open" hidden || fail G-TRAY-AYATANA "the menu stayed open after a row fired"
+    ayatana_open again
+    hidden "$ARTIFACTS/a11y-ayatana-menu.json" "Ayatana Deep" || fail G-TRAY-AYATANA "the submenu stayed open across menus"
+    for _ in $(seq 1 8); do
+        tray_dump a11y-ayatana-check.json
+        focused "$ARTIFACTS/a11y-ayatana-check.json" "Ayatana Check" && break
+        xdotool key Down
+        sleep 0.5
+    done
+    xdotool key Return
+    tray_marker "$AYATANA_MARKER" '^toggled Ayatana Check False$' || fail G-TRAY-AYATANA "the check item never toggled in the app"
+    tray_wait a11y-ayatana-toggled.json "Ayatana Check" hidden || fail G-TRAY-AYATANA "the menu stayed open after the toggle"
+    ayatana_open toggled
+    cp "$ARTIFACTS/a11y-ayatana-menu.json" "$ARTIFACTS/a11y-ayatana-unchecked.json"
+    tray_checked "$ARTIFACTS/a11y-ayatana-unchecked.json" "Ayatana Check" false ||
+        fail G-TRAY-AYATANA "the menu kept the stale check state"
+    # A row added while the menu is open appears in place.
+    kill -HUP "$AYATANA_PID"
+    tray_wait a11y-ayatana-added.json "Ayatana Added" showing || fail G-TRAY-AYATANA "a live LayoutUpdated row never appeared"
+    showing "$ARTIFACTS/a11y-ayatana-added.json" "Ayatana Open" || fail G-TRAY-AYATANA "the live update closed the menu"
+    xdotool key Escape
+    tray_wait a11y-ayatana-escaped.json "Ayatana Open" hidden || fail G-TRAY-AYATANA "Escape left the menu open"
+    xdotool key Escape
+    sleep 1
+    # Pointer actions reach the library: middle click its secondary
+    # target, the wheel its scroll-event; a primary click opens the menu
+    # at once (the library has no Activate).
+    tray_xy="$(tray_point a11y-ayatana-escaped.json "Tuna Ayatana Probe")" || fail G-TRAY-AYATANA "the item has no bounds"
+    # shellcheck disable=SC2086
+    xdotool mousemove --window "$WID" $tray_xy click 2
+    tray_marker "$AYATANA_MARKER" '^activate Ayatana Open$' || fail G-TRAY-AYATANA "middle click never reached the secondary target"
+    xdotool click 5
+    tray_marker "$AYATANA_MARKER" '^scroll ' || fail G-TRAY-AYATANA "the wheel never reached the library"
+    xdotool click 1
+    tray_wait a11y-ayatana-click.json "Ayatana Open" showing || fail G-TRAY-AYATANA "a click did not open the menu"
+    xdotool key Escape
+    tray_wait a11y-ayatana-click-closed.json "Ayatana Open" hidden || fail G-TRAY-AYATANA "Escape left the menu open"
+    # Live label, attention icon and description, Passive and back.
+    kill -USR1 "$AYATANA_PID"
+    tray_wait a11y-ayatana-attention.json "Tuna Ayatana Probe Alert" showing ||
+        fail G-TRAY-AYATANA "NeedsAttention never took the attention description"
+    jq -e 'any(.[]; .role == "label" and .name == "8" and .showing)' "$ARTIFACTS/a11y-ayatana-attention.json" >/dev/null ||
+        fail G-TRAY-AYATANA "the label did not update live"
+    scrot "$ARTIFACTS/03g-tray-ayatana-attention.png" >/dev/null
+    # Passive hides the item whatever its icon; Active brings back the
+    # normal icon and its description.
+    ayatana_hidden() { hidden "$1" "Tuna Ayatana Probe Alert" && hidden "$1" "Tuna Ayatana Probe"; }
+    kill -USR2 "$AYATANA_PID"
+    tray_wait a11y-ayatana-passive.json - ayatana_hidden || fail G-TRAY-AYATANA "a Passive item stayed visible"
+    kill -USR2 "$AYATANA_PID"
+    tray_wait a11y-ayatana-active.json "Tuna Ayatana Probe" showing || fail G-TRAY-AYATANA "the item never came back from Passive"
+    kill "$AYATANA_PID" 2>/dev/null || true
+    tray_wait a11y-ayatana-gone.json - ayatana_hidden || fail G-TRAY-AYATANA "the item stayed after the app exited"
+    pass G-TRAY-AYATANA "a libayatana item registers by path, its label, menu, submenu and check work from the keyboard, and it updates and leaves live"
+else
+    echo "tuna-gtk-shell-proof: G-TRAY-AYATANA skipped (no AyatanaAppIndicator3 typelib)"
+fi
+}
+
+# G-TRAY-X11 needs the session's XWayland display ($x11_display).
+tray_x11_gate() {
+    if "$PY" -c 'import gi; gi.require_version("Gtk", "3.0"); gi.require_version("AyatanaAppIndicator3", "0.1")' 2>/dev/null; then
+        X11_TRAY_MARKER="$ARTIFACTS/tray-x11-marker"
+        rm -f "$X11_TRAY_MARKER"
+        DISPLAY="$x11_display" GDK_BACKEND=x11 "$PY" "$ROOT/scripts/lib/tuna-tray-ayatana.py" "$X11_TRAY_MARKER" "Tuna X11 Tray Probe" >"$ARTIFACTS/tray-x11.log" 2>&1 &
+        X11_TRAY_PID=$!
+        tray_marker "$X11_TRAY_MARKER" '^ready$' || fail G-TRAY-X11 "the X11 library item never started"
+        tray_wait a11y-tray-x11.json "Tuna X11 Tray Probe" showing || fail G-TRAY-X11 "the X11 client's item never showed"
+        "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-tray-x11-menu.json" 20 \
+            --press "Tuna X11 Tray Probe" >/dev/null 2>&1 || fail G-TRAY-X11 "could not open the X11 item"
+        tray_wait a11y-tray-x11-open.json "Ayatana Open" showing || fail G-TRAY-X11 "the X11 item's menu never showed"
+        "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-tray-x11-fire.json" 20 \
+            --press "Ayatana Open" >/dev/null 2>&1 || fail G-TRAY-X11 "could not fire the X11 item's row"
+        tray_marker "$X11_TRAY_MARKER" '^activate Ayatana Open$' || fail G-TRAY-X11 "the row never reached the X11 client"
+        kill "$X11_TRAY_PID" 2>/dev/null || true
+        tray_wait a11y-tray-x11-gone.json "Tuna X11 Tray Probe" hidden || fail G-TRAY-X11 "the X11 item stayed after exit"
+        pass G-TRAY-X11 "an XWayland client's AppIndicator shows, fires its menu row and leaves"
+    else
+        echo "tuna-gtk-shell-proof: G-TRAY-X11 skipped (no AyatanaAppIndicator3 typelib)"
+    fi
+}
+
+# G-X11-ICONIC (#1078): a minimized X11 window is told so, as Mutter's
+# meta_window_x11_set_wm_state and set_net_wm_state tell it: WM_STATE
+# IconicState and _NET_WM_STATE_HIDDEN while hidden, NormalState without
+# _NET_WM_STATE_HIDDEN once restored, so the client can pause rendering
+# and playback. Super+H, the window menu's Hide and the client's own ICCCM
+# WM_CHANGE_STATE IconicState request hide it; the overview and Alt+Tab
+# bring it back. Each state read is kept as x11-iconic-<step>.txt.
+x11_iconic_state() {
+    for _ in $(seq 1 25); do
+        DISPLAY="$x11_display" xprop -id "$iconic_window" WM_STATE _NET_WM_STATE \
+            >"$ARTIFACTS/x11-iconic-$2.txt" 2>&1 || true
+        if grep -q "window state: $1" "$ARTIFACTS/x11-iconic-$2.txt"; then
+            if grep -q _NET_WM_STATE_HIDDEN "$ARTIFACTS/x11-iconic-$2.txt"; then
+                [ "$1" = Iconic ] && return 0
+            else
+                [ "$1" = Normal ] && return 0
+            fi
+        fi
+        sleep 0.2
+    done
+    cat "$ARTIFACTS/x11-iconic-$2.txt" >&2
+    return 1
+}
+x11_iconic_pick() {
+    xdotool key Super_L
+    cstate ".overview_open and any(.previews[]; .id == $iconic_id)" "X11 probe preview" || return 1
+    sleep 1
+    iconic_pick="$(jq -r ".previews[] | select(.id == $iconic_id) | .rect | \"\(.[0] + .[2] / 2 | floor) \(.[1] + .[3] / 2 | floor)\"" "$CSTATE")"
+    # shellcheck disable=SC2086
+    xdotool mousemove --window "$WID" $iconic_pick click 1
+    cstate "(.overview_open | not) and .overview_progress == 0 and .focused == $iconic_id" "X11 probe picked"
+}
+x11_iconic_gate() {
+    iconic_before="$(jq -c '[.windows[] | .id]' "$CSTATE")"
+    DISPLAY="$x11_display" xev -name "Tuna Iconic Probe" >/dev/null 2>&1 &
+    ICONIC_PID=$!
+    cstate ".focused != null and (.focused as \$f | $iconic_before | index(\$f) == null)" "X11 probe focused" ||
+        fail G-X11-ICONIC "the X11 probe never took focus"
+    iconic_id="$(jq -r .focused "$CSTATE")"
+    iconic_window="$(DISPLAY="$x11_display" xdotool search --name '^Tuna Iconic Probe$' | head -1)"
+    [ -n "$iconic_window" ] || fail G-X11-ICONIC "the X11 probe's window was not found"
+    x11_iconic_state Normal mapped ||
+        fail G-X11-ICONIC "the mapped X11 window is not NormalState without _NET_WM_STATE_HIDDEN"
+
+    xdotool key super+h
+    cstate "any(.minimized[]; . == $iconic_id)" "Super+H hid the X11 probe" ||
+        fail G-X11-ICONIC "Super+H did not minimize the X11 window"
+    x11_iconic_state Iconic super-h ||
+        fail G-X11-ICONIC "Super+H left the X11 window without IconicState and _NET_WM_STATE_HIDDEN"
+    x11_iconic_pick || fail G-X11-ICONIC "the overview did not bring the X11 window back"
+    x11_iconic_state Normal overview ||
+        fail G-X11-ICONIC "the overview's restore left the X11 window iconic"
+
+    xdotool key alt+space
+    sleep 1.5
+    "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-x11-iconic-menu.json" 20 \
+        --press "Hide" || fail G-X11-ICONIC "the X11 window's menu has no Hide"
+    cstate "any(.minimized[]; . == $iconic_id)" "Hide hid the X11 probe" ||
+        fail G-X11-ICONIC "the window menu's Hide did not minimize the X11 window"
+    x11_iconic_state Iconic window-menu ||
+        fail G-X11-ICONIC "Hide left the X11 window without IconicState and _NET_WM_STATE_HIDDEN"
+    xdotool key alt+Tab
+    cstate ".focused == $iconic_id and (any(.minimized[]; . == $iconic_id) | not)" "Alt+Tab restored the X11 probe" ||
+        fail G-X11-ICONIC "Alt+Tab did not bring the X11 window back"
+    x11_iconic_state Normal alt-tab ||
+        fail G-X11-ICONIC "Alt+Tab's restore left the X11 window iconic"
+
+    # XIconifyWindow: WM_CHANGE_STATE IconicState to the root window.
+    DISPLAY="$x11_display" xdotool windowminimize "$iconic_window"
+    cstate "any(.minimized[]; . == $iconic_id)" "the X11 probe iconified itself" ||
+        fail G-X11-ICONIC "the client's WM_CHANGE_STATE IconicState did not minimize it"
+    x11_iconic_state Iconic wm-change-state ||
+        fail G-X11-ICONIC "the client's iconify left it without IconicState and _NET_WM_STATE_HIDDEN"
+    x11_iconic_pick || fail G-X11-ICONIC "the overview did not bring the iconified X11 window back"
+    x11_iconic_state Normal restored ||
+        fail G-X11-ICONIC "restoring the iconified X11 window left it iconic"
+    kill "$ICONIC_PID" 2>/dev/null || true
+    pass G-X11-ICONIC "Super+H, Hide and the client's own iconify make an X11 window IconicState with _NET_WM_STATE_HIDDEN; the overview and Alt+Tab make it NormalState without"
+}
+
+# G-LOCK-WITH-MENU-OPEN: GNOME's lock dismisses the open shell menu and
+# its grab, and the lock screen has the keyboard at once. Each menu is
+# opened from its keybinding, Super+L locks over it, and the password
+# is typed straight away: its first printable key lifts the curtain and
+# becomes the first character, so PAM unlocking proves every key reached
+# the lock screen (the open menu's grab once swallowed them all until an
+# Escape closed it, beta.3 qualification).
+lock_with_menu_gate() {
+    [ -n "$PAM_ON" ] || fail G-LOCK-WITH-MENU-OPEN "pam_wrapper is required to unlock"
+    for lock_menu in "super+v:Previous month:date-menu" "super+s:Dark Style:quick-settings"; do
+        lock_menu_key=${lock_menu%%:*}
+        lock_menu_rest=${lock_menu#*:}
+        lock_menu_probe=${lock_menu_rest%%:*}
+        lock_menu_name=${lock_menu_rest#*:}
+        cstate '(.locked | not)' "$lock_menu_name lock ready" 15 ||
+            fail G-LOCK-WITH-MENU-OPEN "the session was locked before opening the $lock_menu_name"
+        xdotool key "$lock_menu_key"
+        sleep 1.5
+        "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-open.json" 20 ||
+            fail G-LOCK-WITH-MENU-OPEN "accessibility dump failed"
+        showing "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-open.json" "$lock_menu_probe" ||
+            fail G-LOCK-WITH-MENU-OPEN "$lock_menu_key did not open the $lock_menu_name"
+        scrot "$ARTIFACTS/lock-menu-$lock_menu_name-01-open.png" >/dev/null
+        xdotool key super+l
+        cstate '.locked' "locked over the $lock_menu_name" 10 ||
+            fail G-LOCK-WITH-MENU-OPEN "Super+L did not lock with the $lock_menu_name open"
+        sleep 1
+        "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-locked.json" 20 ||
+            fail G-LOCK-WITH-MENU-OPEN "accessibility dump failed"
+        hidden "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-locked.json" "$lock_menu_probe" ||
+            fail G-LOCK-WITH-MENU-OPEN "the $lock_menu_name stayed open behind the lock"
+        scrot "$ARTIFACTS/lock-menu-$lock_menu_name-02-locked.png" >/dev/null
+        lock_menu_first=${UNLOCK_PASSWORD%"${UNLOCK_PASSWORD#?}"}
+        xdotool type --delay 30 "$lock_menu_first"
+        sleep 0.3
+        xdotool type --delay 30 "${UNLOCK_PASSWORD#?}"
+        scrot "$ARTIFACTS/lock-menu-$lock_menu_name-03-typed.png" >/dev/null
+        xdotool key Return
+        cstate '(.locked | not)' "unlocked from the $lock_menu_name lock" 15 ||
+            fail G-LOCK-WITH-MENU-OPEN "the password typed after locking over the $lock_menu_name did not reach the lock screen"
+        sleep 1
+        "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-unlocked.json" 20 ||
+            fail G-LOCK-WITH-MENU-OPEN "accessibility dump failed"
+        hidden "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-unlocked.json" "$lock_menu_probe" ||
+            fail G-LOCK-WITH-MENU-OPEN "the $lock_menu_name came back after unlocking"
+        scrot "$ARTIFACTS/lock-menu-$lock_menu_name-04-unlocked.png" >/dev/null
+    done
+    pass G-LOCK-WITH-MENU-OPEN "locking over the open date menu or quick settings closes it; the password typed at once and Return unlock through PAM"
+}
 
 # The panel is up once the shell registers on the a11y bus with its
 # controls; that also proves the accessible tree.
 "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-panel.json" 60 ||
     fail A11Y-PANEL "shell never registered on the accessibility bus"
+# G-SHELL-CAIRO (#503): a compositor on software GL tells its shell to
+# draw with cairo (GSK_RENDERER in the shell's environment), so the shell
+# makes no GL context of its own to find out and never loads Mesa's
+# rasterizer, LLVM or llvmpipe's threads. The proof's own Xvfb is always
+# software GL; on another display the compositor's word is taken.
+if [ "$INSTALLED_PACKAGE" = 0 ] && [ "$GRID_CANCEL_ONLY" = 0 ]; then
+    if grep -q 'tuna-compositor: OpenGL is .*; the shell draws with cairo' "$LOG"; then
+        cairo_shell="$(a11y_shell_pid)" || fail G-SHELL-CAIRO "expected exactly one owned shell"
+        tr '\0' '\n' <"/proc/$cairo_shell/environ" | grep -qx 'GSK_RENDERER=cairo' ||
+            fail G-SHELL-CAIRO "the shell was not started with GSK_RENDERER=cairo"
+        if grep -q 'tuna-shell-gtk: OpenGL is' "$LOG"; then
+            fail G-SHELL-CAIRO "the shell still made a GL context to read GL_RENDERER"
+        fi
+        if grep -E -q 'libgallium|libLLVM|_dri\.so' "/proc/$cairo_shell/maps"; then
+            fail G-SHELL-CAIRO "the shell loaded Mesa's rasterizer: $(grep -E -o 'libgallium[^ ]*|libLLVM[^ ]*|[a-z0-9_-]*_dri\.so' "/proc/$cairo_shell/maps" | sort -u | tr '\n' ' ')"
+        fi
+        pass G-SHELL-CAIRO "on software GL the compositor starts the shell with GSK_RENDERER=cairo; the shell maps no Mesa rasterizer"
+    elif [ -n "$OWNED_XVFB" ] && [ -z "${GSK_RENDERER:-}" ]; then
+        fail G-SHELL-CAIRO "the compositor on Xvfb's software GL did not choose cairo for its shell"
+    else
+        pass G-SHELL-CAIRO "the session chose its own renderer or OpenGL is not software; nothing to set"
+    fi
+fi
+SOCKET_NAME="$(sed -n 's/.*nested session on \([^ ]*\) .*/\1/p' "$LOG" | head -1)"
+[ -n "$SOCKET_NAME" ] || fail A11Y-PANEL "the nested session never logged its Wayland socket"
+if [ "$NOTIFY_LOCK_ONLY" = 1 ]; then
+    [ -n "$PAM_ON" ] || fail G-NOTIFY-LOCK "--notify-lock-only needs pam_wrapper to unlock"
+    cstate '.active_workspace != null and .locked == false' "notification desktop ready" ||
+        fail G-NOTIFY-LOCK "desktop never became ready"
+    notify_lock_proof
+    exit 0
+fi
+if [ "$TRAY_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "tray desktop ready" ||
+        fail G-TRAY-POINTER "desktop never became ready"
+    tray_pointer_gate
+    tray_ayatana_gate
+    cstate '.x11_display != null' "xwayland" 30 || fail G-TRAY-X11 "XWayland display never advertised"
+    x11_display="$(jq -r '.x11_display' "$CSTATE")"
+    tray_x11_gate
+    exit 0
+fi
+if [ "$X11_ICONIC_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "X11 iconic desktop ready" ||
+        fail G-X11-ICONIC "desktop never became ready"
+    # Let the startup cover settle before the first window.
+    sleep 3
+    cstate '.x11_display != null' "xwayland" 30 || fail G-X11-ICONIC "XWayland display never advertised"
+    x11_display="$(jq -r '.x11_display' "$CSTATE")"
+    x11_iconic_gate
+    grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
+    exit 0
+fi
 if [ "$KEYBOARD_ROUTES_ONLY" = 1 ]; then
     cstate '.active_workspace != null and .locked == false' "keyboard routes desktop ready" ||
         fail G-PANEL-MENU-KEYS "desktop never became ready"
@@ -1331,6 +2000,36 @@ if [ "$KEYBOARD_ROUTES_ONLY" = 1 ]; then
     keyboard_panel_menu_proof
     keyboard_notification_proof
     keyboard_screenshot_proof
+    exit 0
+fi
+if [ "$SEARCH_LEAK_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "search leak desktop ready" ||
+        fail G-SEARCH-LEAK "desktop never became ready"
+    # Let the startup cover settle before the first overview.
+    sleep 3
+    search_leak_proof
+    grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
+    shell_stable_gate
+    exit 0
+fi
+if [ "$WINDOW_LEAK_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "window leak desktop ready" ||
+        fail G-WINDOW-LEAK "desktop never became ready"
+    # Let the startup cover settle before the first window.
+    sleep 3
+    window_leak_proof
+    grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
+    shell_stable_gate
+    exit 0
+fi
+if [ "$LOCK_MENU_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "lock menu desktop ready" ||
+        fail G-LOCK-WITH-MENU-OPEN "desktop never became ready"
+    # Let the startup cover settle before the first menu.
+    sleep 3
+    lock_with_menu_gate
+    grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
+    shell_stable_gate
     exit 0
 fi
 if [ "$SCREENSHOT_KEYS_ONLY" = 1 ]; then
@@ -1371,6 +2070,7 @@ if [ "$A11Y_FOCUS_ONLY" = 1 ]; then
     # The startup cover must be gone before frames are read.
     sleep 3
     a11y_focus_ring_proof
+    if [ "$INSTALLED_PACKAGE" = 0 ]; then a11y_transient_stable_proof; fi
     if [ "$INSTALLED_PACKAGE" = 0 ]; then a11y_menu_restart_proof; fi
     grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
     shell_stable_gate
@@ -1382,6 +2082,24 @@ if [ "$GRID_HOVER_ONLY" = 1 ]; then
     # Let the startup cover settle before opening the grid.
     sleep 3
     grid_hover_proof
+    grid_on_demand_proof
+    grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
+    shell_stable_gate
+    exit 0
+fi
+if [ "$DATEMENU_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "date menu desktop ready" ||
+        fail G-CAL-OPEN "desktop never became ready"
+    # The startup cover must be gone before frames are read.
+    sleep 3
+    clock_damage_proof
+    calendar_proof
+    datemenu_proof
+    xdotool key Escape
+    sleep 1
+    "$ROOT/scripts/tuna-a11y-golden" check "$ARTIFACTS" calendar ||
+        fail A11Y-GOLDEN "the date menu's accessible tree differs from tests/a11y/calendar.txt (see above)"
+    pass A11Y-GOLDEN "the date menu's tree without Clocks and Weather matches its golden"
     grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
     shell_stable_gate
     exit 0
@@ -1504,60 +2222,21 @@ gsettings set org.gnome.desktop.background picture-options "$wallpaper_before_op
 sleep 1
 pass G-WALLPAPER-URI "spaces, Unicode and literal percent escapes identify the actual selected wallpaper pixels"
 
+# The comparison slice runs old binaries that publish no damage bounds.
+if [ "$GRID_CANCEL_ONLY" != 1 ]; then
+    clock_damage_proof
+fi
+
 # A popover counts as open only when its contents are showing in the
 # accessible tree: a pixel diff passes on a mere hover highlight.
 
-xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
-sleep 2
-scrot "$ARTIFACTS/02-calendar.png" >/dev/null
-"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-calendar.json" 20 ||
-    fail G-CAL-OPEN "accessibility dump failed"
-showing "$ARTIFACTS/a11y-calendar.json" "No Notifications" ||
-    fail G-CAL-OPEN "calendar popover contents not showing"
-pass G-CAL-OPEN "clock opens the calendar and notification list"
-for name in "Design review" "Release day" "All Day" "10:00 – 10:30"; do
-    showing "$ARTIFACTS/a11y-calendar.json" "$name" ||
-        fail G-CAL-EVENTS "the events card does not show \"$name\""
-done
-if showing "$ARTIFACTS/a11y-calendar.json" "Retro"; then
-    fail G-CAL-EVENTS "tomorrow's event shows under today"
+calendar_proof
+
+# World clocks and weather (P-PN-04). The comparison slice runs old
+# binaries that predate the cards.
+if [ "$GRID_CANCEL_ONLY" != 1 ]; then
+    datemenu_proof
 fi
-pass G-CAL-EVENTS "today's calendar-server events list in the events card, timed as GNOME does"
-# The open popover must update from real GSettings changes without a restart.
-"$PY" "$ROOT/scripts/lib/tuna-calendar-preferences-proof.py" "$ARTIFACTS/a11y-calendar.json" default false ||
-    fail G-CAL-PREFS "initial locale calendar is invalid"
-for first in Monday Thursday Sunday; do
-    gsettings set org.gnome.desktop.calendar week-start-day "$(printf '%s' "$first" | tr '[:upper:]' '[:lower:]')"
-    gsettings set org.gnome.desktop.calendar show-weekdate true
-    sleep 1
-    "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-calendar-$first.json" 20 ||
-        fail G-CAL-PREFS "live calendar tree is unavailable"
-    "$PY" "$ROOT/scripts/lib/tuna-calendar-preferences-proof.py" "$ARTIFACTS/a11y-calendar-$first.json" "$first" true ||
-        fail G-CAL-PREFS "weekday order or ISO week numbers did not follow $first"
-done
-gsettings reset org.gnome.desktop.calendar week-start-day
-gsettings reset org.gnome.desktop.calendar show-weekdate
-sleep 1
-"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-calendar-reset.json" 20 ||
-    fail G-CAL-PREFS "reset calendar tree is unavailable"
-"$PY" "$ROOT/scripts/lib/tuna-calendar-preferences-proof.py" "$ARTIFACTS/a11y-calendar-reset.json" default false ||
-    fail G-CAL-PREFS "locale reset or hiding week numbers failed"
-jq '[.[] | select(.showing and .role == "label" and (.name | test("^(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)$"))) | .name]' "$ARTIFACTS/a11y-calendar.json" >"$ARTIFACTS/calendar-initial-headings.json"
-jq '[.[] | select(.showing and .role == "label" and (.name | test("^(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)$"))) | .name]' "$ARTIFACTS/a11y-calendar-reset.json" >"$ARTIFACTS/calendar-reset-headings.json"
-cmp "$ARTIFACTS/calendar-initial-headings.json" "$ARTIFACTS/calendar-reset-headings.json" ||
-    fail G-CAL-PREFS "reset did not restore the initial locale headings"
-scrot "$ARTIFACTS/02-calendar-reset.png" >/dev/null
-pass G-CAL-PREFS "live weekday changes, six ISO week labels and locale reset are visible in the same shell"
-"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-calendar-launch.json" 20 --press "Open Calendar" ||
-    fail G-CAL-LAUNCH "events card has no accessible launch action"
-sleep 1
-[ "$(cat "$ARTIFACTS/calendar-launch" 2>/dev/null)" = "calendar:///$(date +%F)" ] ||
-    fail G-CAL-LAUNCH "default calendar did not launch at the selected day"
-"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-calendar-closed.json" 20
-if showing "$ARTIFACTS/a11y-calendar-closed.json" "Open Calendar"; then
-    fail G-CAL-LAUNCH "calendar popover stayed open after launch"
-fi
-pass G-CAL-LAUNCH "default calendar launches selected day through Tuna Desktop and closes the menu"
 
 xdotool key Escape
 sleep 1
@@ -1668,6 +2347,12 @@ pass G-TRAY "an AppIndicator item shows with its tooltip, fires its menu, and le
 xdotool key Escape
 sleep 1
 
+# The comparison slice runs old binaries that predate these tray gates.
+if [ "$GRID_CANCEL_ONLY" != 1 ]; then
+    tray_pointer_gate
+    tray_ayatana_gate
+fi
+
 # App stages: three libadwaita windows (scripts/lib/tuna-test-window.py).
 # Reserving an X11 display must not launch a compatibility process. The
 # panel/calendar are already real native Wayland clients at this point.
@@ -1686,7 +2371,6 @@ if command -v Xwayland >/dev/null 2>&1; then
     fi
     pass G-X11-DEMAND "native GTK and IBus startup advertise sockets without an XWayland or XIM process"
 fi
-SOCKET_NAME="$(sed -n 's/.*nested session on \([^ ]*\) .*/\1/p' "$LOG" | head -1)"
 # One at a time, so window ids (and with them GNOME's running-app order
 # in the dash) follow Alpha, Beta, Gamma.
 n=0
@@ -1829,7 +2513,7 @@ EOF2
     sleep 0.5
     cstate ".windows[] | select(.app_id == \"tuna-test-beta\") | .rect[2] == $bw and .rect[3] == $bh and .rect[0] < $bx" "dropped floating" ||
         fail G-EDGE-TILING-OFF "the window tiled or resized with edge-tiling off"
-    cp "$CSTATE" "$ARTIFACTS/edge-tiling-off.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/edge-tiling-off.json"
     # GTK must request the native move while the button is still held.
     # Sending the whole restore before that round trip can retire the
     # implicit grab first. Admission and completion share the original 20s.
@@ -1845,7 +2529,7 @@ EOF2
         ! cstate ".interactive_move_window == $restore_id and .pointer_position == [$((nx + 151)), $((ny + 20))]" "Beta restore move admitted" "$restore_wait"; then
         fail G-EDGE-TILING-OFF "GTK never acquired Beta's native restore move"
     fi
-    cp "$CSTATE" "$ARTIFACTS/edge-tiling-restore-admission.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/edge-tiling-restore-admission.json"
     restore_geometry="$(jq -er --argjson id "$restore_id" \
         --argjson x "$((nx + 151))" --argjson y "$((ny + 20))" '
         select(.interactive_move_window == $id and .pointer_position == [$x, $y]) |
@@ -2164,16 +2848,16 @@ EOF2
     xdotool key super+shift+End
     cstate ". as \$s | any(.windows[]; .id == $mt_gamma and .workspace == \$s.workspaces[3]) and .active_workspace == .workspaces[3]" "gamma on the last fixed workspace" ||
         fail G-WS-FIXED "Super+Shift+End did not move Gamma to the 4th fixed workspace"
-    cp "$CSTATE" "$ARTIFACTS/workspaces-fixed-4.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/workspaces-fixed-4.json"
     gsettings set org.gnome.desktop.wm.preferences num-workspaces 2
     cstate ". as \$s | (.workspaces | length) == 2 and any(.windows[]; .id == $mt_gamma and .workspace == \$s.workspaces[1]) and any(.workspaces[]; . == \$s.active_workspace) and ([.windows[] | select(.id != $mt_gamma)] | all(.workspace == \$s.workspaces[0]))" "shrunk to two" ||
         fail G-WS-FIXED "shrinking num-workspaces did not move Gamma to the new last workspace"
-    cp "$CSTATE" "$ARTIFACTS/workspaces-fixed-2.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/workspaces-fixed-2.json"
     gsettings set org.gnome.mutter dynamic-workspaces true
     gsettings reset org.gnome.desktop.wm.preferences num-workspaces
     cstate ". as \$s | .multitasking.dynamic_workspaces and (.workspaces | length) == 3 and any(.windows[]; .id == $mt_gamma and .workspace == \$s.workspaces[1])" "dynamic again" ||
         fail G-WS-FIXED "dynamic-workspaces on did not compact to two occupied workspaces and one empty"
-    cp "$CSTATE" "$ARTIFACTS/workspaces-dynamic-again.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/workspaces-dynamic-again.json"
     [ "$(jq .focused "$CSTATE")" = "$mt_gamma" ] || xdotool key super+Page_Down
     cstate ".focused == $mt_gamma" "gamma focused before home" ||
         fail G-WS-FIXED "could not focus Gamma on its workspace"
@@ -2209,7 +2893,7 @@ EOF2
         else
             want_x=$(((WIDTH % (dw + 1)) / 2)); want_y=$((32 + (work_h % (dh + 1)) / 3))
         fi
-        cp "$CSTATE" "$ARTIFACTS/center-new-windows-$mt_center.json"
+        snapshot_state "$CSTATE" "$ARTIFACTS/center-new-windows-$mt_center.json"
         scrot "$ARTIFACTS/08f-center-new-windows-$mt_center.png" >/dev/null
         if [ "$dx" != "$want_x" ] || [ "$dy" != "$want_y" ]; then
             fail G-CENTER-NEW-WINDOWS "center-new-windows=$mt_center placed ${dw}x$dh at $dx,$dy, not mutter's $want_x,$want_y"
@@ -2289,7 +2973,7 @@ else
     anim_clock 50
     cstate "$(thumb_alphas '((. - 191 / 255) | fabs) < 1e-6')" "thumbnails 50 ms in" ||
         { xdotool keyup Alt_L; real_clock; fail G-SWITCHER-FADE "the thumbnails' windows were not three quarters opaque 50 ms in"; }
-    cp "$CSTATE" "$ARTIFACTS/switcher-thumbnails-50ms.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/switcher-thumbnails-50ms.json"
     anim_clock 100
     cstate "$(thumb_alphas '. == 1')" "thumbnails 100 ms in" ||
         { xdotool keyup Alt_L; real_clock; fail G-SWITCHER-FADE "the thumbnails' windows were not opaque 100 ms in"; }
@@ -2306,7 +2990,7 @@ else
     anim_clock 150
     cstate "$(thumb_alphas '((. - 64 / 255) | fabs) < 1e-6')" "thumbnails 50 ms into the fade-out" ||
         { real_clock; fail G-SWITCHER-FADE "the thumbnails' windows were not a quarter opaque 50 ms into the fade-out"; }
-    cp "$CSTATE" "$ARTIFACTS/switcher-thumbnails-out-50ms.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/switcher-thumbnails-out-50ms.json"
     anim_clock 200
     cstate ".switcher_thumbnails == 0 and .focused == $fade_focus" "thumbnails faded out" ||
         { real_clock; fail G-SWITCHER-FADE "the thumbnails' windows were still drawn after the fade-out, or focus moved"; }
@@ -2347,6 +3031,37 @@ showing "$ARTIFACTS/a11y-search.json" "Tuna Probe" ||
     fail G-OV-SEARCH "typing did not list the probe app"
 pass G-OV-SEARCH "typing in the overview lists matching apps"
 scrot "$ARTIFACTS/10-search.png" >/dev/null
+# GNOME Shell's caret is steady (StEntry, ClutterText): with the search
+# entry focused and nothing changing, the overview draws no frames (#503).
+# A blinking GTK caret would redraw the entry at the display rate. The
+# grid-cancel comparison's old role runs pinned pre-#503 binaries through
+# this stage, so the gate belongs to the current build only.
+# The overview keeps the top bar, whose clock redraws once as the minute
+# turns (wall_clock.rs, as GnomeWallClock): a legitimate frame, not the
+# entry's. The window never spans a turn: within 3 s of one it first
+# waits for that turn's frame to be drawn, and within 1 s after one it
+# starts once the turn is 1 s old.
+if [ "$GRID_CANCEL_OLD_NEGATIVE" != 1 ]; then
+    minute_ms() { echo $(($(date +%s%3N) % 60000)); }
+    sleep_ms() { sleep "$(printf '%d.%03d' $(($1 / 1000)) $(($1 % 1000)))"; }
+    search_still_ms="$(minute_ms)"
+    if [ "$search_still_ms" -ge 57000 ]; then
+        search_still_frames="$(jq .rendered_frames "$CSTATE")"
+        search_still_ms="$(minute_ms)"
+    fi
+    if [ "$search_still_ms" -ge 57000 ]; then
+        sleep_ms $((60000 - search_still_ms))
+        cstate ".rendered_frames > $search_still_frames" "the clock's minute turn drawn" 5 ||
+            fail G-OV-SEARCH-STILL "the panel clock drew no frame as the minute turned"
+    elif [ "$search_still_ms" -lt 1000 ]; then
+        sleep_ms $((1000 - search_still_ms))
+    fi
+    search_still_frames="$(jq .rendered_frames "$CSTATE")"
+    sleep 1.5
+    [ "$(jq .rendered_frames "$CSTATE")" = "$search_still_frames" ] ||
+        fail G-OV-SEARCH-STILL "the compositor drew frames while the focused overview search sat unchanged"
+    pass G-OV-SEARCH-STILL "the focused overview search sits still: no frames while nothing changes"
+fi
 
 xdotool key Return
 end=$(($(date +%s) + 15))
@@ -2666,6 +3381,27 @@ done
 # before admitting the active first-page tree, within the same preview budget.
 xdotool mousemove --window "$WID" "$grid_neutral_x" "$grid_neutral_y"
 grid_peek_end=$(($(date +%s) + 10))
+# Old observation role only; the fixed role and the full gate stay parked.
+# The pinned old source predates #674: its GtkFixed hint is measured by the
+# preview icons sliding in from outside the clip, so during that 150 ms slide
+# the "10%" hint is several times wider (700-1000+ px in #674). The one
+# motion that parks the pointer can land in it; the old pager then counts the
+# pointer as dwelling on the next-page hint, and because a parked pointer
+# sends no further motion nothing re-evaluates that before the 1 s dwell
+# turns the page (main run 43259379979: "actual carousel page changed before
+# Escape", page 2 mid-slide with only the previous-page hint). Deliver a real
+# motion inside the same admitted gap after the slide and well inside the
+# dwell, so the old pager tests its settled hint. Admitted points keep 3 px
+# from every tile and hint, so the adjacent pixel is in the gap too. Every
+# later check is unchanged: a page that turns anyway still fails the
+# first-page comparison, and the preview budget still starts at the park.
+grid_cancel_old_settle() {
+    [ "$GRID_CANCEL_OLD_NEGATIVE" = 1 ] || return 0
+    xdotool mousemove --window "$WID" $((grid_neutral_x + 1)) "$grid_neutral_y"
+    xdotool mousemove --window "$WID" "$grid_neutral_x" "$grid_neutral_y"
+}
+if [ "$GRID_CANCEL_OLD_NEGATIVE" = 1 ]; then sleep 0.3; fi
+grid_cancel_old_settle
 until grid_cancel_dump "$ARTIFACTS/a11y-folder-page-peek.json" &&
     showing "$ARTIFACTS/a11y-folder-page-peek.json" "Next page preview" &&
     ! showing "$ARTIFACTS/a11y-folder-page-peek.json" "Next Page" &&
@@ -2691,6 +3427,7 @@ read -r grid_neutral_x grid_neutral_y <<EOF
 $neutral_coordinates
 EOF
 xdotool mousemove --window "$WID" "$grid_neutral_x" "$grid_neutral_y"
+grid_cancel_old_settle
 grid_neutral_wait=$((grid_peek_end - $(date +%s)))
 if [ "$grid_neutral_wait" -lt 0 ] ||
     ! cstate ".client_dnd_active == true and .overview_open and .overview_app_grid and (.locked == false) and (.pointer_position == [$grid_neutral_x, $grid_neutral_y])" "real folder drag active at observed neutral point" "$grid_neutral_wait"; then
@@ -2699,7 +3436,7 @@ fi
 grid_cancel_dump "$ARTIFACTS/a11y-folder-page-peek.json" ||
     fail G-GRID-DRAG-CANCEL "active neutral dump failed"
 scrot "$ARTIFACTS/11h-folder-page-peek.png" >/dev/null
-cp "$CSTATE" "$ARTIFACTS/grid-cancel-before-escape.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/grid-cancel-before-escape.json"
 "$PY" "$ROOT/scripts/lib/tuna_grid_cancel_proof.py" neutral-check \
     "$grid_cancel_pid" "$grid_cancel_start" "$ARTIFACTS/a11y-folder-page-peek.json" \
     "$ARTIFACTS/grid-cancel-before-escape.json" "$grid_neutral_x" "$grid_neutral_y" \
@@ -2712,7 +3449,7 @@ if [ "$GRID_CANCEL_OLD_NEGATIVE" = 1 ]; then
     # Test-only old-source discriminator. The default/full gate NEVER accepts
     # overview close, and this branch requires the exact live old tuple above.
     cstate ".client_dnd_active == true and .overview_open == false and (.locked == false) and (.rendered_frames > $grid_cancel_before_frame)" "old drag retained before release" || fail G-GRID-DRAG-OLD-NEG "reviewed old source did not reproduce Escape routing failure"
-    cp "$CSTATE" "$ARTIFACTS/grid-cancel-old-before-release.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/grid-cancel-old-before-release.json"
     scrot "$ARTIFACTS/grid-cancel-old-before-release.png" >/dev/null
     gsettings get org.gnome.shell app-picker-layout > "$ARTIFACTS/grid-cancel-old-layout-before-release.txt"
     "$PY" - "$ROOT" "$ARTIFACTS/grid-cancel-before-escape.json" "$ARTIFACTS/grid-cancel-old-before-release.json" <<'PY_GRID_OLD'
@@ -2732,7 +3469,7 @@ fi
 # xdotool's Escape release reaches the seat after its press cancels the drag,
 # so wait for the held-key count to return to its baseline too.
 cstate ".client_dnd_active == false and .overview_open and .overview_app_grid and (.locked == false) and (.rendered_frames > $grid_cancel_before_frame) and (.seat_pressed_key_count == $grid_cancel_before_keys)" "folder cancellation before release" || fail G-GRID-DRAG-CANCEL "Escape failed to cancel native drag while keeping grid open"
-cp "$CSTATE" "$ARTIFACTS/grid-cancel-before-release.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/grid-cancel-before-release.json"
 scrot "$ARTIFACTS/grid-cancel-before-release.png" >/dev/null
 # GTK hears cancel asynchronously and removes preview widgets during traversal.
 # Reject an inconsistent tree, then wait for a fresh complete owner-bound tree
@@ -2915,6 +3652,7 @@ rm -f "$XDG_DATA_HOME"/applications/tuna-drag-*.desktop
 sleep 1.5
 
 grid_hover_proof
+grid_on_demand_proof
 # Moving an item to another page leaves its old page short; a catalog
 # rebuild must respect those saved page boundaries instead of flattening.
 "$PY" "$ROOT/scripts/lib/grid-target-settled-tests.py" >"$ARTIFACTS/grid-target-settled-tests.log" 2>&1 ||
@@ -3192,16 +3930,20 @@ RUNNING_MARKER="$ARTIFACTS/running-app-relaunched"
 rm -f "$RUNNING_MARKER"
 printf '[Desktop Entry]\nName=Tuna Running Probe\nExec=touch %s\nType=Application\n' "$RUNNING_MARKER" >"$running_desktop"
 sleep 1.5
-# The tile, on whichever grid page holds it: its centre on the output
-# from the App Grid window's own nodes (the dash lists the app too).
-running_tile() {
-    jq -er --arg name "Tuna Running Probe" --argjson ox "$grid_origin_x" --argjson oy "$grid_origin_y" --argjson width "$WIDTH" '
+# A showing button's centre on the output, from one shell window's own
+# nodes ($2: its frame's name) at that window's origin ($4, $5).
+frame_point() {
+    jq -er --arg frame "$2" --arg name "$3" --argjson ox "$4" --argjson oy "$5" --argjson width "$WIDTH" '
         [foreach .[] as $n (null; if $n.role == "frame" then $n.name else . end; [., $n])]
-        | map(select(.[0] == "App Grid") | .[1]
+        | map(select(.[0] == $frame) | .[1]
             | select(.showing and (.role == "push button" or .role == "button") and .name == $name
                 and .bounds[2] > 0 and .bounds[3] > 0
                 and .bounds[0] + $ox >= 0 and .bounds[0] + $ox + .bounds[2] <= $width))
         | first | .bounds | "\((.[0] + $ox + .[2] / 2) | floor) \((.[1] + $oy + .[3] / 2) | floor)"' "$1"
+}
+# The tile, on whichever grid page holds it (the dash lists the app too).
+running_tile() {
+    frame_point "$1" "App Grid" "Tuna Running Probe" "$grid_origin_x" "$grid_origin_y"
 }
 running_open_grid() {
     xdotool key super+a
@@ -3256,6 +3998,170 @@ cstate '.overview_open | not' "closed after Ctrl+click" ||
 cp "$ARTIFACTS/running-app-hidden.desktop" "$running_desktop"
 sleep 1.5
 pass G-GRID-ACTIVATE-RUNNING "a running app's grid tile raises its window without relaunching or zooming; Ctrl+click opens another with the zoom"
+
+# GNOME's dash (dash.js:16-190, 640-780): an app joining the dash zooms
+# and fades in over DASH_ANIMATION_TIME 200 ms ease-out-quad and one
+# leaving zooms and fades out from where it is drawn; a hovered item's
+# label fades in above it over 150 ms after DASH_ITEM_HOVER_TIMEOUT
+# 300 ms and out over 100 ms. The shell reads this proof's animation
+# clock, so its traced frames (TUNA_DASH_TRACE) are sampled at exact
+# delays. Test windows are window-backed dash items.
+motion_policy Full
+xdotool key Super_L
+cstate '.overview_open and .overview_progress == 1' "overview for the dash" ||
+    fail G-DASH-MOTION "the overview did not open"
+sleep 1
+anim_clock 0
+cstate '.animation_clock_manual' "frozen dash clock" ||
+    fail G-DASH-MOTION "the clock file did not freeze animation time"
+dash_clock=0
+# Move the frozen animation clock on by $1 ms.
+dash_after() {
+    dash_clock=$((dash_clock + $1))
+    anim_clock "$dash_clock"
+}
+# Map test window $1 ($2: its colour); dash_key names its dash item.
+dash_window() {
+    dash_windows=$(jq '.windows | length' "$CSTATE")
+    WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/tuna-test-window.py" "$1" "$2" \
+        >"$ARTIFACTS/window-dash-$1.log" 2>&1 &
+    dash_pid=$!
+    cstate "(.windows | length) == $((dash_windows + 1))" "$1 mapped" ||
+        fail G-DASH-MOTION "$1 never mapped"
+    dash_app="tuna-test-$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+    dash_key="window:$(jq -r --arg a "$dash_app" '[.windows[] | select(.app_id == $a) | .id] | max' "$CSTATE")"
+    cstate '.overview_open' "overview kept" || fail G-DASH-MOTION "mapping $1 closed the overview"
+}
+dash_close() {
+    kill "$1"
+    cstate "(.windows | length) == $dash_windows" "window gone" ||
+        fail G-DASH-MOTION "a test window did not close"
+}
+dash_mark="$(log_mark)"
+dash_window Delta '#c061cb'
+delta_pid=$dash_pid
+delta_key=$dash_key
+log_wait "$dash_mark" "dash item $delta_key show start from=0.0000,0.0000 ms=200 motion=full clock=manual" ||
+    fail G-DASH-MOTION "a new running app did not start GNOME's 200 ms zoom in on the frozen clock"
+dash_after 100
+log_wait "$dash_mark" "dash item $delta_key frame scale=0.7500 opacity=0.7500" ||
+    fail G-DASH-MOTION "100 ms in, the new item was not at ease-out-quad 75% size and opacity"
+scrot "$ARTIFACTS/dash-add-100ms.png" >/dev/null
+dash_after 100
+log_wait "$dash_mark" "dash item $delta_key settle scale=1.0000 opacity=1.0000" ||
+    fail G-DASH-MOTION "the new item did not settle 200 ms in"
+# Its hover label, above it.
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-dash-motion.json" 20 ||
+    fail G-DASH-MOTION "accessibility dump failed"
+cstate '.layers | any(.namespace == "tuna-shell-dash")' "dash layer" || fail G-DASH-MOTION "dash layer missing"
+dash_ox="$(jq '.layers[] | select(.namespace == "tuna-shell-dash") | .rect[0]' "$CSTATE")"
+dash_oy="$(jq '.layers[] | select(.namespace == "tuna-shell-dash") | .rect[1]' "$CSTATE")"
+dash_point="$(frame_point "$ARTIFACTS/a11y-dash-motion.json" Dash tuna-test-delta "$dash_ox" "$dash_oy")" ||
+    fail G-DASH-MOTION "the new dash item has no bounds"
+dash_mark="$(log_mark)"
+# shellcheck disable=SC2086
+xdotool mousemove --window "$WID" $dash_point
+sleep 0.1
+log_has "$dash_mark" "dash label $delta_key show" &&
+    fail G-DASH-MOTION "the label showed before GNOME's 300 ms hover timeout"
+log_wait "$dash_mark" "dash label $delta_key show start from=0.0000 ms=150 motion=full clock=manual" ||
+    fail G-DASH-MOTION "hovering the item did not start its label's 150 ms fade"
+dash_after 75
+log_wait "$dash_mark" "dash label $delta_key frame opacity=0.7500" ||
+    fail G-DASH-MOTION "75 ms in, the label was not at ease-out-quad 75%"
+scrot "$ARTIFACTS/dash-label-75ms.png" >/dev/null
+dash_after 75
+log_wait "$dash_mark" "dash label $delta_key settle opacity=1.0000" ||
+    fail G-DASH-MOTION "the label did not settle 150 ms in"
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-dash-label.json" 20 ||
+    fail G-DASH-MOTION "accessibility dump failed"
+# The label shows as a plain label (GNOME's chrome St.Label); the item's
+# button stays the one control carrying the name.
+jq -e 'any(.[]; .showing and .role == "label" and .name == "tuna-test-delta")' \
+    "$ARTIFACTS/a11y-dash-label.json" >/dev/null ||
+    fail G-DASH-MOTION "the hovered item's label did not show"
+[ "$(jq '[.[] | select(.showing and .role != "label" and .name == "tuna-test-delta")] | length' "$ARTIFACTS/a11y-dash-label.json")" = 1 ] ||
+    fail G-DASH-MOTION "the label added a second control named like the item"
+dash_mark="$(log_mark)"
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 3))
+log_wait "$dash_mark" "dash label $delta_key hide start from=1.0000 ms=100 motion=full clock=manual" ||
+    fail G-DASH-MOTION "leaving the item did not start its label's 100 ms fade out"
+dash_after 50
+log_wait "$dash_mark" "dash label $delta_key frame opacity=0.2500" ||
+    fail G-DASH-MOTION "50 ms out, the label was not at ease-out-quad 25%"
+dash_after 50
+log_wait "$dash_mark" "dash label $delta_key settle opacity=0.0000" ||
+    fail G-DASH-MOTION "the label did not fade out in 100 ms"
+# An item leaving while it still zooms in shrinks back from where it is
+# drawn, over the whole 200 ms.
+dash_mark="$(log_mark)"
+dash_window Epsilon '#986a44'
+log_wait "$dash_mark" "dash item $dash_key show start from=0.0000,0.0000 ms=200" ||
+    fail G-DASH-MOTION "the second item did not zoom in"
+dash_after 100
+log_wait "$dash_mark" "dash item $dash_key frame scale=0.7500 opacity=0.7500" ||
+    fail G-DASH-MOTION "the second item was not at 75% 100 ms in"
+dash_close "$dash_pid"
+log_wait "$dash_mark" "dash item $dash_key hide start from=0.7500,0.7500 ms=200 motion=full clock=manual" ||
+    fail G-DASH-MOTION "the item leaving mid-zoom did not reverse from where it was drawn"
+log_has "$dash_mark" "dash item $dash_key frame scale=0.0000" &&
+    fail G-DASH-MOTION "the item leaving mid-zoom jumped"
+dash_after 100
+log_wait "$dash_mark" "dash item $dash_key frame scale=0.1875 opacity=0.1875" ||
+    fail G-DASH-MOTION "100 ms into the reversal the item was not at ease-out-quad from 75%"
+dash_after 100
+log_wait "$dash_mark" "dash item $dash_key settle scale=0.0000 opacity=0.0000" ||
+    fail G-DASH-MOTION "the reversed item did not leave 200 ms after its window closed"
+dash_mark="$(log_mark)"
+dash_windows=$(($(jq '.windows | length' "$CSTATE") - 1))
+dash_close "$delta_pid"
+log_wait "$dash_mark" "dash item $delta_key hide start from=1.0000,1.0000 ms=200 motion=full clock=manual" ||
+    fail G-DASH-MOTION "a closed app's item did not start zooming out"
+dash_after 100
+log_wait "$dash_mark" "dash item $delta_key frame scale=0.2500 opacity=0.2500" ||
+    fail G-DASH-MOTION "100 ms out, the item was not at ease-out-quad 25%"
+dash_after 100
+log_wait "$dash_mark" "dash item $delta_key settle scale=0.0000 opacity=0.0000" ||
+    fail G-DASH-MOTION "the closed app's item did not leave in 200 ms"
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-dash-removed.json" 20 ||
+    fail G-DASH-MOTION "accessibility dump failed"
+showing "$ARTIFACTS/a11y-dash-removed.json" tuna-test-delta &&
+    fail G-DASH-MOTION "the removed item stayed in the dash"
+# Reduced Motion: the item keeps its size and only fades.
+motion_policy FadesOnly
+dash_mark="$(log_mark)"
+dash_window Epsilon '#986a44'
+log_wait "$dash_mark" "dash item $dash_key show start from=0.0000,0.0000 ms=200 motion=fade-only clock=manual" ||
+    fail G-DASH-MOTION "Reduced Motion dropped the item's fade"
+dash_after 100
+log_wait "$dash_mark" "dash item $dash_key frame scale=1.0000 opacity=0.7500" ||
+    fail G-DASH-MOTION "under Reduced Motion the item zoomed, or did not fade"
+dash_after 100
+log_wait "$dash_mark" "dash item $dash_key settle scale=1.0000 opacity=1.0000" ||
+    fail G-DASH-MOTION "under Reduced Motion the item did not settle"
+dash_close "$dash_pid"
+log_wait "$dash_mark" "dash item $dash_key hide start from=1.0000,1.0000 ms=200 motion=fade-only" ||
+    fail G-DASH-MOTION "under Reduced Motion the leaving item did not fade"
+dash_after 100
+log_wait "$dash_mark" "dash item $dash_key frame scale=1.0000 opacity=0.2500" ||
+    fail G-DASH-MOTION "under Reduced Motion the leaving item shrank"
+dash_after 100
+log_wait "$dash_mark" "dash item $dash_key settle scale=1.0000 opacity=0.0000" ||
+    fail G-DASH-MOTION "under Reduced Motion the leaving item did not settle"
+# Animations off: in and out at once.
+motion_policy Off
+dash_mark="$(log_mark)"
+dash_window Epsilon '#986a44'
+log_wait "$dash_mark" "dash item $dash_key show instant motion=off" ||
+    fail G-DASH-MOTION "with animations off the item still zoomed in"
+dash_close "$dash_pid"
+log_wait "$dash_mark" "dash item $dash_key hide instant motion=off" ||
+    fail G-DASH-MOTION "with animations off the item still zoomed out"
+motion_policy Full
+real_clock || fail G-DASH-MOTION "removing the clock file did not resume real time"
+xdotool key Escape
+cstate '.overview_open | not' "dash overview closed" || fail G-DASH-MOTION "the overview would not close"
+pass G-DASH-MOTION "dash items zoom and fade in and out over 200 ms ease-out-quad, a leaving item reverses from where it stands, hover labels fade 150/100 ms after 300 ms; Reduced Motion only fades, off is instant"
 
 # Notifications (#56). Close whatever the grid left open first (#97).
 xdotool key Escape
@@ -3459,7 +4365,7 @@ gsettings get org.gnome.desktop.notifications application-children | grep -q "$P
     fail G-NOTIFY-POLICY "the first notification did not register the app in application-children"
 gsettings set "org.gnome.desktop.notifications.application:/org/gnome/desktop/notifications/application/$POLICY_APP/" enable false
 sleep 1
-notify_hinted "Policy Held" "Dropped while the app is disabled" || fail G-NOTIFY-POLICY "Notify call failed"
+notify_hinted "Policy Held" "Hidden while the app is disabled" || fail G-NOTIFY-POLICY "Notify call failed"
 sleep 1
 "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-policy-held.json" 20 ||
     fail G-NOTIFY-POLICY "accessibility dump failed"
@@ -3469,12 +4375,32 @@ fi
 open_calendar
 "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-policy-list.json" 20 ||
     fail G-NOTIFY-POLICY "accessibility dump failed"
-showing "$ARTIFACTS/a11y-policy-list.json" "Policy First" ||
-    fail G-NOTIFY-POLICY "the enabled notification is missing from the list"
-if showing "$ARTIFACTS/a11y-policy-list.json" "Policy Held"; then
-    fail G-NOTIFY-POLICY "the disabled app's notification reached the list"
-fi
-pass G-NOTIFY-POLICY "first notify registers the app; disabling it drops banners and list entries"
+# GNOME takes the disabled app's whole source out of the tray
+# (`_onSourceEnableChanged`): what it filed while enabled hides too.
+for policy_title in "Policy First" "Policy Held"; do
+    if showing "$ARTIFACTS/a11y-policy-list.json" "$policy_title"; then
+        fail G-NOTIFY-POLICY "the disabled app's \"$policy_title\" is in the list"
+    fi
+done
+# Enabled again, its source comes back with both notifications.
+gsettings set "org.gnome.desktop.notifications.application:/org/gnome/desktop/notifications/application/$POLICY_APP/" enable true
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-policy-restored.json" 20 ||
+    fail G-NOTIFY-POLICY "accessibility dump failed"
+# The two come back as one collapsed group showing the newest; pressing
+# the group (named for the app) shows both.
+showing "$ARTIFACTS/a11y-policy-restored.json" "Policy Held" ||
+    fail G-NOTIFY-POLICY "re-enabling the app did not bring \"Policy Held\" back to the list"
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-policy-restored-open.json" 20 \
+    --press "Tuna Proof Notes" || fail G-NOTIFY-POLICY "could not press the restored group"
+sleep 1
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-policy-restored-open.json" 20 ||
+    fail G-NOTIFY-POLICY "accessibility dump failed"
+for policy_title in "Policy First" "Policy Held"; do
+    showing "$ARTIFACTS/a11y-policy-restored-open.json" "$policy_title" ||
+        fail G-NOTIFY-POLICY "re-enabling the app did not bring \"$policy_title\" back to the list"
+done
+pass G-NOTIFY-POLICY "first notify registers the app; disabling it hides its banners and list entries, re-enabling brings them back"
 # Leave the list empty and the settings as found for the next gates.
 "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-policy-cleared.json" 20 \
     --press "Clear" || fail G-NOTIFY-POLICY "could not press Clear"
@@ -3482,7 +4408,6 @@ showing "$ARTIFACTS/a11y-policy-cleared.json" "No Notifications" ||
     fail G-NOTIFY-POLICY "Clear did not empty the policy list"
 xdotool key Escape
 sleep 1
-gsettings set "org.gnome.desktop.notifications.application:/org/gnome/desktop/notifications/application/$POLICY_APP/" enable true
 gsettings set org.gnome.desktop.notifications application-children "$POLICY_CHILDREN_BEFORE"
 gsettings set org.gnome.desktop.notifications show-banners "$POLICY_BANNERS_BEFORE"
 rm -f "$POLICY_DESKTOP_FILE"
@@ -4651,7 +5576,7 @@ if command -v Xwayland >/dev/null 2>&1 && command -v xeyes >/dev/null 2>&1; then
         cstate ".windows[] | select(.id == $x11_model_id) | .introspect_eligible == $x11_pickable" \
             "X11 $x11_kind picker eligibility" ||
             fail G-INTROSPECT-TYPES "actual X11 $x11_kind role did not yield $x11_pickable"
-        cp "$CSTATE" "$ARTIFACTS/introspect-type-$x11_kind.json"
+        snapshot_state "$CSTATE" "$ARTIFACTS/introspect-type-$x11_kind.json"
     done <<EOF
 NORMAL true
 DIALOG true
@@ -4671,7 +5596,7 @@ EOF
     DISPLAY="$x11_display" xprop -id "$x11_window" -remove _NET_WM_WINDOW_TYPE
     cstate ".windows[] | select(.id == $x11_model_id) | .introspect_eligible" \
         "X11 absent type is normal" || fail G-INTROSPECT-TYPES "absent type did not restore eligibility"
-    cp "$CSTATE" "$ARTIFACTS/introspect-type-absent.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/introspect-type-absent.json"
     pass G-INTROSPECT-TYPES "actual mapped X11 role changes follow all fourteen EWMH types and restore the absent-type default"
     DISPLAY="$x11_display" "$COMPANIONS/icon-probe" --x11-hints >"$ARTIFACTS/hints-probe.log" 2>&1 &
     HINTS_PID=$!
@@ -4701,6 +5626,8 @@ EOF
     fi
     kill "$XEV_PID" 2>/dev/null || true
     pass G-X11-INPUT-FOCUS "X input focus is the focused X11 window $xev_window"
+    x11_iconic_gate
+    tray_x11_gate
 else
     echo "tuna-gtk-shell-proof: G-X11-APP skipped (no Xwayland or xeyes)"
 fi
@@ -4716,7 +5643,7 @@ xdotool key Super_L
 cstate '.overview_open' "icon overview" || fail G-WINDOW-ICONS "overview did not open"
 sleep 1
 scrot "$ARTIFACTS/20a-window-icons-overview.png" >/dev/null
-cp "$CSTATE" "$ARTIFACTS/window-icons-state.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/window-icons-state.json"
 xdotool key Escape
 cstate '.overview_open == false' "icon overview closed" || fail G-WINDOW-ICONS "overview did not close"
 xdotool keydown Alt_L key Tab
@@ -4916,7 +5843,7 @@ while :; do
 done
 sleep 1
 scrot -o "$ARTIFACTS/set-wallpaper-shot-reverted.png" >/dev/null
-cp "$CSTATE" "$ARTIFACTS/set-wallpaper-reverted-state.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/set-wallpaper-reverted-state.json"
 pass G-SET-WALLPAPER "picture-uri writes publish, identify, decode and visibly repaint; replacement refreshes, an invalid URI is ignored, and revert restores"
 
 # P-ST-01 (#594): clock-format and clock-show-date reach the panel clock
@@ -5245,7 +6172,7 @@ cstate '.animation_clock_manual' "frozen corner clock" ||
 xdotool mousemove --window "$WID" 1 1
 cstate '.overview_open' "hot corner enabled" ||
     fail G-HOT-CORNER "enabling GNOME hot corners did not open the actual overview"
-cp "$CSTATE" "$ARTIFACTS/hot-corner-enabled.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/hot-corner-enabled.json"
 # The first ring starts at full opacity and is a quarter gone half way.
 tvalue hot_corner_ripples 1 || fail G-HOT-CORNER-RIPPLES "the corner did not start GNOME's ripples"
 anim_clock 415
@@ -5323,13 +6250,13 @@ gsettings set org.gnome.desktop.interface cursor-theme 'TunaProof'
 gsettings set org.gnome.desktop.interface cursor-size 24
 cstate '.cursor.theme == "TunaProof" and .cursor.size == 24 and .cursor.kind == "named" and .cursor.name == "default" and .cursor.source == "client" and .cursor.image_theme == "TunaProofBase" and .cursor.image == [24, 24] and .cursor.logical == [24, 24]' "theme cursor at 24px" ||
     fail G-CURSOR-SIZE "cursor-theme TunaProof at size 24 did not draw the inherited 24px image"
-cp "$CSTATE" "$ARTIFACTS/cursor-size-24.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/cursor-size-24.json"
 "$PY" "$ROOT/scripts/lib/cursor-pixels.py" "$ARTIFACTS/cursor-size-24.png" 24 1 1 181,29,91 ||
     fail G-CURSOR-SIZE "the actual 24px legacy cursor pixels or hotspot differ"
 gsettings set org.gnome.desktop.interface cursor-size 48
 cstate '.cursor.size == 48 and .cursor.image_theme == "TunaProofBase" and .cursor.image == [48, 48] and .cursor.logical == [48, 48]' "theme cursor at 48px" ||
     fail G-CURSOR-SIZE "cursor-size 48 did not redraw the cursor from the 48px image live"
-cp "$CSTATE" "$ARTIFACTS/cursor-size-48.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/cursor-size-48.json"
 "$PY" "$ROOT/scripts/lib/cursor-pixels.py" "$ARTIFACTS/cursor-size-48.png" 48 1 1 25,173,125 ||
     fail G-CURSOR-SIZE "the actual 48px legacy cursor pixels or hotspot differ"
 # A live theme change must replace the buffer with GNOME51 SVG data,
@@ -5351,7 +6278,7 @@ gsettings set org.gnome.desktop.interface cursor-size 24
 cursor_probe shape crosshair G-CURSOR-SHAPE
 cstate '.cursor.kind == "named" and .cursor.name == "crosshair" and .cursor.source == "client" and .cursor.file == "crosshair" and .cursor.image_theme == "TunaProofBase" and .cursor.image == [24, 24]' "crosshair shape" ||
     fail G-CURSOR-SHAPE "a wp_cursor_shape_v1 crosshair request did not draw the theme's crosshair"
-cp "$CSTATE" "$ARTIFACTS/cursor-shape-crosshair.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/cursor-shape-crosshair.json"
 "$PY" "$ROOT/scripts/lib/cursor-pixels.py" "$ARTIFACTS/cursor-shape-crosshair.png" 24 1 1 181,29,91 ||
     fail G-CURSOR-SHAPE "the requested shape has incorrect actual legacy pixels"
 # A shape the theme chain lacks still shows: from libXcursor's default
@@ -5378,7 +6305,7 @@ cstate '.cursor.image_theme == "TunaProofSvg" and .cursor.animation_frames == 2 
 cursor_probe surface 32 G-CURSOR-SHAPE
 cstate '.cursor.kind == "surface" and .cursor.image == [32, 32] and .cursor.logical == [32, 32]' "client cursor surface" ||
     fail G-CURSOR-SHAPE "a client's 32px cursor surface was not drawn at its size"
-cp "$CSTATE" "$ARTIFACTS/cursor-surface.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/cursor-surface.json"
 "$PY" "$ROOT/scripts/lib/cursor-pixels.py" "$ARTIFACTS/cursor-surface.png" 32 0 0 224,27,36 ||
     fail G-CURSOR-SHAPE "the client surface has incorrect actual pixels"
 kill "$CURSOR_PID" 2>/dev/null || true
@@ -5436,7 +6363,7 @@ cstate '.cursor.locate_pointer.enabled' "locate-pointer on" ||
 xdotool key Control_L
 cstate ".cursor.locate_pointer.count == $((locate_before + 1)) and .cursor.locate_pointer.active and .cursor.locate_pointer.frames > $locate_frames" "ripples" 3 ||
     fail G-LOCATE-POINTER "a Ctrl tap with locate-pointer on drew no ripples"
-cp "$CSTATE" "$ARTIFACTS/locate-pointer.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/locate-pointer.json"
 jq -e ".cursor.locate_pointer.at == [$((WIDTH / 2)), $((HEIGHT / 2))]" "$CSTATE" >/dev/null ||
     fail G-LOCATE-POINTER "the ripples did not center on the pointer: $(jq -c '.cursor.locate_pointer' "$CSTATE")"
 cstate '.cursor.locate_pointer.active | not' "ripples finished" 5 ||
@@ -5473,7 +6400,7 @@ done
 if [ -z "$corner_restored_rect" ] || [ "$corner_restored_rect" = null ]; then
     fail G-HOT-CORNER-FULLSCREEN "genuine GTK proof window never settled in place"
 fi
-cp "$CSTATE" "$ARTIFACTS/hot-corner-client-before-fullscreen.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/hot-corner-client-before-fullscreen.json"
 printf '{"generation":1,"request":"fullscreen"}\n' >"$corner_requests"
 cstate ".focused_rect == [0, 0, $WIDTH, $HEIGHT]" "corner proof fullscreen" ||
     fail G-HOT-CORNER-FULLSCREEN "actual GTK fullscreen request did not cover the output"
@@ -5487,7 +6414,7 @@ cstate '.pointer_position == [1, 1] and .pointer_fullscreen_blocked' "fullscreen
     fail G-HOT-CORNER-FULLSCREEN "actual corner coordinates or fullscreen guard were not observed"
 cstate '.overview_open | not' "fullscreen corner blocked" ||
     fail G-HOT-CORNER-FULLSCREEN "the corner opened over the fullscreen window"
-cp "$CSTATE" "$ARTIFACTS/hot-corner-fullscreen-blocked.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/hot-corner-fullscreen-blocked.json"
 scrot "$ARTIFACTS/hot-corner-fullscreen-blocked.png" >/dev/null
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
 xdotool key super
@@ -5503,19 +6430,19 @@ cstate '.overview_open | not' "fullscreen deliberate overview dismissed" ||
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
 cstate ".pointer_position == [$((WIDTH / 2)), $((HEIGHT / 2))]" "fullscreen corner exit delivered" ||
     fail G-HOT-CORNER-FULLSCREEN "backend did not deliver the requested corner exit"
-cp "$CSTATE" "$ARTIFACTS/hot-corner-fullscreen-before-unfullscreen.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/hot-corner-fullscreen-before-unfullscreen.json"
 printf '{"generation":2,"request":"unfullscreen"}\n' >"$corner_requests"
 # A null focus during overview teardown is not an unfullscreen completion.
 # Observe the original mapped client and its exact saved rectangle with the
 # real pointer still at the center, before the one genuine corner entry.
 cstate ".focused == $corner_window_id and .focused_rect == $corner_restored_rect and (.windows | any(.id == $corner_window_id and .rect == $corner_restored_rect)) and .pointer_position == [$((WIDTH / 2)), $((HEIGHT / 2))] and (.pointer_fullscreen_blocked | not)" "original corner proof restored at center" ||
     fail G-HOT-CORNER-FULLSCREEN "actual GTK unfullscreen request did not restore geometry"
-cp "$CSTATE" "$ARTIFACTS/hot-corner-unfullscreen-before-entry.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/hot-corner-unfullscreen-before-entry.json"
 xdotool mousemove --window "$WID" 1 1
 xdotool getmouselocation --shell >"$ARTIFACTS/hot-corner-unfullscreen-host-pointer.txt"
 cstate '.pointer_position == [1, 1]' "unfullscreen corner entry delivered" ||
     fail G-HOT-CORNER-FULLSCREEN "backend did not deliver the requested corner entry"
-cp "$CSTATE" "$ARTIFACTS/hot-corner-unfullscreen-entry.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/hot-corner-unfullscreen-entry.json"
 cstate '.pointer_fullscreen_blocked | not' "unfullscreen corner guard removed" ||
     fail G-HOT-CORNER-FULLSCREEN "actual fullscreen guard remained after restoring geometry"
 cstate '.overview_open' "corner restored after fullscreen" ||
@@ -5558,7 +6485,7 @@ cstate "([.frame_cost[] | .culled_windows[]] | index($below_id) != null) and ([.
     fail G-OCCLUSION-CULL "the window under an opaque fullscreen window was still drawn"
 cstate ".throttled_windows | index($below_id) != null and index($above_id) == null" "lower window frame callbacks throttled" ||
     fail G-OCCLUSION-CULL "the hidden window kept full-rate frame callbacks"
-cp "$CSTATE" "$ARTIFACTS/occlusion-fullscreen.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/occlusion-fullscreen.json"
 scrot "$ARTIFACTS/occlusion-fullscreen.png" >/dev/null
 printf '{"generation":2,"request":"unfullscreen"}\n' >"$occlusion_requests"
 cstate ".focused == $above_id and .focused_rect != [0, 0, $WIDTH, $HEIGHT]" "occlusion upper restored" ||
@@ -5567,7 +6494,7 @@ cstate "([.frame_cost[] | .drawn_windows[]] | index($below_id) != null) and ([.f
     fail G-OCCLUSION-CULL "the lower window stayed culled under a translucent-edged window"
 cstate ".throttled_windows | index($below_id) == null" "lower window frame callbacks restored" ||
     fail G-OCCLUSION-CULL "the shown window stayed throttled"
-cp "$CSTATE" "$ARTIFACTS/occlusion-restored.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/occlusion-restored.json"
 # shellcheck disable=SC2086
 kill $OCCLUSION_PIDS 2>/dev/null || true
 OCCLUSION_PIDS=""
@@ -5646,7 +6573,7 @@ cstate ".pointer_device_settings == {
     \"pointing_stick\": {\"speed_milli\": -500, \"accel_profile\": \"Flat\", \"scroll_method\": \"None\"}}" \
     "pointer device keys applied" ||
     fail G-SETTINGS-POINTER "GNOME's touchpad, mouse, trackball and pointing-stick keys did not reach the compositor"
-cp "$CSTATE" "$ARTIFACTS/pointer-device-settings.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/pointer-device-settings.json"
 reset_pointer_keys
 cstate '.pointer_device_settings == {
     "mouse_accel_profile": "Default",
@@ -5763,7 +6690,7 @@ a11y_right_alt_tap() {
 }
 "$PY" "$ROOT/scripts/lib/xkeysym-levels.py" "$DISPLAY" ffea fe03 >"$ARTIFACTS/a11y-host-rightalt-levels.log" 2>&1 ||
     fail G-A11Y-KEYMAP "could not record the host RightAlt/Level3 keymap"
-cp "$CSTATE" "$ARTIFACTS/a11y-keymap-before-rightalt.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/a11y-keymap-before-rightalt.json"
 mark="$(a11y_mark)"
 a11y_right_alt_tap
 cstate '.input_aids.latched == ["alt"]' "US physical RightAlt is Alt" ||
@@ -5781,7 +6708,7 @@ cstate '.keyboard.layouts == ["German"] and .input_aids.latched == [] and .seat_
     fail G-A11Y-KEYMAP "German layout replacement did not clear held modifiers"
 gsettings set "$A11Y_KBD" stickykeys-enable false
 cstate '(.input_aids.sticky | not)' "German sticky off" || fail G-A11Y-KEYMAP "Sticky Keys off did not apply"
-cp "$CSTATE" "$ARTIFACTS/a11y-keymap-german-sticky-off.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/a11y-keymap-german-sticky-off.json"
 mark="$(a11y_mark)"
 a11y_right_alt_tap
 xdotool key q
@@ -5794,7 +6721,7 @@ mark="$(a11y_mark)"
 a11y_right_alt_tap
 cstate '.input_aids.latched == ["level3"]' "German Level3 latched" ||
     fail G-A11Y-KEYMAP "the configured German AltGr selector did not latch Level3"
-cp "$CSTATE" "$ARTIFACTS/a11y-keymap-german-level3-latched.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/a11y-keymap-german-level3-latched.json"
 xdotool key q q
 a11y_wait "[.presses[$mark:][] | select(.printable) | {keyval,alt}] == [{\"keyval\":64,\"alt\":false},{\"keyval\":113,\"alt\":false}]" "German Level3 spent once" ||
     fail G-A11Y-KEYMAP "the real German client did not receive @ then plain q"
@@ -5980,6 +6907,9 @@ cstate '.input_aids.mouse' "mouse keys on" || fail G-A11Y-MOUSEKEYS "mousekeys-e
 xdotool keydown KP_Right
 sleep 0.8
 xdotool keyup KP_Right
+# xdotool has sent the release, not waited for the compositor to process it.
+# Match the disabled-keypad settling interval before taking the stop baseline.
+sleep 0.3
 cstate ".pointer_position[0] >= $((a11y_cx + 60)) and .pointer_position[1] == $a11y_cy" "pointer moved right" ||
     fail G-A11Y-MOUSEKEYS "holding keypad 6 did not accelerate the pointer right"
 moved="$(jq -c '.pointer_position' "$CSTATE")"
@@ -6088,7 +7018,7 @@ cstate '(.animations_enabled | not)' "animations disabled" ||
 xdotool key Super_L
 cstate '.overview_open and .overview_progress == 1' "instant overview" ||
     fail G-ANIMATIONS-OFF "the disabled overview did not jump to its open state"
-cp "$CSTATE" "$ARTIFACTS/animations-disabled-open.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/animations-disabled-open.json"
 xdotool key Escape
 cstate '(.overview_open | not) and .overview_progress == 0' "instant desktop" ||
     fail G-ANIMATIONS-OFF "the disabled overview did not jump to its closed state"
@@ -6124,7 +7054,7 @@ cstate '.animations_enabled and .motion_policy == "fade-only"' "reduced motion" 
 xdotool key Super_L
 cstate '.overview_open and .overview_progress == 1' "reduced overview" ||
     fail G-ANIMATIONS-OFF "Reduced Motion overview did not jump to its open state"
-cp "$CSTATE" "$ARTIFACTS/reduced-motion-open.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/reduced-motion-open.json"
 xdotool key Escape
 cstate '(.overview_open | not) and .overview_progress == 0' "reduced desktop" ||
     fail G-ANIMATIONS-OFF "Reduced Motion overview did not jump to its closed state"
@@ -6177,7 +7107,7 @@ anim_clock 125
 # Opening eases out-sine (#499): sin(pi/4) of the way at half time.
 cstate '(.overview_progress - 0.7071067811865476 | if . < 0 then -. else . end) < 1e-9' "overview at 125 ms" ||
     fail G-ANIMATION-CLOCK "the overview was not sin(pi/4) open 125 ms in (EASE_OUT_SINE)"
-cp "$CSTATE" "$ARTIFACTS/animation-clock-125ms.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/animation-clock-125ms.json"
 anim_clock 250
 cstate '.overview_progress == 1' "overview at 250 ms" ||
     fail G-ANIMATION-CLOCK "the overview had not settled 250 ms in"
@@ -6222,7 +7152,7 @@ anim_clock 75
 # Ease-out quad: three quarters of the way at half time.
 cstate "$(menu_ghost '.elapsed_ms == 75 and ((.frame.alpha - 0.25) | fabs) < 1e-9 and ((.frame.dy + 4.5) | fabs) < 1e-9 and ((.frame.scale - 0.97) | fabs) < 1e-9')" "menu close at 75 ms" ||
     fail G-TRANSIENT-CLOSE-CLOCK "the menu was not a quarter opaque, 4.5px up and 97% 75 ms in"
-cp "$CSTATE" "$ARTIFACTS/menu-close-75ms.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/menu-close-75ms.json"
 anim_clock 150
 cstate '(.menu_close.closing | length) == 0 and .menu_close.history[-1].outcome == "started"' "menu close at 150 ms" ||
     fail G-TRANSIENT-CLOSE-CLOCK "the menu close had not finished 150 ms in"
@@ -6623,7 +7553,7 @@ wb_probe_ensure() {
         fi
         cstate 'all(.windows[]; .app_id != "tuna-cursor-probe")' "stale probe gone" 5 ||
             fail "$WB_GATE" "a stale probe map outlived its client"
-        cp "$CSTATE" "$ARTIFACTS/wb-probe-before.json" ||
+        snapshot_state "$CSTATE" "$ARTIFACTS/wb-probe-before.json" ||
             fail "$WB_GATE" "compositor state missing before probe map"
         rm -f "$ARTIFACTS/wb-cursor-probe.log"
         WAYLAND_DISPLAY="$SOCKET_NAME" "$ARTIFACTS/cursor-client/tuna-cursor-client" surface 32 \
@@ -6649,7 +7579,7 @@ wb_probe_ensure() {
             fi
             sleep 0.3
         done
-        cp "$CSTATE" "$ARTIFACTS/wb-probe-after.json" ||
+        snapshot_state "$CSTATE" "$ARTIFACTS/wb-probe-after.json" ||
             fail "$WB_GATE" "compositor state missing after probe map"
         "$PY" "$ROOT/scripts/lib/tuna-wellbeing-probe-bind.py" bind \
             --before "$ARTIFACTS/wb-probe-before.json" \
@@ -6807,7 +7737,7 @@ wb_capture() {
     cstate_after="$ARTIFACTS/wb-$label-cstate-after.json"
     proc_before_file="$ARTIFACTS/wb-$label-proc-before.json"
     proc_after_file="$ARTIFACTS/wb-$label-proc-after.json"
-    cp "$CSTATE" "$cstate_before" || fail "$WB_GATE" "compositor state missing before $label"
+    snapshot_state "$CSTATE" "$cstate_before" || fail "$WB_GATE" "compositor state missing before $label"
     "$PY" "$ROOT/scripts/lib/tuna-wellbeing-frame-proof.py" proc-snapshot \
         --probe "$WB_PROBE_PID" --compositor "$COMPOSITOR_PID" --shell "$WB_SHELL_PID" \
         >"$proc_before_file" ||
@@ -6817,7 +7747,7 @@ wb_capture() {
         --probe "$WB_PROBE_PID" --compositor "$COMPOSITOR_PID" --shell "$WB_SHELL_PID" \
         >"$proc_after_file" ||
         fail "$WB_GATE" "capture-time process snapshot failed after $label"
-    cp "$CSTATE" "$cstate_after" || fail "$WB_GATE" "compositor state missing after $label"
+    snapshot_state "$CSTATE" "$cstate_after" || fail "$WB_GATE" "compositor state missing after $label"
     "$PY" "$ROOT/scripts/lib/tuna-wellbeing-frame-proof.py" proc-sandwich \
         --before "$proc_before_file" --after "$proc_after_file" --label "$label" ||
         fail "$WB_GATE" "a capture-time process was replaced across $label"
@@ -6855,12 +7785,12 @@ wb_state_capture() {
     cstate_after="$ARTIFACTS/wb-$label-cstate-after.json"
     proc_before_file="$ARTIFACTS/wb-$label-proc-before.json"
     proc_after_file="$ARTIFACTS/wb-$label-proc-after.json"
-    cp "$CSTATE" "$cstate_before" || fail "$WB_GATE" "compositor state missing before $label"
+    snapshot_state "$CSTATE" "$cstate_before" || fail "$WB_GATE" "compositor state missing before $label"
     "$PY" "$ROOT/scripts/lib/tuna-wellbeing-frame-proof.py" proc-snapshot \
         --probe "$WB_PROBE_PID" --compositor "$COMPOSITOR_PID" --shell "$WB_SHELL_PID" \
         >"$proc_before_file" ||
         fail "$WB_GATE" "capture-time process snapshot failed before $label"
-    cp "$CSTATE" "$cstate_after" || fail "$WB_GATE" "compositor state missing after $label"
+    snapshot_state "$CSTATE" "$cstate_after" || fail "$WB_GATE" "compositor state missing after $label"
     "$PY" "$ROOT/scripts/lib/tuna-wellbeing-frame-proof.py" proc-snapshot \
         --probe "$WB_PROBE_PID" --compositor "$COMPOSITOR_PID" --shell "$WB_SHELL_PID" \
         >"$proc_after_file" ||
@@ -7338,10 +8268,10 @@ else
         --proc-after "$ARTIFACTS/wb-take-lock-locked-proc-after.json" \
         --label take-lock-locked ||
         fail G-WELLBEING-ACTION-TAKE-LOCK "lock not observed in state (full typed presence, redaction, sandwich)"
-    cp "$CSTATE" "$ARTIFACTS/wb-take-lock-stale-before.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/wb-take-lock-stale-before.json"
     stale_code=0
     wb_a11y_dump "$ARTIFACTS/a11y-wb-take-lock-stale.json" 20 --press "Take" >/dev/null 2>&1 || stale_code=$?
-    cp "$CSTATE" "$ARTIFACTS/wb-take-lock-stale-after.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/wb-take-lock-stale-after.json"
     wb_a11y_dump "$ARTIFACTS/a11y-wb-take-lock-retired.json" 20 ||
         fail G-WELLBEING-ACTION-TAKE-LOCK "a11y bus dead or owned shell tree gone; retired UI cannot be qualified"
     take_lock_retired_seq="$WB_DUMP_SEQ"
@@ -7456,10 +8386,10 @@ wb_capture take-fade-settled
 rm -f "$TUNA_ANIMATION_CLOCK"
 cstate '.animation_clock_manual | not' "real clock" ||
     fail G-WELLBEING-ACTION-TAKE-FADE "real time did not resume after the settled capture"
-cp "$CSTATE" "$ARTIFACTS/wb-take-fade-stale-before.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/wb-take-fade-stale-before.json"
 stale_code=0
 wb_a11y_dump "$ARTIFACTS/a11y-wb-take-fade-stale.json" 20 --press "Take" >/dev/null 2>&1 || stale_code=$?
-cp "$CSTATE" "$ARTIFACTS/wb-take-fade-stale-after.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/wb-take-fade-stale-after.json"
 wb_a11y_dump "$ARTIFACTS/a11y-wb-take-fade-retired.json" 20 ||
     fail G-WELLBEING-ACTION-TAKE-FADE "a11y bus dead or owned shell tree gone; retired UI cannot be qualified"
 take_fade_retired_seq="$WB_DUMP_SEQ"
@@ -7512,10 +8442,10 @@ wb_press_banner G-WELLBEING-ACTION-DELAY "$ARTIFACTS/a11y-wb-delay-due.json" \
     "Time for an Eyesight Break" Delay 25 ||
     fail G-WELLBEING-ACTION-DELAY "no due banner to delay"
 delay_due_epoch="$WB_PRESS_EPOCH"
-cp "$CSTATE" "$ARTIFACTS/wb-delay-stale-before.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/wb-delay-stale-before.json"
 stale_code=0
 wb_a11y_dump "$ARTIFACTS/a11y-wb-delay-stale.json" 20 --press "Delay" >/dev/null 2>&1 || stale_code=$?
-cp "$CSTATE" "$ARTIFACTS/wb-delay-stale-after.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/wb-delay-stale-after.json"
 # The retired dump is taken now (the redue banner is not showing yet);
 # the stale verdict waits for the redue so the due schedule the live
 # press set is proven undisturbed by the stale press.
@@ -7606,10 +8536,10 @@ wb_press_banner G-WELLBEING-ACTION-SKIP "$ARTIFACTS/a11y-wb-skip-upcoming.json" 
     "$ARTIFACTS/a11y-wb-skip-upcoming.json" --title "Eyesight Break Soon" \
     --expect Delay,Skip --reject Take ||
     fail G-WELLBEING-ACTION-SKIP "the upcoming banner does not offer Delay+Skip without Take"
-cp "$CSTATE" "$ARTIFACTS/wb-skip-stale-before.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/wb-skip-stale-before.json"
 stale_code=0
 wb_a11y_dump "$ARTIFACTS/a11y-wb-skip-stale.json" 20 --press "Skip" >/dev/null 2>&1 || stale_code=$?
-cp "$CSTATE" "$ARTIFACTS/wb-skip-stale-after.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/wb-skip-stale-after.json"
 # The retired dump is taken now (the due banner is not showing yet);
 # the stale verdict waits for the due so the original schedule the
 # live press left undisturbed is proven intact after the stale press.
@@ -7723,10 +8653,10 @@ done
     --desaturation 0 --brightness 0.7 \
     --receipt "$ARTIFACTS/wb-negative-fade-mid-check.json" ||
     fail G-WELLBEING-NEGATIVE "the fade 1500ms intermediate diverged from 0.7"
-cp "$CSTATE" "$ARTIFACTS/wb-negative-stale-before.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/wb-negative-stale-before.json"
 stale_code=0
 wb_a11y_dump "$ARTIFACTS/a11y-wb-negative-stale.json" 20 --press "Take" >/dev/null 2>&1 || stale_code=$?
-cp "$CSTATE" "$ARTIFACTS/wb-negative-stale-after.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/wb-negative-stale-after.json"
 wb_a11y_dump "$ARTIFACTS/a11y-wb-negative-retired.json" 20 ||
     fail G-WELLBEING-NEGATIVE "a11y bus dead or owned shell tree gone; retired UI cannot be qualified"
 negative_retired_seq="$WB_DUMP_SEQ"
@@ -7912,12 +8842,12 @@ gsettings set "$MEDIA_SCHEMA" volume-up-static '[]'
 media_mark static-disable-after
 sleep 0.7
 media_mark disabled-key-before
-cp "$CSTATE" "$ARTIFACTS/media-before-disabled-key.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/media-before-disabled-key.json"
 xdotool key XF86AudioRaiseVolume
 media_mark disabled-key-after
 sleep 0.7
 media_mark disabled-check
-cp "$CSTATE" "$ARTIFACTS/media-after-disabled-key.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/media-after-disabled-key.json"
 [ "$(cat "$VOLUME_FILE")" = 0.4200 ] || fail G-MEDIA-VOLUME "an explicitly disabled hardware key still changed volume"
 gsettings set "$MEDIA_SCHEMA" volume-up "['F8']"
 gsettings set "$MEDIA_SCHEMA" volume-step 10
@@ -8486,7 +9416,7 @@ cstate ".size_changes.in_flight | any(.seq > $seq_mid and .phase == \"animating\
     fail G-SIZE-CHANGE-ANIM "untiling did not start on the frozen clock"
 sleep 0.3
 scrot "$ARTIFACTS/size-change-0ms.png" >/dev/null
-cp "$CSTATE" "$ARTIFACTS/size-change-0ms.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/size-change-0ms.json"
 "$PY" - "$ARTIFACTS/size-change-before.png" "$ARTIFACTS/size-change-0ms.png" "$((WIDTH / 2))" "$HEIGHT" <<'PYSNAP' ||
 from PIL import Image, ImageChops
 import sys
@@ -8505,7 +9435,7 @@ cstate ".size_changes.in_flight | any(.seq > $seq_mid and .snapshot_alpha == 0.2
     fail G-SIZE-CHANGE-ANIM "the transition was not exactly half way 125 ms in"
 sleep 0.3
 scrot "$ARTIFACTS/size-change-mid-flight.png" >/dev/null
-cp "$CSTATE" "$ARTIFACTS/size-change-125ms.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/size-change-125ms.json"
 anim_clock 250
 cstate "(.size_changes.in_flight | length) == 0 and any(.size_changes.history[]; .seq > $seq_mid and .outcome == \"completed\" and .settle_ms == 250)" "250 ms" ||
     fail G-SIZE-CHANGE-ANIM "the transition had not settled exactly 250 ms in"
@@ -8546,7 +9476,7 @@ jq -e '.outcome == "skipped" and .reason == "animations-off"' \
 gsettings set org.gnome.desktop.interface enable-animations true
 cstate '.animations_enabled' "size change animations on" ||
     fail G-SIZE-CHANGE-ANIM "enable-animations true did not reach the compositor"
-cp "$CSTATE" "$ARTIFACTS/size-change.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/size-change.json"
 pass G-SIZE-CHANGE-ANIM "maximize, unmaximize and half-tiling ease 250 ms from the old frame (exact on the proof clock), never stretch new content, only fade under Reduced Motion, and are instant with animations off"
 
 # The switcher's keys rebind too: switch-applications on Ctrl+J steps
@@ -9227,6 +10157,153 @@ fi
 pass G-WS-POPUP "a workspace key shows GNOME's workspace switcher popup"
 sleep 1
 
+# The popup and the Activities dots on the frozen animation clock (#596).
+# workspaceSwitcherPopup.js:10-11,93-121: only a hidden popup fades in
+# (ANIMATION_TIME 100 ms ease-out-quad); a key while it shows is opaque at
+# once and restarts DISPLAY_TIMEOUT (600 ms); then it fades out over 100 ms.
+# panel.js:178-195: the dots' expansion follows the workspace animation's
+# 250 ms ease-out-cubic. The shell traces each frame (TUNA_TRANSIENT_TRACE);
+# scripts/lib/ws-anim-proof.py recomputes GNOME's values independently.
+ws_here() { ws_from=$(($(wc -l <"$LOG") + 1)); }
+ws_check() {
+    ws_command=$1
+    shift
+    "$PY" "$ROOT/scripts/lib/ws-anim-proof.py" "$ws_command" "$LOG" "$ws_from" "$@"
+}
+# Before freezing the clock, the dots must have finished any scale-in or
+# scale-out on the real clock (panel.js:101-127, 500 ms): a removal that
+# is still running when time jumps to the frozen base never completes,
+# and its dot stays drawn beside the live ones.
+ws_settle() {
+    ws_from=1
+    ws_check settled || fail "$1" "the Activities dots were still scaling in or out before the clock froze"
+}
+# The pill body's pixel ("r g b") in a fresh capture named $1. Windows
+# slide behind the pill on the same clock, so only the opaque pill is
+# compared with a threshold; the other captures are evidence.
+ws_pixel() {
+    sleep 0.3
+    scrot -o "$ARTIFACTS/$1.png" >/dev/null 2>&1 || true
+    px "$ARTIFACTS/$1.png" $((WIDTH / 2)) $((HEIGHT - 59 - 28))
+}
+ws_home="$(jq -r '.active_workspace' "$CSTATE")"
+[ "$ws_home" = 0 ] || fail G-WS-POPUP-CLOCK "expected to start on the first workspace, not $ws_home"
+ws_settle G-WS-DOTS-CLOCK
+anim_clock 0
+cstate '.animation_clock_manual and .motion_policy == "full"' "popup clock frozen" ||
+    fail G-WS-POPUP-CLOCK "the animation clock did not freeze"
+ws_here
+xdotool key super+Page_Down
+ws_check line "ws-popup display index=1 count=2 visible=false clock=manual" ||
+    fail G-WS-POPUP-CLOCK "Super+Page_Down did not display the hidden popup for workspace 2 of 2"
+ws_check line "ws-popup fade to=1 from=0.0000 duration=100 clock=manual" ||
+    fail G-WS-POPUP-CLOCK "the hidden popup did not start a 100 ms fade-in on the frozen clock"
+ws_check popup 0 || fail G-WS-POPUP-CLOCK "the popup was not transparent 0 ms in"
+ws_check line "ws-dots set count=2 active=1 from=0.0000 motion=true clock=manual" ||
+    fail G-WS-DOTS-CLOCK "the dots did not start moving to workspace 2 on the frozen clock"
+ws_check dots 0 || fail G-WS-DOTS-CLOCK "the dots moved while the clock was frozen"
+anim_clock 50
+ws_check popup 0.75 || fail G-WS-POPUP-CLOCK "the popup was not 75% opaque 50 ms in (ease-out-quad)"
+ws_half="$(ws_pixel 24f2-workspace-popup-50ms)"
+anim_clock 100
+ws_check popup 1 || fail G-WS-POPUP-CLOCK "the popup was not opaque 100 ms in"
+# shellcheck disable=SC2046
+set -- $(ws_pixel 24f3-workspace-popup-100ms)
+if [ "${1:-0}" -ge 70 ] || [ "${2:-0}" -ge 70 ] || [ "${3:-0}" -ge 75 ]; then
+    fail G-WS-POPUP-CLOCK "no opaque switcher pill drawn 100 ms in (pixel ${1:-?} ${2:-?} ${3:-?}; 50 ms: $ws_half)"
+fi
+anim_clock 125
+# Ease-out-cubic is 87.5% of the way at half time.
+ws_check dots 0.875 || fail G-WS-DOTS-CLOCK "the dots were not 87.5% of the way to workspace 2 at 125 ms"
+scrot -o "$ARTIFACTS/24f4-workspace-dots-125ms.png" >/dev/null 2>&1 || true
+anim_clock 250
+ws_check dots 1 || fail G-WS-DOTS-CLOCK "the dots had not settled on workspace 2 at 250 ms"
+anim_clock 599
+ws_check absent "ws-popup fade to=0" --timeout 1.5 ||
+    fail G-WS-POPUP-CLOCK "the popup began fading out before DISPLAY_TIMEOUT (600 ms)"
+anim_clock 650
+ws_check line "ws-popup fade to=0 from=1.0000 duration=100 clock=manual" ||
+    fail G-WS-POPUP-CLOCK "the popup did not fade out 600 ms after the key"
+ws_check popup 0.25 || fail G-WS-POPUP-CLOCK "the popup was not 25% opaque 50 ms into its fade-out"
+scrot -o "$ARTIFACTS/24f5-workspace-popup-650ms.png" >/dev/null 2>&1 || true
+anim_clock 700
+ws_check line "ws-popup hidden" || fail G-WS-POPUP-CLOCK "the popup was not hidden 100 ms into its fade-out"
+# Back, then a key on the first workspace while the popup fades in: GNOME
+# goes nowhere but redisplays it opaque at once and restarts the timeout.
+ws_here
+xdotool key super+Page_Up
+ws_check line "ws-popup fade to=1 from=0.0000 duration=100 clock=manual" ||
+    fail G-WS-POPUP-CLOCK "Super+Page_Up did not fade the hidden popup in"
+ws_check line "ws-dots set count=2 active=0 from=1.0000 motion=true clock=manual" ||
+    fail G-WS-DOTS-CLOCK "the dots did not start back to workspace 1"
+anim_clock 750
+ws_check popup 0.75 || fail G-WS-POPUP-CLOCK "the popup was not 75% opaque 50 ms into the second fade-in"
+ws_here
+xdotool key super+Page_Up
+ws_check line "ws-popup display index=0 count=2 visible=true clock=manual" ||
+    fail G-WS-POPUP-CLOCK "Super+Page_Up on the first workspace did not redisplay the popup"
+ws_check popup 1 || fail G-WS-POPUP-CLOCK "a key while the popup faded in did not make it opaque at once"
+cstate '.active_workspace == 0' "first workspace kept" ||
+    fail G-WS-POPUP-CLOCK "Super+Page_Up left the first workspace"
+anim_clock 825
+ws_check dots 0.125 || fail G-WS-DOTS-CLOCK "the dots were not 87.5% of the way back 125 ms in"
+anim_clock 950
+ws_check dots 0 || fail G-WS-DOTS-CLOCK "the dots had not settled back 250 ms in"
+anim_clock 1349
+ws_check absent "ws-popup fade to=0" --timeout 1.5 ||
+    fail G-WS-POPUP-CLOCK "the repeated key did not restart the 600 ms timeout"
+anim_clock 1400
+ws_check popup 0.25 || fail G-WS-POPUP-CLOCK "the popup was not 25% opaque 650 ms after the repeated key"
+anim_clock 1450
+ws_check line "ws-popup hidden" || fail G-WS-POPUP-CLOCK "the popup did not hide after the repeated key"
+pass G-WS-POPUP-CLOCK "the switcher popup fades in over 100 ms ease-out-quad (0/0.75/1 at 0/50/100 ms, drawn pill darkening), holds 600 ms, fades out (0.25 at 650 ms, hidden at 700 ms); a key on the first workspace redisplays it opaque at once and restarts the timeout"
+pass G-WS-DOTS-CLOCK "the Activities dots match panel.js 51 at 0/125/250 ms of a key switch each way (ease-out-cubic, 87.5% half way)"
+# Reduced Motion keeps the popup's fade and snaps the dots; animations off
+# snap both.
+ws_clock=2000
+for ws_policy in reduce off; do
+    if [ "$ws_policy" = reduce ]; then
+        gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
+        cstate '.motion_policy == "fade-only"' "reduced popup" ||
+            fail G-WS-POPUP-POLICY "Reduced Motion did not reach the session"
+        ws_fade=100
+    else
+        gsettings reset org.gnome.desktop.a11y.interface reduced-motion
+        gsettings set org.gnome.desktop.interface enable-animations false
+        cstate '.motion_policy == "off"' "popup animations off" ||
+            fail G-WS-POPUP-POLICY "enable-animations false did not reach the session"
+        ws_fade=0
+    fi
+    anim_clock "$ws_clock"
+    ws_here
+    xdotool key super+Page_Down
+    ws_check line "ws-popup fade to=1 from=0.0000 duration=$ws_fade clock=manual" ||
+        fail G-WS-POPUP-POLICY "$ws_policy: the popup's fade-in was not ${ws_fade} ms"
+    ws_check line "ws-dots set count=2 active=1 from=0.0000 motion=false clock=manual" ||
+        fail G-WS-DOTS-POLICY "$ws_policy: the dots did not take the switch without motion"
+    ws_check dots 1 || fail G-WS-DOTS-POLICY "$ws_policy: the dots did not land on workspace 2 at once"
+    if [ "$ws_policy" = reduce ]; then
+        anim_clock $((ws_clock + 50))
+        ws_check popup 0.75 || fail G-WS-POPUP-POLICY "Reduced Motion dropped the popup's fade"
+    else
+        ws_check popup 1 || fail G-WS-POPUP-POLICY "animations off did not show the popup at once"
+    fi
+    anim_clock $((ws_clock + 600 + ws_fade))
+    ws_check line "ws-popup hidden" || fail G-WS-POPUP-POLICY "$ws_policy: the popup did not hide"
+    ws_here
+    xdotool key super+Page_Up
+    cstate '.active_workspace == 0' "$ws_policy home" || fail G-WS-POPUP-POLICY "$ws_policy: could not return"
+    ws_clock=$((ws_clock + 2000))
+    anim_clock "$ws_clock"
+    ws_check line "ws-popup hidden" || fail G-WS-POPUP-POLICY "$ws_policy: the second popup did not hide"
+done
+gsettings set org.gnome.desktop.interface enable-animations true
+cstate '.motion_policy == "full"' "popup motion restored" || fail G-WS-POPUP-POLICY "could not restore motion"
+real_clock || fail G-WS-POPUP-CLOCK "removing the clock file did not resume real time"
+pass G-WS-POPUP-POLICY "Reduced Motion keeps the popup's 100 ms fade, animations off show and hide it at once"
+pass G-WS-DOTS-POLICY "Reduced Motion and animations off move the dots to the new workspace at once"
+sleep 1
+
 # GNOME's keyboard workspace switch (workspaceAnimation.js): both
 # workspaces slide 250 ms ease-out-cubic as a render offset, a second
 # press retargets from where the strip is drawn, fade-only motion
@@ -9255,7 +10332,7 @@ anim_clock 10125
 # Ease-out-cubic is 87.5% of the way at half time.
 cstate '.workspace_slide.in_flight | ((.position - .from_slot) - 0.875 | . < 0.001 and . > -0.001)' "slide half way" ||
     fail G-WORKSPACE-SLIDE "the slide was not 87.5% across at 125 ms"
-cp "$CSTATE" "$ARTIFACTS/workspace-slide-in-flight.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/workspace-slide-in-flight.json"
 scrot "$ARTIFACTS/24g-workspace-slide-mid.png" >/dev/null 2>&1 || true
 anim_clock 10250
 slide_settled $((slide_home + 1)) "slide settled" || fail G-WORKSPACE-SLIDE "the slide had not settled at 250 ms"
@@ -9291,7 +10368,7 @@ slide_began $((slide_home + 2)) "retargeted" ||
     fail G-WORKSPACE-SLIDE "the second press did not start a slide toward the next workspace"
 cstate ".active_workspace == $slide_home + 2 and (.workspace_slide.in_flight | .record.retargets == 1 and ((.position - $first_position) | . < 0.001 and . > -0.001))" "retargeted" ||
     fail G-WORKSPACE-SLIDE "the second press jumped instead of retargeting from the drawn offset"
-cp "$CSTATE" "$ARTIFACTS/workspace-slide-retarget-in-flight.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/workspace-slide-retarget-in-flight.json"
 anim_clock 11310
 slide_settled $((slide_home + 2)) "double press settled" ||
     fail G-WORKSPACE-SLIDE "two rapid Super+Page_Down did not end two workspaces over"
@@ -9383,13 +10460,13 @@ swipe_phase update -240 0
 swipe_phase end 0 0
 cstate ".active_workspace == $gesture_home + 1 and (.overview_open | not)" "left swipe" ||
     fail G-SWIPE-DIRECTIONS "three-finger left did not select the next workspace"
-cp "$CSTATE" "$ARTIFACTS/swipe-next-workspace.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/swipe-next-workspace.json"
 swipe_phase begin 0 0
 swipe_phase update 240 0
 swipe_phase end 0 0
 cstate ".active_workspace == $gesture_home and (.overview_open | not)" "right swipe" ||
     fail G-SWIPE-DIRECTIONS "three-finger right did not restore the previous workspace"
-cp "$CSTATE" "$ARTIFACTS/swipe-previous-workspace.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/swipe-previous-workspace.json"
 pass G-SWIPE-DIRECTIONS "nested three-finger left/right switch and restore the exact workspace"
 
 # The strip follows the fingers while they are down (1 workspace per
@@ -9411,7 +10488,7 @@ held_at() {
 swipe_at begin 0 30000
 swipe_at update -100 30010
 held_at 0.25 "a quarter over" || fail G-SWIPE-FOLLOW "100px of travel did not hold the strip a quarter over"
-cp "$CSTATE" "$ARTIFACTS/swipe-follow-quarter.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/swipe-follow-quarter.json"
 swipe_at update -60 30020
 held_at 0.4 "0.4 over" || fail G-SWIPE-FOLLOW "the strip did not keep following the fingers"
 # Lifted 400 ms after the last movement: no velocity, so it snaps back.
@@ -9444,29 +10521,129 @@ if ! jq -e '.gesture and .velocity >= 0.6 and .duration_ms >= 100 and .duration_
 fi
 pass G-SWIPE-VELOCITY "a fast flick lands in ${flick_ms}ms, a slow drag in ${drag_ms}ms"
 
+# The Activities dots follow a held three-finger swipe and settle on its
+# release (#596): GNOME binds the primary monitor's swipe progress to the
+# workspaces adjustment the dots read (workspaceAnimation.js:255-268,
+# panel.js:144-145,178-195), so they track the fingers and then ease
+# (out-cubic) over the swipe tracker's release time. The compositor sends
+# each phase (WorkspaceProgress); the frozen clock samples the release.
+# The held strip slides under every motion policy: GNOME's swipe paths
+# never consult Reduced Motion, and animations off only zero the release
+# (animationUtils.js:23-33).
+slide_settled "$gesture_home" "dots swipe start" || fail G-WS-DOTS-SWIPE "the previous swipe did not settle"
+[ "$gesture_home" = 0 ] || fail G-WS-DOTS-SWIPE "expected to start on the first workspace, not $gesture_home"
+ws_settle G-WS-DOTS-SWIPE
+ws_clock=0
+anim_clock "$ws_clock"
+cstate '.animation_clock_manual and .motion_policy == "full"' "swipe dots clock frozen" ||
+    fail G-WS-DOTS-SWIPE "the animation clock did not freeze"
+# One release: $1 the expected landing position, $2 the swipe's start time.
+ws_release() {
+    # shellcheck disable=SC2046
+    set -- "$1" $(ws_check release)
+    [ "$2" = "$1" ] || fail G-WS-DOTS-SWIPE "the release sent the dots to $2, not $1"
+    ws_ms="$3"
+    cstate "(.workspace_slide.in_flight.record.duration_ms - $ws_ms) | fabs <= 0.5" "strip release $ws_ms ms" 5 ||
+        fail G-WS-DOTS-SWIPE "the dots' release time ${ws_ms} ms is not the strip's: $(jq -c '.workspace_slide.in_flight' "$CSTATE")"
+    ws_whole=${ws_ms%.*}
+    anim_clock $((ws_clock + ws_whole / 2))
+    ws_check eased $((ws_whole / 2)) >/dev/null ||
+        fail G-WS-DOTS-SWIPE "half way through the ${ws_ms} ms release the dots were not on GNOME's ease-out-cubic"
+    scrot -o "$ARTIFACTS/24p-workspace-dots-release-$1.png" >/dev/null 2>&1 || true
+    ws_clock=$((ws_clock + ws_whole + 1))
+    anim_clock "$ws_clock"
+    ws_check dots "$1" || fail G-WS-DOTS-SWIPE "the dots did not settle at $1 when the release ended"
+}
+ws_here
+swipe_at begin 0 60000
+swipe_at update -100 60010
+held_at 0.25 "dots: a quarter over" || fail G-WS-DOTS-SWIPE "the strip was not held a quarter over"
+ws_check line "ws-dots follow position=0.2500 duration=0.000 motion=true clock=manual" ||
+    fail G-WS-DOTS-SWIPE "100px of travel did not tell the shell the strip is a quarter over"
+ws_check dots 0.25 || fail G-WS-DOTS-SWIPE "the dots did not follow the fingers a quarter over"
+scrot -o "$ARTIFACTS/24o-workspace-dots-swipe-quarter.png" >/dev/null 2>&1 || true
+swipe_at update -60 60020
+ws_check dots 0.4 || fail G-WS-DOTS-SWIPE "the dots did not keep following the fingers to 0.4"
+# Lifted 400 ms after the last movement: no velocity, back to the start.
+swipe_at end 0 60420
+ws_release 0.0000
+slide_settled "$gesture_home" "dots swipe back" || fail G-WS-DOTS-SWIPE "the slow release did not settle back"
+# A fast short flick lands one workspace over, sooner.
+ws_here
+swipe_at begin 0 70000
+swipe_at update -40 70008
+swipe_at update -40 70016
+swipe_at end 0 70024
+ws_release 1.0000
+ws_check absent "ws-popup display" --timeout 0 ||
+    fail G-WS-DOTS-SWIPE "a swipe showed the switcher popup (GNOME's swipes never do)"
+slide_settled $((gesture_home + 1)) "dots flick" || fail G-WS-DOTS-SWIPE "the flick did not switch"
+xdotool key super+Page_Up
+cstate ".active_workspace == $gesture_home" "dots swipe home" || fail G-WS-DOTS-SWIPE "could not return"
+ws_clock=$((ws_clock + 1000))
+anim_clock "$ws_clock"
+pass G-WS-DOTS-SWIPE "the Activities dots follow a held swipe (0.25, 0.4 of a workspace) and settle on its release with the strip's own ease-out-cubic time, back on a slow lift and over on a flick"
+for ws_policy in reduce off; do
+    if [ "$ws_policy" = reduce ]; then
+        gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
+        cstate '.motion_policy == "fade-only"' "reduced swipe dots" ||
+            fail G-WS-DOTS-SWIPE-POLICY "Reduced Motion did not reach the session"
+    else
+        gsettings reset org.gnome.desktop.a11y.interface reduced-motion
+        gsettings set org.gnome.desktop.interface enable-animations false
+        cstate '.motion_policy == "off"' "swipe dots animations off" ||
+            fail G-WS-DOTS-SWIPE-POLICY "enable-animations false did not reach the session"
+    fi
+    ws_here
+    swipe_at begin 0 $((80000 + ws_clock))
+    swipe_at update -100 $((80010 + ws_clock))
+    held_at 0.25 "$ws_policy: held" || fail G-WS-DOTS-SWIPE-POLICY "$ws_policy: the strip did not follow the fingers"
+    cstate '.workspace_slide.in_flight.record.motion == "slide"' "$ws_policy: held slide" ||
+        fail G-WS-DOTS-SWIPE-POLICY "$ws_policy: the held strip did not slide with the fingers"
+    ws_check dots 0.25 || fail G-WS-DOTS-SWIPE-POLICY "$ws_policy: the dots did not follow the fingers"
+    swipe_at end 0 $((80500 + ws_clock))
+    ws_check line "ws-dots follow position=0.0000 " || fail G-WS-DOTS-SWIPE-POLICY "$ws_policy: no release reached the dots"
+    # Without motion the dots land at once, on the frozen clock.
+    ws_check dots 0 || fail G-WS-DOTS-SWIPE-POLICY "$ws_policy: the dots did not snap home on release"
+    if [ "$ws_policy" = off ]; then
+        cstate '.workspace_slide.in_flight == null' "off: released at once" ||
+            fail G-WS-DOTS-SWIPE-POLICY "animations off: the release still animated"
+    fi
+    ws_clock=$((ws_clock + 1000))
+    anim_clock "$ws_clock"
+    slide_settled "$gesture_home" "$ws_policy: settled" || fail G-WS-DOTS-SWIPE-POLICY "$ws_policy: the swipe did not settle"
+done
+gsettings set org.gnome.desktop.interface enable-animations true
+cstate '.motion_policy == "full"' "swipe dots motion restored" || fail G-WS-DOTS-SWIPE-POLICY "could not restore motion"
+real_clock || fail G-WS-DOTS-SWIPE "removing the clock file did not resume real time"
+pass G-WS-DOTS-SWIPE-POLICY "under Reduced Motion and animations off a held swipe still slides the strip and moves the dots with the fingers; the release snaps the dots (and, with animations off, the strip)"
+
+# GNOME sets the overview's state adjustment straight from a held swipe
+# (overview.js:359-380), so it follows the fingers with animations off
+# too; only the release's ease drops to 0 ms (animationUtils.js:23-33).
 gsettings set org.gnome.desktop.interface enable-animations false
-cstate '(.animations_enabled | not) and .overview_progress == 0' "reduced-motion swipe ready" ||
-    fail G-SWIPE-REDUCED-MOTION "live reduced-motion setting did not arrive"
+cstate '(.animations_enabled | not) and .overview_progress == 0' "animations-off swipe ready" ||
+    fail G-SWIPE-REDUCED-MOTION "live animations setting did not arrive"
 swipe_phase begin 0 0
 swipe_phase update 0 -180
-cstate '.overview_progress == 1 and (.overview_open | not)' "reduced-motion held up" ||
-    fail G-SWIPE-REDUCED-MOTION "held upward swipe retained an intermediate transition"
-cp "$CSTATE" "$ARTIFACTS/swipe-reduced-motion-held-up.json"
+cstate '.overview_progress > 0.55 and .overview_progress < 0.65 and (.overview_open | not)' "animations-off held up" ||
+    fail G-SWIPE-REDUCED-MOTION "held upward swipe did not follow the fingers"
+snapshot_state "$CSTATE" "$ARTIFACTS/swipe-reduced-motion-held-up.json"
 swipe_phase end 0 0
-cstate '.overview_open and .overview_progress == 1' "reduced-motion up released" ||
-    fail G-SWIPE-REDUCED-MOTION "upward release did not open the overview"
+cstate '.overview_open and .overview_progress == 1 and .overview_motion.release.duration_ms == 0' "animations-off up released" ||
+    fail G-SWIPE-REDUCED-MOTION "upward release did not open the overview at once"
 swipe_phase begin 0 0
 swipe_phase update 0 180
-cstate '.overview_progress == 0 and .overview_open' "reduced-motion held down" ||
-    fail G-SWIPE-REDUCED-MOTION "held downward swipe retained an intermediate transition"
-cp "$CSTATE" "$ARTIFACTS/swipe-reduced-motion-held-down.json"
+cstate '.overview_progress > 0.35 and .overview_progress < 0.45 and .overview_open' "animations-off held down" ||
+    fail G-SWIPE-REDUCED-MOTION "held downward swipe did not follow the fingers"
+snapshot_state "$CSTATE" "$ARTIFACTS/swipe-reduced-motion-held-down.json"
 swipe_phase end 0 0
-cstate '(.overview_open | not) and .overview_progress == 0' "reduced-motion down released" ||
-    fail G-SWIPE-REDUCED-MOTION "downward release did not close the overview"
+cstate '(.overview_open | not) and .overview_progress == 0 and .overview_motion.release.duration_ms == 0' "animations-off down released" ||
+    fail G-SWIPE-REDUCED-MOTION "downward release did not close the overview at once"
 gsettings set org.gnome.desktop.interface enable-animations true
 cstate '.animations_enabled' "gesture animations restored" ||
     fail G-SWIPE-REDUCED-MOTION "could not restore animation setting"
-pass G-SWIPE-REDUCED-MOTION "up/down gestures snap while held and settle correctly with reduced motion"
+pass G-SWIPE-REDUCED-MOTION "with animations off up/down gestures follow the fingers while held and land at once"
 
 # GNOME 51 eases the overview open with EASE_OUT_SINE and closed with
 # EASE_OUT_QUAD over 250 ms (#499). The compositor records the progress
@@ -9482,7 +10659,7 @@ sleep 1
 xdotool key Escape
 cstate '(.overview_open | not) and .overview_progress == 0' "eased close" ||
     fail G-OVERVIEW-EASING "the overview did not close"
-cp "$CSTATE" "$ARTIFACTS/overview-easing.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/overview-easing.json"
 jq -e '
     def abs: if . < 0 then -. else . end;
     def frac: (.[0] / 250) | if . > 1 then 1 else . end;
@@ -9500,8 +10677,10 @@ jq -e '
 pass G-OVERVIEW-EASING "opening follows EASE_OUT_SINE and closing EASE_OUT_QUAD over 250 ms, sampled mid-transition"
 
 # A quick upward flick opens the overview from a quarter of the way,
-# as GNOME's swipe tracker projects it, and the fingers' 3 px/ms set
-# an out-cubic finish of 225 ms rather than a fixed rate.
+# as GNOME's swipe tracker projects it, and the fingers' 3.75 px/ms (75
+# px over the 20 ms after the still sample the tracker starts with,
+# swipeTracker.js:509-513) set an out-cubic finish of 180 ms rather than
+# a fixed rate. The first update crosses the 16 px drag threshold.
 swipe_timed() {
     swipe_sequence=$((swipe_sequence + 1))
     printf '{"phase":"%s","dy":%s,"time":%s,"sequence":%s}\n' \
@@ -9511,19 +10690,71 @@ swipe_timed() {
     sleep 0.2
 }
 swipe_timed begin 0 5000
-swipe_timed update -15 5010
+swipe_timed update -30 5010
 swipe_timed update -30 5020
-swipe_timed update -30 5030
+swipe_timed update -15 5030
 swipe_timed end 0 5040
-cstate '.overview_open and .overview_motion.release.target == 1 and .overview_motion.release.from == 0.25 and .overview_motion.release.curve == "ease-out-cubic" and (.overview_motion.release.duration_ms - 225 | if . < 0 then -. else . end) < 0.01' "flick release" ||
+cstate '.overview_open and .overview_motion.release.target == 1 and .overview_motion.release.from == 0.25 and .overview_motion.release.curve == "ease-out-cubic" and (.overview_motion.release.duration_ms - 180 | if . < 0 then -. else . end) < 0.01' "flick release" ||
     fail G-SWIPE-MOMENTUM "a quarter-way flick did not carry its velocity into the finish"
 cstate '.overview_progress == 1' "flick settled" ||
     fail G-SWIPE-MOMENTUM "the flick did not settle open"
-cp "$CSTATE" "$ARTIFACTS/swipe-momentum.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/swipe-momentum.json"
 xdotool key Escape
 cstate '(.overview_open | not) and .overview_progress == 0' "flick closed" ||
     fail G-SWIPE-MOMENTUM "the overview did not close after the flick"
 pass G-SWIPE-MOMENTUM "a released swipe keeps its momentum: projected target and velocity-derived out-cubic duration"
+
+# GNOME 51's overview swipe spans the desktop, the window picker and the
+# app grid (ControlsState 0-2, overviewControls.js:757-797). From the
+# window picker fingers held up draw the app grid part way (the shell's
+# grid surface maps and follows, `_updateAppDisplayVisibility`), and the
+# release lands on the app grid with Show Apps checked (`gestureEnd`),
+# the grid easing over the swipe's own settle time; down comes back to
+# the window picker. A swipe from the desktop stops at the window picker
+# (swipeTracker.js:547-565: the overview tracker has no long swipes).
+swipe_timed begin 0 39000
+swipe_timed update -300 39010
+swipe_timed update -300 39020
+swipe_timed end 0 39400
+cstate '.overview_open and .overview_state == 1 and (.overview_app_grid | not) and .overview_motion.release.from == 1 and .overview_motion.release.target == 1' "desktop swipe stops at the picker" ||
+    fail G-SWIPE-APPGRID "a long swipe from the desktop did not stop at the window picker"
+grid_swipe_mark="$(log_mark)"
+swipe_timed begin 0 40000
+swipe_timed update -90 40010
+cstate '.touchpad_swipe.active and .overview_open and .overview_progress == 1 and .overview_state > 1.299 and .overview_state < 1.301 and (.layers | any(.namespace == "tuna-shell-appgrid"))' "app grid held part way" ||
+    fail G-SWIPE-APPGRID "a held swipe up from the window picker did not draw the app grid part way"
+snapshot_state "$CSTATE" "$ARTIFACTS/swipe-appgrid-held.json"
+swipe_timed update -60 40020
+cstate '.touchpad_swipe.active and .overview_state > 1.499 and .overview_state < 1.501' "app grid follows" ||
+    fail G-SWIPE-APPGRID "the app grid stopped following the fingers"
+scrot "$ARTIFACTS/24-appgrid-swipe-held.png" >/dev/null
+swipe_timed end 0 40030
+cstate '.overview_motion.release.from > 1.499 and .overview_motion.release.from < 1.501 and .overview_motion.release.target == 2 and .overview_motion.release.duration_ms > 0' "app grid release" ||
+    fail G-SWIPE-APPGRID "the release did not project onto the app grid"
+cstate '.overview_open and .overview_state == 2 and .overview_app_grid and (.layers | any(.namespace == "tuna-shell-appgrid"))' "app grid settled" ||
+    fail G-SWIPE-APPGRID "the swipe did not settle on the app grid"
+log_wait "$grid_swipe_mark" "grid-anim grid-swipe-in settle" ||
+    fail G-SWIPE-APPGRID "the shell's grid did not ease in on the swipe's release"
+snapshot_state "$CSTATE" "$ARTIFACTS/swipe-appgrid-settled.json"
+grid_swipe_mark="$(log_mark)"
+swipe_timed begin 0 41000
+swipe_timed update 90 41010
+cstate '.touchpad_swipe.active and .overview_state > 1.699 and .overview_state < 1.701' "app grid held down" ||
+    fail G-SWIPE-APPGRID "a held swipe down from the app grid did not follow"
+swipe_timed update 600 41020
+cstate '.touchpad_swipe.active and .overview_state == 1 and .overview_open' "app grid bound" ||
+    fail G-SWIPE-APPGRID "a swipe down from the app grid went past the window picker"
+swipe_timed end 0 41030
+cstate '.overview_open and .overview_state == 1 and (.overview_app_grid | not)' "back to the picker" ||
+    fail G-SWIPE-APPGRID "the swipe down did not come back to the window picker"
+log_wait "$grid_swipe_mark" "grid-anim grid-swipe-out" ||
+    fail G-SWIPE-APPGRID "the shell's grid did not leave on the swipe's release"
+cstate '(.layers | any(.namespace == "tuna-shell-appgrid")) | not' "grid hidden" ||
+    fail G-SWIPE-APPGRID "the app grid surface stayed mapped on the window picker"
+xdotool key Escape
+cstate '(.overview_open | not) and .overview_progress == 0' "appgrid swipe closed" ||
+    fail G-SWIPE-APPGRID "the overview did not close after the app grid swipes"
+pass G-SWIPE-APPGRID "the overview swipe stops at the picker from the desktop, follows into the app grid from it and lands there, and comes back"
 
 # GNOME's workspace thumbnails: a window moved one workspace right makes
 # three (the trailing empty one included), so the overview shows the
@@ -9531,7 +10762,7 @@ pass G-SWIPE-MOMENTUM "a released swipe keeps its momentum: projected target and
 # Swipes restore the previous focus, which can legitimately be XEyes.
 # Select the owned native header fixture before the single menu attempt.
 pick_alpha || fail G-WS-THUMBS "could not focus the original native Alpha fixture"
-cp "$CSTATE" "$ARTIFACTS/ws-thumbs-native-before.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/ws-thumbs-native-before.json"
 menu_target="$("$PY" "$ROOT/scripts/lib/tuna_window_menu_fixture.py" target "$ARTIFACTS/ws-thumbs-native-before.json" "$ARTIFACTS/alpha-window-owner.json")" ||
     fail G-WS-THUMBS "original native Alpha identity/focus/geometry is not ready"
 read -r moved home_ws menu_x menu_y <<EOF
@@ -9543,7 +10774,7 @@ sleep 1.5
     --press "Move to Workspace Right" || fail G-WS-THUMBS "the window menu has no Move to Workspace Right"
 cstate ".active_workspace == $home_ws and any(.windows[]; .id == $moved and .workspace == $home_ws + 1)" \
     "moved" || fail G-WS-THUMBS "the original native Alpha did not move one workspace right"
-cp "$CSTATE" "$ARTIFACTS/ws-thumbs-native-after.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/ws-thumbs-native-after.json"
 sleep 1
 # Hold a synthetic three-finger swipe at half progress. The event enters the
 # compositor's normal gesture handler; the held frame lets CI sample it.
@@ -9558,7 +10789,7 @@ cstate '.overview_progress == 0.5 and (.thumbnails | length) == 3 and any(.works
     fail G-SWIPE-PROGRESS "neighbour cards or thumbnails are missing mid-gesture"
 sleep 0.2
 scrot "$ARTIFACTS/24f-mid-swipe-workspaces.png" >/dev/null
-cp "$CSTATE" "$ARTIFACTS/mid-swipe-state.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/mid-swipe-state.json"
 pass G-SWIPE-PROGRESS "neighbour workspaces and thumbnails slide and fade during a held three-finger swipe"
 printf '{"phase":"end","sequence":3}\n' >"$TUNA_PROOF_SWIPE_INPUT.tmp"
 mv "$TUNA_PROOF_SWIPE_INPUT.tmp" "$TUNA_PROOF_SWIPE_INPUT"
@@ -9579,6 +10810,34 @@ ring_vivid="$(awk -v r="$1" -v g="$2" -v b="$3" 'BEGIN {
 if [ "$ring_vivid" != yes ]; then
     fail G-WS-THUMBS "no accent indicator around the active thumbnail (pixel ${1:-?} ${2:-?} ${3:-?})"
 fi
+# GNOME's overview workspaces follow a sideways swipe (WorkspacesView's
+# scroll adjustment, workspacesView.js:960-1002): held, the strip sits
+# between workspaces and the active one stays; the overview tracker allows
+# long swipes (workspacesView.js:876), so one release can settle two
+# workspaces on, easing out-cubic over the projected duration.
+ov_scrolled() { echo "(.overview_motion.scroll | .position - (.workspaces | index($home_ws)))"; }
+swipe_at begin 0 50000
+swipe_at update -200 50010
+cstate ".overview_open and .overview_motion.scroll.held and ($(ov_scrolled) | . > 0.499 and . < 0.501) and .active_workspace == $home_ws" "overview strip held" ||
+    fail G-SWIPE-OVERVIEW-SCROLL "a held sideways swipe did not hold the overview's workspaces half way"
+snapshot_state "$CSTATE" "$ARTIFACTS/swipe-overview-scroll-held.json"
+swipe_at update -500 50020
+cstate ".overview_motion.scroll.held and ($(ov_scrolled) | . > 1.749 and . < 1.751) and .active_workspace == $home_ws" "overview strip follows" ||
+    fail G-SWIPE-OVERVIEW-SCROLL "the overview's workspaces stopped following past the next one"
+scrot "$ARTIFACTS/24g-overview-scroll-held.png" >/dev/null
+swipe_at end 0 50030
+cstate '.overview_motion.scroll_release | .target - .from > 0 and .curve == "ease-out-cubic" and .duration_ms > 0' "overview strip release" ||
+    fail G-SWIPE-OVERVIEW-SCROLL "the release did not ease on toward the last workspace"
+cstate ".overview_open and .active_workspace == $home_ws + 2 and .overview_motion.scroll == null" "two workspaces on" ||
+    fail G-SWIPE-OVERVIEW-SCROLL "the release did not settle two workspaces on"
+snapshot_state "$CSTATE" "$ARTIFACTS/swipe-overview-scroll-settled.json"
+swipe_at begin 0 51000
+swipe_at update 500 51010
+swipe_at update 300 51020
+swipe_at end 0 51030
+cstate ".overview_open and .active_workspace == $home_ws and .overview_motion.scroll == null" "overview strip home" ||
+    fail G-SWIPE-OVERVIEW-SCROLL "a long swipe back did not return two workspaces"
+pass G-SWIPE-OVERVIEW-SCROLL "the overview's workspaces follow a held sideways swipe across workspaces and a release settles two on and back"
 target="$(jq -r ".thumbnails[] | select(.workspace == $home_ws + 1) | .rect | \"\(.[0] + .[2] / 2) \(.[1] + .[3] / 2)\"" "$CSTATE")"
 # shellcheck disable=SC2086
 xdotool mousemove --window "$WID" $target click 1
@@ -10164,9 +11423,21 @@ power_save_get() {
         org.gnome.Mutter.DisplayConfig PowerSaveMode
 }
 shell_dimming() {
-    gdbus call --session --dest org.gnome.Shell.Brightness \
+    # A live idle-brightness change owns an asynchronous write/readback.
+    # Like the undim boundary, admit this request only after that owner
+    # completes; every error other than its explicit busy reply is fatal.
+    dim_deadline=$(($(date +%s) + 10))
+    until dim_error="$(gdbus call --session --dest org.gnome.Shell.Brightness \
         --object-path /org/gnome/Shell/Brightness \
-        --method org.gnome.Shell.Brightness.SetDimming "$1" >/dev/null
+        --method org.gnome.Shell.Brightness.SetDimming "$1" 2>&1 >/dev/null)"; do
+        case "$dim_error" in
+            *"brightness update already pending"*) ;;
+            *) fail G-POWER-SAVE-MODE "SetDimming($1) refused: $dim_error" ;;
+        esac
+        [ "$(date +%s)" -le "$dim_deadline" ] ||
+            fail G-POWER-SAVE-MODE "SetDimming($1) stayed pending"
+        sleep 0.2
+    done
 }
 # The monitor-key cycle above wrapped the primary to its hardware floor and
 # the slider kept its zero ratio (CI 40815468357: tuna-bl 10/1010), so only
@@ -10251,20 +11522,9 @@ if ! { [ "$(cat "$power_other/brightness")" = "$power_restored_other" ] &&
     [ "$(cat "$BACKLIGHT/brightness")" = "$power_restored_primary" ]; }; then
     fail G-POWER-SAVE-MODE "restoring idle-brightness $power_idle did not clip to $power_restored_primary/$power_restored_other"
 fi
-# The idle transaction may still be completing its readback; the shell refuses
-# a concurrent request as pending, and its reply comes only after its own
-# transaction completes, so an accepted undim leaves no write in flight.
-end=$(($(date +%s) + 10))
-until power_undim_error="$(gdbus call --session --dest org.gnome.Shell.Brightness \
-    --object-path /org/gnome/Shell/Brightness \
-    --method org.gnome.Shell.Brightness.SetDimming false 2>&1 >/dev/null)"; do
-    case "$power_undim_error" in
-        *"brightness update already pending"*) ;;
-        *) fail G-POWER-SAVE-MODE "SetDimming(false) refused: $power_undim_error" ;;
-    esac
-    [ "$(date +%s)" -le "$end" ] || fail G-POWER-SAVE-MODE "SetDimming(false) stayed pending"
-    sleep 0.2
-done
+# The reply completes its own write/readback, so no write remains in
+# flight when the controlled second output is removed below.
+shell_dimming false || fail G-POWER-SAVE-MODE "SetDimming(false) refused"
 if ! { [ "$(cat "$BACKLIGHT/brightness")" = "$power_baseline" ] &&
     [ "$(cat "$power_other/brightness")" = "$power_other_baseline" ]; }; then
     fail G-POWER-SAVE-MODE "undimming did not restore the user baseline $power_baseline/$power_other_baseline"
@@ -10581,6 +11841,268 @@ end_bus signal ConfirmedShutdown || fail G-END-SESSION-POWEROFF "Power Off emitt
 end_bus returned Shutdown || fail G-END-SESSION-POWEROFF "the manager did not answer Shutdown once confirmed"
 pass G-END-SESSION-POWEROFF "Power Off… asks org.gnome.SessionManager.Shutdown, whose dialog lists the inhibiting app and counts down from 60; Cancel leaves the session, Power Off has the manager ask logind PowerOff(true)"
 
+# The rest of GNOME 51's endSessionDialog.js (P-SY-07): other users'
+# sessions, the real name, the low-battery warning with offline updates,
+# and Restart's Alt Boot Options. AccountsService answers for this gate
+# only (the stub's opt-in "accounts"), so the rest of the proof keeps
+# GNOME's no-AccountsService strings.
+TUNA_STUB_SERVICES=accounts "$PY" "$ROOT/scripts/lib/tuna-service-stubs.py" "$BACKLIGHT" \
+    >"$ARTIFACTS/stubs-accounts.log" 2>&1 &
+ACCOUNTS_PID=$!
+for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/stubs-accounts.log" && break; sleep 0.3; done
+grep -q ready "$ARTIFACTS/stubs-accounts.log" || fail G-END-SESSION-REALNAME "the AccountsService stub did not start"
+# $1 tag, $2 menu row, $3 jq filter the open dialog must meet.
+end_open() {
+    end_bus_mark=$(($(wc -l <"$END_BUS_LOG") + 1))
+    open_power_menu "end-$1" || return 1
+    "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-end-$1-press.json" 20 \
+        --press "$2" || return 1
+    end_dump_until "end-$1" "$3" 10
+}
+end_cancel() {
+    "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-end-$1-cancel.json" 20 \
+        --press "Cancel" || return 1
+    end_dump_until "end-$1-cancelled" '(any(.[]; .showing and (.name | test("automatically"))) | not)' 5
+}
+me=$(id -un)
+for row in "Restart…" "Power Off…"; do
+    tag=users-$([ "$row" = "Restart…" ] && echo restart || echo poweroff)
+    end_open "$tag" "$row" 'any(.[]; .showing and .name == "Other users are logged in")
+        and any(.[]; .showing and .name == "alice") and any(.[]; .showing and .name == "Bob Builder (console)")
+        and any(.[]; .showing and .name == "carol (remote)")' ||
+        fail G-END-SESSION-USERS "$row did not list the other users' sessions"
+    for left_out in dave gdm-greeter "$me" "dave (console)" "Proof Person"; do
+        hidden "$ARTIFACTS/a11y-end-$tag.json" "$left_out" ||
+            fail G-END-SESSION-USERS "$row lists '$left_out' (closing, greeter or this session)"
+    done
+    scrot "$ARTIFACTS/22-end-session-$tag.png" >/dev/null
+    end_cancel "$tag" || fail G-END-SESSION-USERS "could not cancel $row"
+done
+pass G-END-SESSION-USERS "Restart… and Power Off… list alice, Bob Builder (console) and carol (remote) under \"Other users are logged in\", not the greeter, the closing session or this one"
+
+end_open realname "Log Out…" 'any(.[]; .showing and .name == "Log Out Proof Person")
+    and any(.[]; .showing and (.name | test("^Proof Person will be logged out automatically in 60 seconds$")))' ||
+    fail G-END-SESSION-REALNAME "Log Out… did not name the user by their real name"
+hidden "$ARTIFACTS/a11y-end-realname.json" "Other users are logged in" ||
+    fail G-END-SESSION-REALNAME "Log Out… lists other users' sessions"
+scrot "$ARTIFACTS/22-end-session-realname.png" >/dev/null
+end_cancel realname || fail G-END-SESSION-REALNAME "could not cancel Log Out…"
+kill "$ACCOUNTS_PID" 2>/dev/null || true
+wait "$ACCOUNTS_PID" 2>/dev/null || true
+end_open no-accounts "Log Out…" 'any(.[]; .showing and .name == "Log Out")
+    and any(.[]; .showing and (.name | test("^You will be logged out automatically in")))' ||
+    fail G-END-SESSION-REALNAME "without AccountsService Log Out… did not fall back to GNOME's plain strings"
+end_cancel no-accounts || fail G-END-SESSION-REALNAME "could not cancel Log Out…"
+pass G-END-SESSION-REALNAME "Log Out… reads \"Log Out Proof Person\" from AccountsService and falls back to \"Log Out\" without it"
+
+# gnome-software's OfflineUpdates on the session bus: GetState answers
+# the state file; SetAction and Cancel are logged.
+SOFTWARE_STATE="$ARTIFACTS/offline-update-state"
+SOFTWARE_LOG="$ARTIFACTS/offline-update.log"
+SOFTWARE_DELAY="$ARTIFACTS/offline-update-delay"
+SOFTWARE_TRACE="$ARTIFACTS/offline-update-trace"
+: >"$SOFTWARE_DELAY"
+: >"$SOFTWARE_TRACE"
+: >"$SOFTWARE_LOG"
+echo prepared >"$SOFTWARE_STATE"
+"$PY" - "$SOFTWARE_STATE" "$SOFTWARE_LOG" "$SOFTWARE_DELAY" "$SOFTWARE_TRACE" >"$ARTIFACTS/offline-update-stub.log" 2>&1 <<'PYSOFT' &
+import sys
+from gi.repository import Gio, GLib
+state_file, log_file, delay_file, trace_file = sys.argv[1:5]
+node = Gio.DBusNodeInfo.new_for_xml("""<node><interface name="org.gnome.Software.OfflineUpdates">
+<method name="GetState"><arg type="s" direction="out"/></method><method name="Cancel"/>
+<method name="SetAction"><arg type="s" direction="in"/></method></interface></node>""")
+def call(c, sender, path, iface, method, params, invocation):
+    with open(trace_file, "a") as fh:
+        fh.write(method + "\n")
+    result = None
+    if method == "GetState":
+        result = GLib.Variant("(s)", (open(state_file).read().strip(),))
+    else:
+        with open(log_file, "a") as fh:
+            fh.write(f"{method} {' '.join(map(str, params.unpack()))}".rstrip() + "\n")
+    delay = open(delay_file).read().split()
+    if delay and delay[0] == method:
+        def reply():
+            invocation.return_value(result)
+            return GLib.SOURCE_REMOVE
+        GLib.timeout_add(int(delay[1]), reply)
+    else:
+        invocation.return_value(result)
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+bus.register_object("/org/gnome/Software/OfflineUpdates", node.interfaces[0], call, None, None)
+Gio.bus_own_name_on_connection(bus, "org.gnome.Software", Gio.BusNameOwnerFlags.NONE, None, None)
+print("ready", flush=True)
+GLib.MainLoop().run()
+PYSOFT
+SOFTWARE_PID=$!
+for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/offline-update-stub.log" && break; sleep 0.3; done
+grep -q ready "$ARTIFACTS/offline-update-stub.log" || fail G-END-SESSION-BATTERY "the gnome-software stub did not start"
+upower_set() {
+    gdbus call --address "$DBUS_SYSTEM_BUS_ADDRESS" --dest org.freedesktop.UPower \
+        --object-path /org/freedesktop/UPower/devices/DisplayDevice \
+        --method org.freedesktop.DBus.Properties.Set org.freedesktop.UPower.Device "$1" "$2" >/dev/null
+}
+upower_set Percentage '<20.0>'
+upower_set State '<uint32 2>'
+upower_set IsPresent '<true>'
+WARNING="Low battery power: please plug in before installing updates"
+end_open battery-prepared "Power Off…" 'any(.[]; .showing and .name == "Install pending software updates" and (.checked | not))
+    and any(.[]; .showing and .name == "Power Off")' ||
+    fail G-END-SESSION-BATTERY "with a prepared update and a low battery Power Off… did not offer the unchecked update box"
+hidden "$ARTIFACTS/a11y-end-battery-prepared.json" "$WARNING" ||
+    fail G-END-SESSION-BATTERY "the warning showed with no update to install"
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-end-battery-check.json" 20 \
+    --press "Install pending software updates" || fail G-END-SESSION-BATTERY "could not check the update box"
+end_dump_until end-battery-checked "any(.[]; .showing and .name == \"$WARNING\")
+    and any(.[]; .showing and .name == \"Install Updates & Power Off\")" 5 ||
+    fail G-END-SESSION-BATTERY "checking the update box did not show the low-battery warning and GNOME's title"
+scrot "$ARTIFACTS/22-end-session-battery.png" >/dev/null
+end_cancel battery-prepared || fail G-END-SESSION-BATTERY "could not cancel Power Off…"
+echo scheduled >"$SOFTWARE_STATE"
+end_open battery-scheduled "Restart…" "any(.[]; .showing and .name == \"Restart & Install Updates\")
+    and any(.[]; .showing and (.name | test(\"^The system will automatically restart and install updates in 60 seconds$\")))
+    and any(.[]; .showing and .name == \"Restart & Install\") and any(.[]; .showing and .name == \"$WARNING\")" ||
+    fail G-END-SESSION-BATTERY "a scheduled update did not open GNOME's Restart & Install Updates with the warning"
+hidden "$ARTIFACTS/a11y-end-battery-scheduled.json" "Install pending software updates" ||
+    fail G-END-SESSION-BATTERY "Restart & Install Updates offered the update box"
+upower_set State '<uint32 1>'
+end_dump_until end-battery-charging "(any(.[]; .showing and .name == \"$WARNING\") | not)
+    and any(.[]; .showing and .name == \"Restart & Install Updates\")" 5 ||
+    fail G-END-SESSION-BATTERY "the warning stayed once the battery charged"
+end_cancel battery-scheduled || fail G-END-SESSION-BATTERY "could not cancel Restart & Install Updates"
+upower_set State '<uint32 2>'
+echo none >"$SOFTWARE_STATE"
+end_open battery-none "Restart…" 'any(.[]; .showing and .name == "Restart") and any(.[]; .showing and (.name | test("will restart automatically in 60")))' ||
+    fail G-END-SESSION-BATTERY "without updates Restart… did not open plainly"
+for absent in "$WARNING" "Install pending software updates"; do
+    hidden "$ARTIFACTS/a11y-end-battery-none.json" "$absent" ||
+        fail G-END-SESSION-BATTERY "without updates the dialog shows '$absent'"
+done
+end_cancel battery-none || fail G-END-SESSION-BATTERY "could not cancel Restart…"
+[ ! -s "$SOFTWARE_LOG" ] || fail G-END-SESSION-BATTERY "cancelling told gnome-software: $(cat "$SOFTWARE_LOG")"
+
+# Exercise outstanding service replies, not just a pure generation
+# helper: neither Close nor a newer Open may be undone by an old one.
+# The stub traces method receipt before delaying its reply.
+end_direct() {
+    direct_method=$1
+    shift
+    timeout 15 gdbus call --session --dest org.gnome.Shell \
+        --object-path /org/gnome/SessionManager/EndSessionDialog \
+        --method "org.gnome.SessionManager.EndSessionDialog.$direct_method" "$@"
+}
+software_received() {
+    received_until=$(($(date +%s) + 5))
+    until [ "$(grep -c "^$1$" "$SOFTWARE_TRACE")" -gt "$2" ]; do
+        [ "$(date +%s)" -le "$received_until" ] || return 1
+        sleep 0.1
+    done
+}
+echo 'GetState 2000' >"$SOFTWARE_DELAY"
+trace_mark=$(grep -c '^GetState$' "$SOFTWARE_TRACE")
+end_direct Open 1 0 60 '[]' >"$ARTIFACTS/end-async-close-call.log" 2>&1 &
+END_OPEN_PID=$!
+software_received GetState "$trace_mark" || fail G-END-SESSION-ASYNC "GetState never reached the stub"
+end_direct Close >/dev/null || fail G-END-SESSION-ASYNC "Close failed during GetState"
+if wait "$END_OPEN_PID"; then fail G-END-SESSION-ASYNC "the invalidated Open succeeded after Close"; fi
+end_dump_until end-async-closed '(any(.[]; .showing and (.name | test("automatically"))) | not)' 5 ||
+    fail G-END-SESSION-ASYNC "the delayed Open reopened after Close"
+trace_mark=$(grep -c '^GetState$' "$SOFTWARE_TRACE")
+end_direct Open 1 0 60 '[]' >"$ARTIFACTS/end-async-old-open.log" 2>&1 &
+END_OPEN_PID=$!
+software_received GetState "$trace_mark" || fail G-END-SESSION-ASYNC "the old Open never reached GetState"
+: >"$SOFTWARE_DELAY"
+end_direct Open 2 0 60 '[]' >/dev/null || fail G-END-SESSION-ASYNC "the newer Open failed"
+if wait "$END_OPEN_PID"; then fail G-END-SESSION-ASYNC "the older Open superseded the newer one"; fi
+end_dump_until end-async-newer 'any(.[]; .showing and (.name | test("^The system will restart automatically in")))' 5 ||
+    fail G-END-SESSION-ASYNC "the delayed Power Off replaced the newer Restart"
+end_direct Close >/dev/null || fail G-END-SESSION-ASYNC "Close failed after overlapping Opens"
+
+# A confirmed Power Off awaits Cancel of a prepared update. Replace it
+# with Restart before Cancel returns: no old ConfirmedShutdown (nor any
+# other confirmation) may answer that new dialog.
+echo prepared >"$SOFTWARE_STATE"
+end_direct Open 1 0 60 '[]' >/dev/null || fail G-END-SESSION-ASYNC "Power Off Open failed"
+end_dump_until end-async-confirm-open 'any(.[]; .showing and .name == "Install pending software updates" and (.checked | not))' 5 ||
+    fail G-END-SESSION-ASYNC "Power Off did not offer the unchecked prepared update"
+echo 'Cancel 2000' >"$SOFTWARE_DELAY"
+trace_mark=$(grep -c '^Cancel$' "$SOFTWARE_TRACE" || true)
+end_bus_mark=$(($(wc -l <"$END_BUS_LOG") + 1))
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-end-async-confirm.json" 20 \
+    --press "Power Off" || fail G-END-SESSION-ASYNC "could not confirm Power Off"
+software_received Cancel "$trace_mark" || fail G-END-SESSION-ASYNC "the confirmation did not reach Cancel"
+echo none >"$SOFTWARE_STATE"
+end_direct Open 2 0 60 '[]' >/dev/null || fail G-END-SESSION-ASYNC "the replacement Restart failed"
+sleep 3
+end_dump_until end-async-confirm-newer 'any(.[]; .showing and (.name | test("^The system will restart automatically in")))' 5 ||
+    fail G-END-SESSION-ASYNC "the old confirmation dismissed the newer Restart"
+for signal in ConfirmedShutdown ConfirmedReboot ConfirmedLogout; do
+    if end_bus signal "$signal"; then fail G-END-SESSION-ASYNC "the old confirmation emitted $signal for the newer dialog"; fi
+done
+end_direct Close >/dev/null || fail G-END-SESSION-ASYNC "Close failed after the stale confirmation"
+# Close while a confirmation awaits its service reply still answers the
+# manager with Closed, rather than leaving Shutdown/Reboot waiting.
+echo prepared >"$SOFTWARE_STATE"
+end_direct Open 1 0 60 '[]' >/dev/null || fail G-END-SESSION-ASYNC "Power Off Open failed before Close"
+trace_mark=$(grep -c '^Cancel$' "$SOFTWARE_TRACE")
+end_bus_mark=$(($(wc -l <"$END_BUS_LOG") + 1))
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-end-async-confirm-close.json" 20 \
+    --press "Power Off" || fail G-END-SESSION-ASYNC "could not confirm Power Off before Close"
+software_received Cancel "$trace_mark" || fail G-END-SESSION-ASYNC "the closing confirmation did not reach Cancel"
+end_direct Close >/dev/null || fail G-END-SESSION-ASYNC "Close failed during the confirmation"
+sleep 3
+end_bus signal Closed || fail G-END-SESSION-ASYNC "Close during confirmation emitted no Closed"
+if end_bus signal ConfirmedShutdown; then fail G-END-SESSION-ASYNC "the closed confirmation emitted ConfirmedShutdown"; fi
+end_dump_until end-async-confirm-closed '(any(.[]; .showing and (.name | test("automatically"))) | not)' 5 ||
+    fail G-END-SESSION-ASYNC "the dialog survived Close during confirmation"
+: >"$SOFTWARE_DELAY"
+pass G-END-SESSION-ASYNC "delayed update calls cannot reopen after Close, replace a newer Open or confirm its dialog"
+upower_set IsPresent '<false>'
+upower_set Percentage '<37.0>'
+kill "$SOFTWARE_PID" 2>/dev/null || true
+pass G-END-SESSION-BATTERY "below 30 % discharging, a prepared update's box starts unchecked and checking it warns; a scheduled one opens Restart & Install Updates warned until charging; no updates, no warning"
+
+end_open boot-poweroff "Power Off…" 'any(.[]; .showing and (.name | test("will power off automatically in 60")))' ||
+    fail G-END-SESSION-BOOT-OPTIONS "Power Off… did not open"
+xdotool keydown Alt_L
+sleep 0.5
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-end-boot-poweroff-alt.json" 20 ||
+    { xdotool keyup Alt_L; fail G-END-SESSION-BOOT-OPTIONS "accessibility dump failed"; }
+xdotool keyup Alt_L
+{ button_showing "$ARTIFACTS/a11y-end-boot-poweroff-alt.json" "Power Off" &&
+    hidden "$ARTIFACTS/a11y-end-boot-poweroff-alt.json" "Boot Options"; } ||
+    fail G-END-SESSION-BOOT-OPTIONS "Alt on Power Off… offered Boot Options"
+end_cancel boot-poweroff || fail G-END-SESSION-BOOT-OPTIONS "could not cancel Power Off…"
+end_open boot "Restart…" 'any(.[]; .showing and (.name | test("will restart automatically in 60")))' ||
+    fail G-END-SESSION-BOOT-OPTIONS "Restart… did not open"
+{ button_showing "$ARTIFACTS/a11y-end-boot.json" "Restart" && hidden "$ARTIFACTS/a11y-end-boot.json" "Boot Options"; } ||
+    fail G-END-SESSION-BOOT-OPTIONS "Boot Options showed without Alt"
+xdotool keydown Alt_L
+end_dump_until end-boot-alt 'any(.[]; .showing and .name == "Boot Options")
+    and (any(.[]; .showing and .name == "Restart" and (.role == "push button" or .role == "button")) | not)' 5 ||
+    { xdotool keyup Alt_L; fail G-END-SESSION-BOOT-OPTIONS "holding Alt did not swap Restart for Boot Options"; }
+scrot "$ARTIFACTS/22-end-session-boot-options.png" >/dev/null
+xdotool keyup Alt_L
+end_dump_until end-boot-released '(any(.[]; .showing and .name == "Boot Options") | not)
+    and any(.[]; .showing and .name == "Restart" and (.role == "push button" or .role == "button"))' 5 ||
+    fail G-END-SESSION-BOOT-OPTIONS "releasing Alt did not bring Restart back"
+power_mark=$(wc -l <"$POWER_LOG")
+xdotool keydown Alt_L
+end_dump_until end-boot-alt-again 'any(.[]; .showing and .name == "Boot Options")' 5 ||
+    { xdotool keyup Alt_L; fail G-END-SESSION-BOOT-OPTIONS "holding Alt again did not show Boot Options"; }
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-end-boot-press.json" 20 \
+    --press "Boot Options" || { xdotool keyup Alt_L; fail G-END-SESSION-BOOT-OPTIONS "could not press Boot Options"; }
+xdotool keyup Alt_L
+end=$(($(date +%s) + 10))
+until tail -n +"$((power_mark + 1))" "$POWER_LOG" | grep -q "^Reboot True pid=$MANAGER_PID$" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+boot_calls=$(tail -n +"$((power_mark + 1))" "$POWER_LOG")
+{ [ "$(printf '%s\n' "$boot_calls" | sed -n 1p)" = "SetRebootToBootLoaderMenu 60000000 pid=$(bus_pid "$END_SHELL")" ] &&
+    [ "$(printf '%s\n' "$boot_calls" | sed -n 2p)" = "Reboot True pid=$MANAGER_PID" ]; } ||
+    fail G-END-SESSION-BOOT-OPTIONS "Boot Options did not set the boot loader menu before the manager's Reboot: $boot_calls"
+end_bus signal ConfirmedReboot || fail G-END-SESSION-BOOT-OPTIONS "Boot Options emitted no ConfirmedReboot"
+pass G-END-SESSION-BOOT-OPTIONS "holding Alt swaps Restart for Boot Options (not on Power Off…), which sets logind's 60 s boot loader menu before the manager's Reboot(true)"
+
 # Log Out…'s confirmation ends the session, so it runs last (below).
 end_session_gate G-END-SESSION-LOGOUT logout "Log Out…" Logout 0 "logged out" ""
 kill "$END_INHIBITOR_PID" 2>/dev/null || true
@@ -10850,6 +12372,11 @@ if [ -n "$PAM_ON" ]; then
     anim_clock 125
     tvalue lock_curtain 0.25 || fail G-LOCK-SLIDE "the curtain was not at ease-out-quad 75% down 125 ms in"
     scrot "$ARTIFACTS/25a-lock-curtain-125ms.png" >/dev/null
+    # gnome-shell sets the screen saver active only once the curtain has
+    # landed (`_lockScreenShown`): gnome-settings-daemon blanks the
+    # screen on ActiveChanged(true), which mid-slide froze the curtain.
+    screen_active | grep -q false ||
+        fail G-LOCK-SLIDE "the screen saver went active before the curtain landed"
     anim_clock 250
     tsettled lock_curtain "$curtain_started" "$curtain_frames" ||
         fail G-LOCK-SLIDE "the lock curtain did not lower and settle"
@@ -10880,7 +12407,16 @@ if [ -n "$PAM_ON" ]; then
     sleep 0.5
     grep -q 'ActiveChanged.*true' "$ARTIFACTS/screensaver-signals.log" || fail G-LOCK-KEY "no active signal"
     grep -q 'ActiveChanged.*false' "$ARTIFACTS/screensaver-signals.log" || fail G-LOCK-KEY "no inactive signal"
-    pass G-LOCK-KEY "Super+L locks; PAM unlocks; ActiveChanged publishes both transitions"
+    # gnome-settings-daemon unblanks only on input or WakeUpScreen, which
+    # gnome-shell's `_continueDeactivate` emits on every unlock before the
+    # screen saver goes inactive: `loginctl unlock-session` after the blank
+    # otherwise left the unlocked session dark (marlin-vm V-ORCA-ACTIVATION).
+    wake_line=$(grep -n 'WakeUpScreen' "$ARTIFACTS/screensaver-signals.log" | tail -1 | cut -d: -f1)
+    inactive_line=$(grep -n 'ActiveChanged.*false' "$ARTIFACTS/screensaver-signals.log" | tail -1 | cut -d: -f1)
+    if [ -z "$wake_line" ] || [ "$wake_line" -gt "$inactive_line" ]; then
+        fail G-LOCK-KEY "the unlock did not emit WakeUpScreen before ActiveChanged(false)"
+    fi
+    pass G-LOCK-KEY "Super+L locks; PAM unlocks; ActiveChanged publishes both transitions; the unlock wakes the screen first"
     # With animations off the curtain moves at once, both ways.
     gsettings set org.gnome.desktop.interface enable-animations false
     cstate '(.animations_enabled | not)' "still curtain" ||
@@ -10899,7 +12435,7 @@ if [ -n "$PAM_ON" ]; then
     xdotool key Control_L
     cstate ".cursor.locate_pointer.active and .cursor.locate_pointer.at != null and .cursor.locate_pointer.frames > $locate_lock_frames" "rendered ripple before D-Bus lock" ||
         fail G-POINTER-TRACE-PRIVATE "no actual active rendered ripple before locking"
-    cp "$CSTATE" "$ARTIFACTS/locate-before-dbus-lock.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/locate-before-dbus-lock.json"
     gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/ScreenSaver \
         --method org.gnome.ScreenSaver.Lock >/dev/null || fail G-DBUS-LOCK "D-Bus Lock failed"
     cstate '.locked' "D-Bus locked" 5 || fail G-DBUS-LOCK "D-Bus Lock replied without locking"
@@ -10908,7 +12444,7 @@ if [ -n "$PAM_ON" ]; then
     curtain_started=$(tval lock_curtain started)
     cstate '.locked and .animation_clock_manual and has("cursor") and .cursor == null and .pointer_position == null and .pointer_fullscreen_blocked == null' "D-Bus lock redacts active ripple" ||
         fail G-POINTER-TRACE-PRIVATE "D-Bus lock retained cursor activity or pointer coordinates"
-    cp "$CSTATE" "$ARTIFACTS/locate-dbus-locked-private.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/locate-dbus-locked-private.json"
     rm -f "$TUNA_ANIMATION_CLOCK"
     cstate '.locked and (.animation_clock_manual | not)' "locked real clock restored" ||
         fail G-POINTER-TRACE-PRIVATE "animation proof clock remained active"
@@ -10932,9 +12468,10 @@ if [ -n "$PAM_ON" ]; then
     pass G-LOCK-FIRST-PRINTABLE "a printable wake key becomes exactly one password character and PAM unlocks"
     cstate '(.locked | not) and (.cursor.locate_pointer.active | not) and .cursor.locate_pointer.at == null and .cursor.locate_pointer.count == 0 and .cursor.locate_pointer.frames == 0' "unlock retains no prior ripple" ||
         fail G-POINTER-TRACE-PRIVATE "unlock resurrected pre-lock cursor activity/history"
-    cp "$CSTATE" "$ARTIFACTS/locate-after-dbus-unlock.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/locate-after-dbus-unlock.json"
     gsettings set org.gnome.desktop.interface locate-pointer false
     pass G-POINTER-TRACE-PRIVATE "D-Bus lock during an actual rendered frozen-clock ripple redacts cursor diagnostics; unlock retains no activity/history"
+    lock_with_menu_gate
     # Reduced Motion keeps GNOME's opacity change and drops the slide.
     gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
     cstate '.motion_policy == "fade-only"' "reduced curtain" ||
@@ -11377,6 +12914,9 @@ if [ -n "$PAM_ON" ]; then
     fi
     pass G-LOCK-FOCUS "password rejection and acceptance leave no GtkText focus-out warning"
 
+    # GNOME's lock-screen notifications and notification sounds (#348).
+    notify_lock_proof
+
 else
     echo "tuna-gtk-shell-proof: G-UNLOCK skipped (no pam_wrapper)"
 fi
@@ -11505,6 +13045,7 @@ pass A11Y-GOLDEN "panel, calendar, quick settings and overview trees match their
 # admits. The installed run keeps its original shell for
 # G-INSTALLED-STABLE, so it proves only the focus indication.
 a11y_focus_ring_proof
+if [ "$INSTALLED_PACKAGE" = 0 ]; then a11y_transient_stable_proof; fi
 if [ "$INSTALLED_PACKAGE" = 0 ]; then a11y_menu_restart_proof; fi
 
 grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"

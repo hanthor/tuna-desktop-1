@@ -56,7 +56,8 @@ use wayland_protocols::xdg::foreign::zv2::client::{
     zxdg_importer_v2::ZxdgImporterV2,
 };
 use wayland_protocols::xdg::shell::client::{
-    xdg_surface::XdgSurface, xdg_toplevel::XdgToplevel, xdg_wm_base::XdgWmBase,
+    xdg_popup::XdgPopup, xdg_positioner::XdgPositioner, xdg_surface::XdgSurface,
+    xdg_toplevel::XdgToplevel, xdg_wm_base::XdgWmBase,
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
@@ -93,6 +94,9 @@ struct Client {
     /// (keycode, pressed) in arrival order.
     keys: Vec<(u32, bool)>,
     keyboard_enters: Vec<Vec<u32>>,
+    keyboard_enter_surfaces: Vec<WlSurface>,
+    popup_done: bool,
+    keyboard_leaves: u32,
     keyboard_modifiers: Vec<(u32, u32, u32, u32)>,
     pointer_enters: u32,
     pointer_motions: u32,
@@ -118,6 +122,12 @@ struct Client {
     swipe_fingers: Vec<u32>,
     /// The axis of every wl_pointer.axis_stop, vertical = 0.
     axis_stops: Vec<u32>,
+    /// Every xdg_wm_base ping serial, in arrival order.
+    pings: Vec<u32>,
+    /// A hung client: pings are recorded but never answered.
+    frozen: bool,
+    /// The highest xdg_wm_base version to bind (the server's when unset).
+    xdg_max_version: Option<u32>,
 }
 
 /// Whether a raw xdg-toplevel state array carries `want` (native-endian
@@ -189,8 +199,9 @@ impl Dispatch<WlRegistry, ()> for Client {
                     state.ensure_swipe(qh);
                 }
                 "xdg_wm_base" => {
+                    let max = state.xdg_max_version.unwrap_or(7);
                     state.xdg_base =
-                        Some(registry.bind::<XdgWmBase, _, _>(name, version.min(7), qh, ()));
+                        Some(registry.bind::<XdgWmBase, _, _>(name, version.min(max), qh, ()));
                 }
                 "xdg_wm_dialog_v1" => {
                     state.dialogs = Some(registry.bind::<XdgWmDialogV1, _, _>(name, 1, qh, ()));
@@ -228,7 +239,7 @@ impl Dispatch<WlCallback, ()> for Client {
 
 impl Dispatch<XdgWmBase, ()> for Client {
     fn event(
-        _: &mut Self,
+        state: &mut Self,
         base: &XdgWmBase,
         event: <XdgWmBase as wayland_client::Proxy>::Event,
         _: &(),
@@ -236,7 +247,10 @@ impl Dispatch<XdgWmBase, ()> for Client {
         _: &QueueHandle<Self>,
     ) {
         if let wayland_protocols::xdg::shell::client::xdg_wm_base::Event::Ping { serial } = event {
-            base.pong(serial);
+            state.pings.push(serial);
+            if !state.frozen {
+                base.pong(serial);
+            }
         }
     }
 }
@@ -261,6 +275,105 @@ impl Dispatch<XdgSurface, ()> for Client {
         }
     }
 }
+
+#[test]
+fn unlock_restores_newest_grabbed_popup_without_dismissing_it() {
+    use wayland_protocols::xdg::shell::client::xdg_positioner::{Anchor as PopupAnchor, Gravity};
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    let mut parent = f.client_a.xdg_surface.clone().unwrap();
+    let mut popups = Vec::new();
+    for _ in 0..2 {
+        let qh = f.queue_a.handle();
+        let base = f.client_a.xdg_base.as_ref().unwrap();
+        let positioner = base.create_positioner(&qh, ());
+        positioner.set_size(100, 50);
+        positioner.set_anchor_rect(10, 10, 1, 1);
+        positioner.set_anchor(PopupAnchor::TopLeft);
+        positioner.set_gravity(Gravity::BottomRight);
+        let surface = f
+            .client_a
+            .compositor
+            .as_ref()
+            .unwrap()
+            .create_surface(&qh, ());
+        let xdg = base.get_xdg_surface(&surface, &qh, surface.clone());
+        let popup = xdg.get_popup(Some(&parent), &positioner, &qh, ());
+        popup.grab(f.client_a.seat.as_ref().unwrap(), 1);
+        surface.commit();
+        sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+        sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+        parent = xdg;
+        popups.push((surface, popup));
+    }
+    assert!(f.comp.state.popup_grab_active());
+    assert!(!f.client_a.popup_done);
+    let lock_surface = f.manager.surface_of(f.id_b).unwrap();
+    f.manager.lock_input(
+        &mut f.comp.state,
+        &lock_surface,
+        ManagerInput::Key {
+            keycode: R_KEYCODE,
+            pressed: true,
+            time: 5000,
+        },
+    );
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_a.keyboard_enters.clear();
+    f.client_a.keyboard_enter_surfaces.clear();
+    f.client_a.keys.clear();
+    f.client_b.keys.clear();
+    f.manager.unlock_input(&mut f.comp.state);
+    press(&mut f.manager, &mut f.comp, KEY_A);
+    release(&mut f.manager, &mut f.comp, KEY_A);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(f.client_a.keyboard_enter_surfaces, [popups[1].0.clone()]);
+    assert_eq!(f.client_a.keyboard_enters, [Vec::<u32>::new()]);
+    assert_eq!(f.client_a.keys, [(KEY_A, true), (KEY_A, false)]);
+    assert!(f.client_b.keys.is_empty());
+    assert!(f.comp.state.popup_grab_active());
+    assert!(!f.client_a.popup_done);
+    assert_eq!(f.comp.state.pressed_key_count(), 0);
+}
+
+impl Dispatch<XdgSurface, WlSurface> for Client {
+    fn event(
+        _: &mut Self,
+        xdg_surface: &XdgSurface,
+        event: <XdgSurface as wayland_client::Proxy>::Event,
+        surface: &WlSurface,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wayland_protocols::xdg::shell::client::xdg_surface::Event::Configure { serial } =
+            event
+        {
+            xdg_surface.ack_configure(serial);
+            surface.commit();
+        }
+    }
+}
+
+impl Dispatch<XdgPopup, ()> for Client {
+    fn event(
+        state: &mut Self,
+        _: &XdgPopup,
+        event: <XdgPopup as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wayland_protocols::xdg::shell::client::xdg_popup::Event::PopupDone = event {
+            state.popup_done = true;
+        }
+    }
+}
+
+wayland_client::delegate_noop!(Client: ignore XdgPositioner);
 
 impl Dispatch<XdgToplevel, ()> for Client {
     fn event(
@@ -306,7 +419,8 @@ impl Dispatch<WlKeyboard, ()> for Client {
                 key,
                 matches!(key_state, WEnum::Value(ClientKeyState::Pressed)),
             )),
-            KeyEvent::Enter { keys, .. } => {
+            KeyEvent::Enter { keys, surface, .. } => {
+                state.keyboard_enter_surfaces.push(surface);
                 let (chunks, remainder) = keys.as_chunks::<4>();
                 assert!(
                     remainder.is_empty(),
@@ -330,6 +444,7 @@ impl Dispatch<WlKeyboard, ()> for Client {
                     .keyboard_modifiers
                     .push((mods_depressed, mods_latched, mods_locked, group));
             }
+            KeyEvent::Leave { .. } => state.keyboard_leaves += 1,
             _ => (),
         }
     }
@@ -465,12 +580,33 @@ fn pump(
 /// Connect one client and bind globals (compositor, seat with keyboard
 /// and pointer, xdg shell).
 fn connect(comp: &mut TestCompositor) -> (Connection, EventQueue<Client>, Client) {
+    connect_with(comp, TestCompositor::add_client)
+}
+
+/// Connect the supervised shell: the only client offered layer-shell
+/// (#1048), so every shell layer surface below comes from here.
+fn connect_shell(comp: &mut TestCompositor) -> (Connection, EventQueue<Client>, Client) {
+    connect_with(comp, TestCompositor::add_shell_client)
+}
+
+fn connect_with(
+    comp: &mut TestCompositor,
+    admit: fn(&mut TestCompositor, UnixStream) -> wayland_server::Client,
+) -> (Connection, EventQueue<Client>, Client) {
+    connect_client(comp, admit, Client::default())
+}
+
+/// Connect `client` (fresh, possibly with binding limits set).
+fn connect_client(
+    comp: &mut TestCompositor,
+    admit: fn(&mut TestCompositor, UnixStream) -> wayland_server::Client,
+    mut client: Client,
+) -> (Connection, EventQueue<Client>, Client) {
     let (server_stream, client_stream) = UnixStream::pair().unwrap();
-    comp.add_client(server_stream);
+    admit(comp, server_stream);
     let conn = Connection::from_socket(client_stream).unwrap();
     let mut queue = conn.new_event_queue();
     let qh = queue.handle();
-    let mut client = Client::default();
     conn.display().get_registry(&qh, ());
     pump(comp, &mut queue, &mut client, |c| c.ready());
     (conn, queue, client)
@@ -982,6 +1118,194 @@ fn move_to_workspace_updates_model() {
     // Untouched windows keep their workspace.
     assert_eq!(f.manager.model().window(f.id_b).unwrap().workspace, 0);
     assert!(!f.manager.move_to_workspace(&mut f.comp.state, 999, 3));
+}
+
+/// xdg_toplevel states on the wire: `activated`, and `suspended`
+/// (xdg-shell v6).
+const ACTIVATED: u32 = 4;
+const SUSPENDED: u32 = 9;
+
+/// The windows a frame drawn now shows when nothing is culled: what the
+/// runtime hands [`WindowManager::update_suspended`] before drawing.
+fn scene(manager: &WindowManager) -> Vec<u64> {
+    manager
+        .render_entries()
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .collect()
+}
+
+fn ever_suspended(client: &Client) -> bool {
+    client
+        .configure_states
+        .iter()
+        .any(|states| has_state(states, SUSPENDED))
+}
+
+#[test]
+fn a_window_on_another_workspace_is_suspended_after_three_seconds_and_resumes_before_it_is_drawn() {
+    let mut f = two_windows();
+    assert!(f.manager.move_to_workspace(&mut f.comp.state, f.id_b, 1));
+    assert!(!scene(&f.manager).contains(&f.id_b));
+    let t0 = std::time::Instant::now();
+    f.manager.update_suspended(&scene(&f.manager), t0);
+    let due = f
+        .manager
+        .suspend_deadline()
+        .expect("the hidden window's timeout runs");
+    // Mutter's SUSPEND_HIDDEN_TIMEOUT_S.
+    assert_eq!(due, t0 + std::time::Duration::from_secs(3));
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_b.configure_states.clear();
+    f.manager.update_suspended(
+        &scene(&f.manager),
+        due - std::time::Duration::from_millis(1),
+    );
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert!(!f.manager.is_suspended(f.id_b));
+    assert!(
+        f.client_b.configure_states.is_empty(),
+        "hidden, not suspended"
+    );
+    f.manager.update_suspended(&scene(&f.manager), due);
+    assert!(f.manager.is_suspended(f.id_b));
+    assert_eq!(f.manager.suspended_windows(), vec![f.id_b]);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(f.client_b.configure_states.len(), 1);
+    assert!(ever_suspended(&f.client_b));
+    // Staying hidden is told nothing more.
+    let later = due + std::time::Duration::from_secs(10);
+    f.manager.update_suspended(&scene(&f.manager), later);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(f.client_b.configure_states.len(), 1);
+    // The window on screen all along is never suspended.
+    assert!(!f.manager.is_suspended(f.id_a));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert!(!ever_suspended(&f.client_a));
+    // Switching to its workspace: the first frame that draws it resumes
+    // it before drawing.
+    assert!(f.manager.switch_relative(&mut f.comp.state, 1));
+    let shown = scene(&f.manager);
+    assert!(shown.contains(&f.id_b));
+    f.manager.update_suspended(&shown, later);
+    assert!(!f.manager.is_suspended(f.id_b));
+    // Alpha, left behind, starts its own timeout.
+    assert!(!shown.contains(&f.id_a));
+    assert_eq!(
+        f.manager.suspend_deadline(),
+        Some(later + std::time::Duration::from_secs(3))
+    );
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert!(f
+        .client_b
+        .configure_states
+        .last()
+        .is_some_and(|states| !has_state(states, SUSPENDED)));
+}
+
+#[test]
+fn a_minimized_window_is_suspended_and_resumes_when_unminimized() {
+    let mut f = two_windows();
+    assert!(f.manager.minimize(&mut f.comp.state, f.id_b));
+    assert!(!scene(&f.manager).contains(&f.id_b));
+    let t0 = std::time::Instant::now();
+    f.manager.update_suspended(&scene(&f.manager), t0);
+    let due = t0 + std::time::Duration::from_secs(3);
+    f.manager.update_suspended(&scene(&f.manager), due);
+    assert!(f.manager.is_suspended(f.id_b));
+    assert!(!f.manager.is_suspended(f.id_a));
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert!(f
+        .client_b
+        .configure_states
+        .last()
+        .is_some_and(|states| has_state(states, SUSPENDED)));
+    // Activating it brings it back; the frame that draws it resumes it.
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    let shown = scene(&f.manager);
+    assert!(shown.contains(&f.id_b));
+    f.manager.update_suspended(&shown, due);
+    assert!(!f.manager.is_suspended(f.id_b));
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    let last = f.client_b.configure_states.last().unwrap();
+    assert!(!has_state(last, SUSPENDED) && has_state(last, ACTIVATED));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert!(!ever_suspended(&f.client_a));
+}
+
+#[test]
+fn xdg_shell_v5_clients_are_never_told_they_are_suspended() {
+    let mut comp = TestCompositor::new();
+    let mut manager = comp.window_manager();
+    let (conn, mut queue, mut client) = connect_client(
+        &mut comp,
+        TestCompositor::add_client,
+        Client {
+            xdg_max_version: Some(5),
+            ..Client::default()
+        },
+    );
+    assert_eq!(
+        wayland_client::Proxy::version(client.xdg_base.as_ref().unwrap()),
+        5
+    );
+    map_toplevel(&mut comp, &conn, &mut queue, &mut client, "v5");
+    manager.reconcile(&mut comp.state);
+    sync_client(&mut comp, &conn, &mut queue, &mut client);
+    let id = manager
+        .model()
+        .windows()
+        .find(|w| w.title == "v5")
+        .unwrap()
+        .id;
+    assert!(manager.move_to_workspace(&mut comp.state, id, 1));
+    sync_client(&mut comp, &conn, &mut queue, &mut client);
+    client.configure_states.clear();
+    let t0 = std::time::Instant::now();
+    manager.update_suspended(&scene(&manager), t0);
+    let due = t0 + std::time::Duration::from_secs(3);
+    manager.update_suspended(&scene(&manager), due);
+    assert!(manager.is_suspended(id));
+    // Not told, so it keeps the hidden windows' frame callbacks.
+    assert!(manager.told_suspended_surfaces().is_empty());
+    sync_client(&mut comp, &conn, &mut queue, &mut client);
+    assert!(client.configure_states.is_empty(), "no configure at all");
+    assert!(manager.switch_relative(&mut comp.state, 1));
+    manager.update_suspended(&scene(&manager), due);
+    assert!(!manager.is_suspended(id));
+    sync_client(&mut comp, &conn, &mut queue, &mut client);
+    assert!(!ever_suspended(&client));
+}
+
+#[test]
+fn deactivation_sends_exactly_one_configure() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    f.client_a.configure_states.clear();
+    // Alpha is both the focused and the last activated window: it is
+    // told once that it lost activation.
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert_eq!(
+        f.client_a.configure_states.len(),
+        1,
+        "{:?}",
+        f.client_a.configure_states
+    );
+    assert!(!has_state(&f.client_a.configure_states[0], ACTIVATED));
+    // Focus leaving every window (to the shell) deactivates once too.
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_b.configure_states.clear();
+    assert!(f.manager.focus(&mut f.comp.state, None));
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(
+        f.client_b.configure_states.len(),
+        1,
+        "{:?}",
+        f.client_b.configure_states
+    );
+    assert!(!has_state(&f.client_b.configure_states[0], ACTIVATED));
 }
 
 #[test]
@@ -1900,7 +2224,7 @@ fn overview_parks_keyboard_focus_and_restores_on_dismiss() {
     assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
 
     // Third client: the shell overview layer surface.
-    let (conn_c, mut queue_c, mut client_c) = connect(&mut f.comp);
+    let (conn_c, mut queue_c, mut client_c) = connect_shell(&mut f.comp);
     let qh_c = queue_c.handle();
     let surface_c = client_c
         .compositor
@@ -2008,7 +2332,7 @@ fn shell_layer(
     WlSurface,
     ZwlrLayerSurfaceV1,
 ) {
-    let (conn, mut queue, mut client) = connect(comp);
+    let (conn, mut queue, mut client) = connect_shell(comp);
     let qh = queue.handle();
     let surface = client.compositor.as_ref().unwrap().create_surface(&qh, ());
     let layer = client.layer_shell.as_ref().unwrap().get_layer_surface(
@@ -3555,7 +3879,7 @@ fn picking_a_window_in_the_overview_survives_the_close() {
     assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
 
     // Third client: the shell overview layer surface.
-    let (conn_c, mut queue_c, mut client_c) = connect(&mut f.comp);
+    let (conn_c, mut queue_c, mut client_c) = connect_shell(&mut f.comp);
     let qh_c = queue_c.handle();
     let surface_c = client_c
         .compositor
@@ -3606,7 +3930,7 @@ fn a_window_launched_from_the_overview_is_focused_when_it_closes() {
     assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
 
     // Third client: the shell overview layer surface.
-    let (conn_c, mut queue_c, mut client_c) = connect(&mut f.comp);
+    let (conn_c, mut queue_c, mut client_c) = connect_shell(&mut f.comp);
     let qh_c = queue_c.handle();
     let surface_c = client_c
         .compositor
@@ -3719,7 +4043,7 @@ fn strip_columns_resize_on_primary_output_failover_without_losing_focus() {
 fn exclusive_overlay_receives_navigation_and_retains_popup_system_accelerators() {
     use tuna_shell_control::{Accelerator, MODE_NORMAL, MODE_POPUP, MOD_ALT, MOD_CTRL};
     let mut f = two_windows();
-    let (conn, mut queue, mut client) = connect(&mut f.comp);
+    let (conn, mut queue, mut client) = connect_shell(&mut f.comp);
     let qh = queue.handle();
     let surface = client.compositor.as_ref().unwrap().create_surface(&qh, ());
     let layer = client.layer_shell.as_ref().unwrap().get_layer_surface(
@@ -3823,7 +4147,7 @@ fn panel_dynamic_exclusive_hold_suppresses_normal_accelerators() {
     // Evdev `s` (KEY_S): the Super+S quick-settings chord shape.
     const S_KEYCODE: u32 = 31;
     let mut f = two_windows();
-    let (conn, mut queue, mut client) = connect(&mut f.comp);
+    let (conn, mut queue, mut client) = connect_shell(&mut f.comp);
     let qh = queue.handle();
     let surface = client.compositor.as_ref().unwrap().create_surface(&qh, ());
     let layer = client.layer_shell.as_ref().unwrap().get_layer_surface(
@@ -3892,7 +4216,7 @@ fn panel_dynamic_exclusive_hold_suppresses_normal_accelerators() {
 fn exclusive_overview_keeps_overview_accelerators() {
     use tuna_shell_control::{Accelerator, MODE_OVERVIEW, MOD_LOGO, OVERVIEW_NAMESPACE};
     let mut f = two_windows();
-    let (conn, mut queue, mut client) = connect(&mut f.comp);
+    let (conn, mut queue, mut client) = connect_shell(&mut f.comp);
     let qh = queue.handle();
     let surface = client.compositor.as_ref().unwrap().create_surface(&qh, ());
     let layer = client.layer_shell.as_ref().unwrap().get_layer_surface(
@@ -4025,6 +4349,226 @@ fn same_focused_window_click_restores_keyboard_after_lock_ownership() {
     assert_eq!(f.manager.model().focused(), Some(f.id_a));
 }
 
+#[test]
+fn unlock_restores_keyboard_without_raising_and_quarantines_lock_origin_keys() {
+    for mapped_lock in [true, false] {
+        let mut f = two_windows();
+        // Leave beta above alpha: restoring keyboard ownership must not raise.
+        assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+        f.manager.set_focus_policy(policy(FocusMode::Sloppy));
+        f.manager
+            .pointer_motion(&mut f.comp.state, alpha_only(), 4999);
+        assert_eq!(f.manager.model().focused(), Some(f.id_a));
+        assert_eq!(top(&f), Some(f.id_b));
+        f.manager.set_focus_policy(policy(FocusMode::Click));
+        sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+        sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+        f.client_a.keys.clear();
+        f.client_b.keys.clear();
+        f.client_a.keyboard_enters.clear();
+        let held = ManagerInput::Key {
+            keycode: R_KEYCODE,
+            pressed: true,
+            time: 5000,
+        };
+        if mapped_lock {
+            let lock_surface = f.manager.surface_of(f.id_b).unwrap();
+            f.manager.lock_input(&mut f.comp.state, &lock_surface, held);
+        } else {
+            f.manager.discard_key_input(&mut f.comp.state, &held);
+        }
+        assert_eq!(f.comp.state.pressed_key_count(), 1);
+        sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+        assert_eq!(
+            f.client_b.keys,
+            if mapped_lock {
+                vec![(R_KEYCODE, true)]
+            } else {
+                vec![]
+            },
+            "only a mapped lock owner hears the lock-origin press"
+        );
+        f.client_b.keys.clear();
+
+        // No click, refocus, reconcile, or timer tick rescues ownership.
+        f.manager.unlock_input(&mut f.comp.state);
+        assert_eq!(f.manager.model().focused(), Some(f.id_a));
+        assert_eq!(top(&f), Some(f.id_b), "unlock must not raise alpha");
+        assert_eq!(f.comp.state.pressed_key_count(), 1);
+        sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+        if mapped_lock {
+            assert_eq!(f.client_a.keyboard_enters, [Vec::<u32>::new()]);
+        }
+        press(&mut f.manager, &mut f.comp, KEY_A);
+        release(&mut f.manager, &mut f.comp, KEY_A);
+        // Exercise both normal manager dispatch and direct keyboard delivery.
+        press(&mut f.manager, &mut f.comp, R_KEYCODE);
+        f.manager
+            .keyboard_key(&mut f.comp.state, R_KEYCODE, true, 5001);
+        sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+        sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+        assert_eq!(f.client_a.keys, [(KEY_A, true), (KEY_A, false)]);
+        assert!(f.client_b.keys.is_empty(), "unlock never forwards to beta");
+        assert_eq!(f.comp.state.pressed_key_count(), 1);
+
+        // A later enter must still omit the physically held quarantined key.
+        assert!(f.manager.focus(&mut f.comp.state, None));
+        f.client_a.keyboard_enters.clear();
+        assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+        sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+        assert_eq!(f.client_a.keyboard_enters, [Vec::<u32>::new()]);
+        if mapped_lock {
+            release(&mut f.manager, &mut f.comp, R_KEYCODE);
+        } else {
+            f.manager
+                .keyboard_key(&mut f.comp.state, R_KEYCODE, false, 5002);
+        }
+        assert_eq!(f.comp.state.pressed_key_count(), 0);
+        sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+        sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+        assert_eq!(f.client_a.keys, [(KEY_A, true), (KEY_A, false)]);
+        assert!(
+            f.client_b.keys.is_empty(),
+            "held release must not reach beta"
+        );
+        press(&mut f.manager, &mut f.comp, R_KEYCODE);
+        release(&mut f.manager, &mut f.comp, R_KEYCODE);
+        sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+        sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+        assert_eq!(
+            f.client_a.keys,
+            [
+                (KEY_A, true),
+                (KEY_A, false),
+                (R_KEYCODE, true),
+                (R_KEYCODE, false)
+            ]
+        );
+        assert!(f.client_b.keys.is_empty());
+        assert_eq!(f.comp.state.pressed_key_count(), 0);
+    }
+}
+
+#[test]
+fn unlock_without_lock_surface_resets_prelock_client_visible_held_key() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert_eq!(f.client_a.keys, [(R_KEYCODE, true)]);
+    f.client_a.keys.clear();
+    f.client_a.keyboard_enters.clear();
+    // The shield never mapped a surface or received another input event.
+    f.manager.unlock_input(&mut f.comp.state);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert_eq!(f.client_a.keyboard_enters, [Vec::<u32>::new()]);
+    assert_eq!(f.comp.state.pressed_key_count(), 1);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert!(f.client_a.keys.is_empty());
+    assert_eq!(f.comp.state.pressed_key_count(), 0);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(f.client_a.keys, [(R_KEYCODE, true), (R_KEYCODE, false)]);
+    assert!(f.client_b.keys.is_empty());
+}
+
+#[test]
+fn relock_release_clears_unlock_quarantine_for_the_next_session() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    let lock_surface = f.manager.surface_of(f.id_b).unwrap();
+    f.manager.lock_input(
+        &mut f.comp.state,
+        &lock_surface,
+        ManagerInput::Key {
+            keycode: R_KEYCODE,
+            pressed: true,
+            time: 5000,
+        },
+    );
+    f.manager.unlock_input(&mut f.comp.state);
+    assert_eq!(f.comp.state.pressed_key_count(), 1);
+    // A second shield takes ownership before the first shield's key is up.
+    f.manager.lock_input(
+        &mut f.comp.state,
+        &lock_surface,
+        ManagerInput::Key {
+            keycode: R_KEYCODE,
+            pressed: false,
+            time: 5001,
+        },
+    );
+    assert_eq!(f.comp.state.pressed_key_count(), 0);
+    f.manager.unlock_input(&mut f.comp.state);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert!(f.client_a.keys.is_empty());
+    f.client_b.keys.clear();
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(f.client_a.keys, [(R_KEYCODE, true), (R_KEYCODE, false)]);
+    assert!(f.client_b.keys.is_empty());
+    assert_eq!(f.comp.state.pressed_key_count(), 0);
+}
+
+#[test]
+fn unlock_restores_shell_keyboard_owner_before_desktop_windows() {
+    for (namespace, keyboard, overview) in [
+        (OVERVIEW_NAMESPACE, KeyboardInteractivity::None, true),
+        (OVERVIEW_NAMESPACE, KeyboardInteractivity::Exclusive, true),
+        (
+            tuna_shell_control::SCREENSHOT_NAMESPACE,
+            KeyboardInteractivity::Exclusive,
+            false,
+        ),
+    ] {
+        let mut f = two_windows();
+        assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+        let (conn, mut queue, mut client, _surface, _layer) =
+            shell_layer(&mut f.comp, namespace, keyboard);
+        f.manager.set_overview_open(overview);
+        f.manager.reconcile(&mut f.comp.state);
+        let focused = f.manager.model().focused();
+        let lock_surface = f.manager.surface_of(f.id_b).unwrap();
+        f.manager.lock_input(
+            &mut f.comp.state,
+            &lock_surface,
+            ManagerInput::Key {
+                keycode: R_KEYCODE,
+                pressed: true,
+                time: 5000,
+            },
+        );
+        sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+        sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+        sync_client(&mut f.comp, &conn, &mut queue, &mut client);
+        f.client_a.keys.clear();
+        f.client_b.keys.clear();
+        client.keys.clear();
+        client.keyboard_enters.clear();
+        f.manager.unlock_input(&mut f.comp.state);
+        assert_eq!(f.manager.model().focused(), focused);
+        press(&mut f.manager, &mut f.comp, KEY_A);
+        release(&mut f.manager, &mut f.comp, KEY_A);
+        press(&mut f.manager, &mut f.comp, R_KEYCODE);
+        release(&mut f.manager, &mut f.comp, R_KEYCODE);
+        sync_client(&mut f.comp, &conn, &mut queue, &mut client);
+        sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+        sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+        assert_eq!(client.keyboard_enters, [Vec::<u32>::new()]);
+        assert_eq!(client.keys, [(KEY_A, true), (KEY_A, false)]);
+        assert!(f.client_a.keys.is_empty());
+        assert!(f.client_b.keys.is_empty());
+        assert_eq!(f.comp.state.pressed_key_count(), 0);
+    }
+}
+
 /// A lock surface mapped under a pointer that has not moved since (Super+L
 /// with the mouse still) gets the first press, release and scroll: the
 /// pointer enters it before the press, so the unlock dialog's click and
@@ -4146,6 +4690,7 @@ fn lock_surface_alone_hears_touchpad_swipes_and_the_scroll_stop() {
         // The tail of a swipe begun before the lock goes nowhere.
         ManagerInput::SwipeUpdate {
             delta: (0.0, -10.0).into(),
+            delta_unaccel: (0.0, -10.0).into(),
             time: 5001,
         },
         ManagerInput::SwipeEnd {
@@ -4158,10 +4703,12 @@ fn lock_surface_alone_hears_touchpad_swipes_and_the_scroll_stop() {
         },
         ManagerInput::SwipeUpdate {
             delta: (0.0, -20.0).into(),
+            delta_unaccel: (0.0, -20.0).into(),
             time: 5004,
         },
         ManagerInput::SwipeUpdate {
             delta: (0.0, -20.0).into(),
+            delta_unaccel: (0.0, -20.0).into(),
             time: 5005,
         },
         ManagerInput::SwipeEnd {
@@ -6746,4 +7293,268 @@ fn secondary_output_windows_are_sticky_and_unstick_onto_the_active_workspace() {
     assert!(!entry.on_all_workspaces);
     assert_eq!(entry.workspace, home);
     assert_eq!(f.manager.model().window(f.id_a).unwrap().workspace, home);
+}
+
+/// The lock takes the keyboard as it engages, not at the first key: an
+/// application behind the lock gets wl_keyboard.leave at once, and with
+/// no lock surface up nobody holds focus. Unlock hands the keyboard back
+/// to the focused window without a click, as GNOME does (#729).
+#[test]
+fn lock_takes_the_keyboard_at_once_and_unlock_hands_it_back() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    let leaves = f.client_a.keyboard_leaves;
+    f.client_a.keyboard_enters.clear();
+    f.client_b.keyboard_enters.clear();
+
+    // Locked with no lock surface: the window loses the keyboard now.
+    f.manager.hold_lock_focus(&mut f.comp.state, None);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert_eq!(f.client_a.keyboard_leaves, leaves + 1, "leave at lock time");
+    // The lock surface (beta's surface stands in) takes it once up,
+    // and holding it again is no new enter.
+    let lock_surface = f.manager.surface_of(f.id_b).unwrap();
+    for _ in 0..2 {
+        f.manager
+            .hold_lock_focus(&mut f.comp.state, Some(&lock_surface));
+    }
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(f.client_b.keyboard_enters.len(), 1);
+    assert_eq!(
+        f.manager.model().focused(),
+        Some(f.id_a),
+        "the lock does not change the window the session returns to"
+    );
+
+    // Unlock: the focused window gets the keyboard back without a click.
+    f.manager.unlock_input(&mut f.comp.state);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(f.client_a.keyboard_enters.len(), 1);
+    assert!(f.client_a.keys.is_empty() && f.client_b.keys.is_empty());
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(f.client_a.keys, [(R_KEYCODE, true), (R_KEYCODE, false)]);
+    assert!(f.client_b.keys.is_empty());
+}
+
+/// Mutter's alive checks and gnome-shell's close dialog (#1035), driven by
+/// real xdg clients: a hung client keeps its pings unanswered.
+mod unresponsive_windows {
+    use super::*;
+    use std::time::{Duration, Instant};
+    use tuna_shell_control::{CloseDialogResponse, Message};
+
+    /// Deliver a client's pongs: the first sync reads the pings, the
+    /// second flushes the pongs they produced ahead of its own request.
+    fn answer_pings(
+        comp: &mut TestCompositor,
+        conn: &Connection,
+        queue: &mut EventQueue<Client>,
+        client: &mut Client,
+    ) {
+        sync_client(comp, conn, queue, client);
+        sync_client(comp, conn, queue, client);
+    }
+
+    /// The one `ShowCloseDialog` drained, as `(window, x, y, w, h)`.
+    fn shown(manager: &mut WindowManager) -> (u64, i32, i32, i32, i32) {
+        match manager.take_close_dialogs().as_slice() {
+            [Message::ShowCloseDialog {
+                window,
+                x,
+                y,
+                width,
+                height,
+                ..
+            }] => (*window, *x, *y, *width, *height),
+            other => panic!("expected one ShowCloseDialog, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unanswered_ping_shows_the_close_dialog_until_a_late_pong() {
+        let mut f = two_windows();
+        f.manager.set_check_alive_timeout(5000);
+        f.client_a.frozen = true;
+        let start = Instant::now();
+        // meta_window_activate_full ends with meta_window_check_alive.
+        assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+        let timeout = Instant::now() + Duration::from_millis(5000);
+        answer_pings(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+        assert_eq!(f.client_a.pings.len(), 1);
+
+        // Within check-alive-timeout nothing is reported.
+        let early = start + Duration::from_millis(4000);
+        f.manager.run_alive_checks(&mut f.comp.state, early, false);
+        assert!(f.manager.take_close_dialogs().is_empty());
+        assert!(f.manager.is_alive(f.id_a));
+
+        // meta_display_ping_timeout: not alive, the dialog over the window.
+        f.manager
+            .run_alive_checks(&mut f.comp.state, timeout, false);
+        assert!(!f.manager.is_alive(f.id_a));
+        let (window, x, y, width, height) = shown(&mut f.manager);
+        assert_eq!((window, width, height), (f.id_a, 800, 600));
+
+        // The dialog follows its window.
+        assert!(f.manager.move_window(f.id_a, 30, 40));
+        f.manager
+            .run_alive_checks(&mut f.comp.state, timeout, false);
+        assert_eq!(shown(&mut f.manager), (f.id_a, x + 30, y + 40, 800, 600));
+
+        // Wait hides it; a stale second answer does nothing.
+        assert!(f
+            .manager
+            .close_dialog_response(f.id_a, CloseDialogResponse::Wait));
+        assert_eq!(
+            f.manager.take_close_dialogs(),
+            [Message::HideCloseDialog { window: f.id_a }]
+        );
+        assert!(!f
+            .manager
+            .close_dialog_response(f.id_a, CloseDialogResponse::Wait));
+        // Still hung check-alive-timeout later: shown again.
+        let rearmed = Instant::now() + Duration::from_millis(5000);
+        f.manager
+            .run_alive_checks(&mut f.comp.state, rearmed, false);
+        assert_eq!(shown(&mut f.manager).0, f.id_a);
+
+        // The late pong (to the ping that timed out) dismisses it.
+        let serial = f.client_a.pings[0];
+        f.client_a.xdg_base.as_ref().unwrap().pong(serial);
+        sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+        f.manager
+            .run_alive_checks(&mut f.comp.state, rearmed, false);
+        assert_eq!(
+            f.manager.take_close_dialogs(),
+            [Message::HideCloseDialog { window: f.id_a }]
+        );
+        assert!(f.manager.is_alive(f.id_a));
+        // One outstanding ping per client: no second ping reached it.
+        assert_eq!(f.client_a.pings.len(), 1);
+    }
+
+    #[test]
+    fn answering_window_is_never_reported() {
+        let mut f = two_windows();
+        // Motion over beta (events.c) and its activation both check it;
+        // the second finds the first ping still out.
+        f.manager.pointer_motion(&mut f.comp.state, beta_only(), 0);
+        assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+        answer_pings(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+        assert_eq!(f.client_b.pings.len(), 1);
+        let later = Instant::now() + Duration::from_secs(60);
+        f.manager.run_alive_checks(&mut f.comp.state, later, false);
+        assert!(f.manager.take_close_dialogs().is_empty());
+        assert!(f.manager.is_alive(f.id_b));
+        // Answered: the next activation pings again, and is answered too.
+        assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+        answer_pings(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+        assert_eq!(f.client_b.pings.len(), 2);
+        let later = Instant::now() + Duration::from_secs(60);
+        f.manager.run_alive_checks(&mut f.comp.state, later, false);
+        assert!(f.manager.take_close_dialogs().is_empty());
+        assert!(f.manager.is_alive(f.id_b));
+    }
+
+    #[test]
+    fn force_quit_disconnects_the_unresponsive_client() {
+        let mut f = two_windows();
+        f.client_a.frozen = true;
+        // meta_window_delete: a close request checks the window too.
+        assert!(f.manager.close_window(f.id_a));
+        let timeout = Instant::now() + Duration::from_millis(5000);
+        sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+        assert!(f.client_a.close_requested);
+        assert_eq!(f.client_a.pings.len(), 1);
+        f.manager
+            .run_alive_checks(&mut f.comp.state, timeout, false);
+        assert_eq!(shown(&mut f.manager).0, f.id_a);
+
+        assert!(f
+            .manager
+            .close_dialog_response(f.id_a, CloseDialogResponse::ForceClose));
+        assert_eq!(
+            f.manager.take_close_dialogs(),
+            [Message::HideCloseDialog { window: f.id_a }]
+        );
+        // The client runs in this process, which is never SIGKILLed:
+        // meta_window_wayland_kill's protocol error disconnects it.
+        let mut error = None;
+        for _ in 0..PUMP_ROUNDS {
+            let _ = f.queue_a.flush();
+            f.comp.pump();
+            if let Some(guard) = f.queue_a.prepare_read() {
+                let _ = guard.read();
+            }
+            let _ = f.queue_a.dispatch_pending(&mut f.client_a);
+            error = f.conn_a.protocol_error();
+            if error.is_some() {
+                break;
+            }
+        }
+        let error = error.expect("the hung client is disconnected");
+        assert_eq!(error.code, 2, "WL_DISPLAY_ERROR_NO_MEMORY");
+        assert_eq!(error.object_interface, "wl_surface");
+        // A real client exits on a fatal protocol error; this in-process
+        // one stands in by closing its socket. The backend tears a killed
+        // client's objects down only when its socket next wakes the
+        // dispatch (as the disconnect tests above), so pump twice.
+        drop((f.conn_a, f.queue_a, f.client_a));
+        f.comp.pump();
+        f.comp.pump();
+        f.manager.reconcile(&mut f.comp.state);
+        assert!(f.manager.model().window(f.id_a).is_none());
+        assert!(f.manager.model().window(f.id_b).is_some());
+        f.manager
+            .run_alive_checks(&mut f.comp.state, Instant::now(), false);
+        assert!(f.manager.take_close_dialogs().is_empty());
+    }
+
+    #[test]
+    fn zero_check_alive_timeout_disables_the_check() {
+        let mut f = two_windows();
+        f.manager.set_check_alive_timeout(0);
+        f.client_a.frozen = true;
+        assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+        f.manager.pointer_motion(&mut f.comp.state, alpha_only(), 0);
+        assert!(f.manager.close_window(f.id_a));
+        sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+        assert!(f.client_a.pings.is_empty());
+        assert_eq!(f.manager.alive_deadline(), None);
+        let later = Instant::now() + Duration::from_secs(60);
+        f.manager.run_alive_checks(&mut f.comp.state, later, false);
+        assert!(f.manager.take_close_dialogs().is_empty());
+        assert!(f.manager.is_alive(f.id_a));
+    }
+
+    #[test]
+    fn lock_hides_the_close_dialog_and_stops_pinging() {
+        let mut f = two_windows();
+        f.client_a.frozen = true;
+        assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+        let timeout = Instant::now() + Duration::from_millis(5000);
+        sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+        f.manager
+            .run_alive_checks(&mut f.comp.state, timeout, false);
+        assert_eq!(shown(&mut f.manager).0, f.id_a);
+        // The session locks: the dialog goes and nothing pings or shows.
+        f.manager.run_alive_checks(&mut f.comp.state, timeout, true);
+        assert_eq!(
+            f.manager.take_close_dialogs(),
+            [Message::HideCloseDialog { window: f.id_a }]
+        );
+        assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+        answer_pings(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+        assert!(f.client_b.pings.is_empty());
+        assert_eq!(f.manager.alive_deadline(), None);
+        let later = timeout + Duration::from_secs(60);
+        f.manager.run_alive_checks(&mut f.comp.state, later, true);
+        assert!(f.manager.take_close_dialogs().is_empty());
+    }
 }

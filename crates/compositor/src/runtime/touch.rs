@@ -3,10 +3,11 @@
 //! recognized one claims the fingers from clients (`wl_touch.cancel`);
 //! the compositor-drawn overview previews take touch as Shell actors do.
 
-use smithay::utils::{Logical, Point};
+use smithay::utils::{Logical, Point, Size};
 use tuna_shell_control::OskGesturePhase;
 
 use crate::touch_gesture::{Allowed, Gesture, Output, TouchGestures};
+use crate::touchpad_swipe::Orientation;
 use crate::windows::ManagerInput;
 
 use super::Runtime;
@@ -16,6 +17,9 @@ const OVERVIEW_BUTTON: u32 = 0x110;
 /// GNOME's `TOUCHPAD_BASE_WIDTH`: the touchpad units the workspace swipe
 /// follows (`workspace_slide`).
 const TOUCHPAD_BASE_WIDTH: f64 = crate::workspace_slide::TOUCHPAD_BASE_WIDTH;
+/// GNOME's `TOUCHPAD_BASE_HEIGHT`: the touchpad units the overview swipe
+/// follows.
+const TOUCHPAD_BASE_HEIGHT: f64 = crate::touchpad_swipe::TOUCHPAD_BASE_HEIGHT;
 
 #[derive(Debug, Default)]
 pub(super) struct RuntimeTouch {
@@ -26,6 +30,9 @@ pub(super) struct RuntimeTouch {
     workspace_swipes: u64,
     osk_edge_drags: u64,
     last: Option<Gesture>,
+    /// The latest touch event's time (the input clock): the swipe
+    /// trackers' velocity history must stay on one clock.
+    time: u32,
 }
 
 impl Runtime {
@@ -48,6 +55,15 @@ impl Runtime {
     /// owns it (nothing else hears it).
     pub(super) fn touch_gesture_input(&mut self, input: &ManagerInput) -> bool {
         let allowed = self.touch_gestures_allowed();
+        if matches!(
+            input,
+            ManagerInput::TouchDown { .. }
+                | ManagerInput::TouchMotion { .. }
+                | ManagerInput::TouchUp { .. }
+                | ManagerInput::TouchCancel { .. }
+        ) {
+            self.touch.time = super::input_time(input) as u32;
+        }
         let outputs = match *input {
             ManagerInput::TouchDown { slot, pos, time } => {
                 let monitors: Vec<_> = self
@@ -86,29 +102,30 @@ impl Runtime {
                         Gesture::WorkspaceSwipe => self.touch.workspace_swipes += 1,
                         Gesture::OskEdgeDrag => self.touch.osk_edge_drags += 1,
                     }
-                    if gesture != Gesture::OskEdgeDrag {
-                        let time = crate::state::system_millis() as u32;
-                        self.shell_swipe_input(&ManagerInput::SwipeBegin {
-                            fingers: crate::windows::SHELL_SWIPE_FINGERS,
-                            time,
-                        });
+                    // The recognizer already committed the axis
+                    // (Clutter.PanGesture), so the tracker starts at once,
+                    // without the touchpad's drag threshold, at the time
+                    // of the event that claimed.
+                    let time = self.touch.time;
+                    match gesture {
+                        Gesture::OverviewSwipe => {
+                            self.begin_swipe_target(Orientation::Vertical, time)
+                        }
+                        Gesture::WorkspaceSwipe => {
+                            self.begin_swipe_target(Orientation::Horizontal, time)
+                        }
+                        Gesture::OskEdgeDrag => {}
                     }
                 }
                 Output::PanUpdate { delta, time } => {
-                    // Touchpad units, so the fingers' travel over the
-                    // tracker's distance (the screen) moves it 1:1.
-                    let width = f64::from(size.w + crate::workspace_slide::WORKSPACE_SPACING);
-                    let height = f64::from(size.h.max(1));
-                    let delta: Point<f64, Logical> = (
-                        delta.x * TOUCHPAD_BASE_WIDTH / width.max(1.0),
-                        delta.y * super::OVERVIEW_SWIPE_DISTANCE / height,
-                    )
-                        .into();
-                    self.shell_swipe_input(&ManagerInput::SwipeUpdate { delta, time });
+                    let rtl = self.input_settings.right_to_left;
+                    if let Some(gesture) = self.touch.last {
+                        if let Some(step) = touch_swipe_step(gesture, delta, size, rtl) {
+                            self.update_swipe_target(step, time);
+                        }
+                    }
                 }
-                Output::PanEnd { cancelled, time } => {
-                    self.shell_swipe_input(&ManagerInput::SwipeEnd { cancelled, time });
-                }
+                Output::PanEnd { cancelled, time } => self.end_swipe_target(time, cancelled),
                 Output::EdgeProgress { distance } => self
                     .control
                     .queue_osk_gesture(OskGesturePhase::Progress { distance }),
@@ -123,7 +140,7 @@ impl Runtime {
     pub(super) fn reset_touch_ownership(&mut self) {
         self.manager.cancel_client_touches(&mut self.state);
         self.cancel_touch_overview();
-        let time = crate::state::system_millis() as u32;
+        let time = self.touch.time;
         let outputs = self.touch.gestures.cancel(time);
         self.apply_touch_gestures(outputs);
     }
@@ -210,5 +227,65 @@ impl Runtime {
         doc["last_gesture"] = serde_json::json!(self.touch.last.map(Gesture::name));
         doc["overview_press"] = serde_json::json!(self.touch.overview.is_some());
         doc
+    }
+}
+
+/// swipeTracker.js `TouchSwipeGesture`: the tracker step for a pan of
+/// `delta` logical pixels under `gesture` on a `size` primary monitor.
+/// The fingers' motion negated (natural scrolling plays no part), over
+/// the screen as the tracker's distance, in touchpad units so the
+/// trackers' base distances move 1:1 with the fingers. Horizontal
+/// trackers negate once more right-to-left (swipeTracker.js:593-595).
+/// `None` for a gesture that drives no tracker.
+fn touch_swipe_step(
+    gesture: Gesture,
+    delta: Point<f64, Logical>,
+    size: Size<i32, Logical>,
+    rtl: bool,
+) -> Option<f64> {
+    match gesture {
+        Gesture::OverviewSwipe => Some(-delta.y * TOUCHPAD_BASE_HEIGHT / f64::from(size.h.max(1))),
+        Gesture::WorkspaceSwipe => {
+            let width = f64::from(size.w + crate::workspace_slide::WORKSPACE_SPACING).max(1.0);
+            let step = -delta.x * TOUCHPAD_BASE_WIDTH / width;
+            Some(if rtl { -step } else { step })
+        }
+        Gesture::OskEdgeDrag => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn touch_pans_move_gnomes_trackers_with_the_fingers() {
+        let size = Size::from((1024, 768));
+        let p = |x: f64, y: f64| Point::<f64, Logical>::from((x, y));
+        // Fingers up the whole screen height: the overview's whole step,
+        // opening (GNOME's sign), whatever natural scrolling says.
+        assert_eq!(
+            touch_swipe_step(Gesture::OverviewSwipe, p(0.0, -768.0), size, false),
+            Some(TOUCHPAD_BASE_HEIGHT)
+        );
+        assert_eq!(
+            touch_swipe_step(Gesture::OverviewSwipe, p(0.0, 384.0), size, false),
+            Some(-TOUCHPAD_BASE_HEIGHT / 2.0)
+        );
+        // Fingers left one workspace pitch: the next workspace, whole;
+        // right-to-left reverses it.
+        let pitch = f64::from(1024 + crate::workspace_slide::WORKSPACE_SPACING);
+        assert_eq!(
+            touch_swipe_step(Gesture::WorkspaceSwipe, p(-pitch, 0.0), size, false),
+            Some(TOUCHPAD_BASE_WIDTH)
+        );
+        assert_eq!(
+            touch_swipe_step(Gesture::WorkspaceSwipe, p(-pitch, 0.0), size, true),
+            Some(-TOUCHPAD_BASE_WIDTH)
+        );
+        assert_eq!(
+            touch_swipe_step(Gesture::OskEdgeDrag, p(0.0, -90.0), size, false),
+            None
+        );
     }
 }

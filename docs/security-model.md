@@ -10,9 +10,11 @@ delivery tier (nested developer preview) is explicitly "not a secure
 daily-driver session" ([architecture](architecture.md#delivery-tiers)). The
 [ADR register](adr/README.md#decision-register) still lists the same-UID
 threat model, trusted lock/portal identity and the production lock/auth and
-portal/capture grant lifecycle as open 1.0 release blockers. Everything
-below describes what the code on `main` does today. Planned behaviour is
-labelled **target**.
+portal/capture grant lifecycle as 1.0 release blockers.
+[ADR 0010](adr/0010-same-uid-trusted-identity.md) and
+[ADR 0011](adr/0011-lock-auth-and-capture-grant-lifecycle.md) propose them;
+the owner has not decided. Everything below describes what the code on
+`main` does today. Planned behaviour is labelled **target**.
 
 ## What is protected
 
@@ -24,7 +26,8 @@ labelled **target**.
   shown or receives input, and only the session user's own credentials
   unlock it.
 - **Window metadata.** Window titles and application identities are
-  private. They are published only to the portal's picker.
+  private. They are published only to the supervised shell (its window
+  list and `ext_foreign_toplevel_list_v1`) and the portal's picker.
 - **Shell authority.** Commands sent over the shell control socket can
   focus or close windows, drive the overview and engage the lock. Only the
   supervised shell may hold a session on that socket.
@@ -32,13 +35,19 @@ labelled **target**.
 ## Adversaries in scope
 
 1. **Ordinary Wayland clients**, sandboxed or not. They may send arbitrary
-   protocol requests, claim any app ID, title or layer-shell namespace, and
-   connect and disconnect at will. They must not capture the screen, type
-   into other clients, see other windows' contents or get past the lock.
-2. **Session-bus callers.** Any same-user process on the session bus may
-   call the compositor's and shell's D-Bus interfaces, and may claim
-   well-known names that nobody owns yet. Capture, remote input and window
-   introspection must not be granted on the strength of a claimed name.
+   protocol requests, claim any app ID or title, and connect and disconnect
+   at will. Through Wayland they must not capture the screen, type into
+   other clients, see other windows' contents, place shell layers or get
+   past the lock. What a native client can do outside Wayland is covered
+   under [Out of scope](#out-of-scope).
+2. **Sandboxed and non-native session-bus callers.** Flatpak and other
+   sandboxed applications reach the session bus through a filtering proxy,
+   and other callers may not be native processes of the session user. They
+   may call the compositor's and shell's D-Bus interfaces they can reach,
+   and may claim well-known names that nobody owns yet. Capture, remote
+   input and window introspection must not be granted on the strength of a
+   claimed name. Native same-user processes are out of scope
+   ([ADR 0010](adr/0010-same-uid-trusted-identity.md)).
 3. **Processes of other users.** They must not reach the control socket or
    any per-session state.
 4. **A person at a locked screen.** They can type and click on the lock
@@ -52,12 +61,20 @@ labelled **target**.
 
 ## Out of scope
 
-- **Same-UID processes that can debug or rewrite the shell or compositor.**
-  ADR 0005 records that a process able to `ptrace` the shell "still wins;
-  that is the platform's same-uid boundary, not something a socket can fix"
+- **Native same-UID processes.** A native process running as the session
+  user can kill the portal or gnome-remote-desktop and start the genuine,
+  root-owned binary with `LD_PRELOAD`. That needs no `ptrace`, and Yama
+  does not stop it. Every identity check then passes, and the process gets
+  screen capture and remote input with no consent. No check of process
+  attributes can prevent this under one UID; GNOME 51 makes the same choice
+  with weaker checks
+  ([ADR 0010](adr/0010-same-uid-trusted-identity.md#residual-risks), R1).
+  ADR 0005 likewise records that a process able to `ptrace` the shell
+  "still wins; that is the platform's same-uid boundary, not something a
+  socket can fix"
   ([ADR 0005](adr/0005-control-socket-peer-authentication.md#consequences)).
-  The same applies to a same-user process that edits the user's
-  configuration, autostart entries or extension directory.
+  The same applies to a same-user process that edits the user's login
+  environment, configuration, autostart entries or extension directory.
 - **root, the kernel, GPU drivers and firmware.** Executable-identity
   checks trust root-owned, non-writable installed binaries (see below), so
   a root compromise defeats them by design.
@@ -81,8 +98,8 @@ labelled **target**.
 | GDM | Login authentication; starts `tuna-session` from `share/wayland-sessions/tuna.desktop` | Platform. Since #866 GDM is the only supported login path. Tuna Desktop ships no greeter. | `share/wayland-sessions/tuna.desktop` |
 | `tuna-compositor` | Everything below. Owns focus, stacking, input routing, the lock flag, capture authorization and privileged protocol exposure ([architecture](architecture.md#process-and-authority-boundaries)) | The trusted computing base of the session | `crates/compositor` |
 | Private PAM helper | Running the `tuna-lock` PAM transaction | Re-executes the compositor's own held image. It never takes an executable path from UI, environment or configuration ([private PAM helper](security/private-pam-helper.md)). | `crates/compositor/src/pam_helper.rs` |
-| Supervised shell (`tuna-shell-gtk` by default, legacy `tuna-shell-host`) | UI intent, lock surfaces, the shell's own capture UI | PID of the compositor's own shell child (`Authority::publish`, `runtime.rs:4881-4890`). Between restarts no process is trusted. | `crates/shell-gtk`, `crates/shell-host` |
-| Compositor's IBus bridge | Typing for other clients (virtual keyboard) | A Wayland connection the compositor inserts itself with the `ime_bridge` flag (`ime.rs:360`, `lib.rs:321-327`) | `crates/compositor/src/ime.rs` |
+| Supervised shell (`tuna-shell-gtk` by default, legacy `tuna-shell-host`) | UI intent, lock surfaces, layer surfaces (panel, overview, banners, dialogs), the shell's own capture UI | PID of the compositor's own shell child (`Authority::publish`, `runtime.rs:4881-4890`); for its Wayland connection, the accepted peer's PID at connect time (`runtime.rs:1169-1171`). Between restarts no process is trusted. | `crates/shell-gtk`, `crates/shell-host` |
+| Compositor's IBus bridge | Typing for other clients (virtual keyboard) | A Wayland connection the compositor inserts itself with the `ime_bridge` flag (`ime.rs:360`, `lib.rs:328-331`) | `crates/compositor/src/ime.rs` |
 | GNOME portal backend (`xdg-desktop-portal-gnome`) | Consent broker for ScreenCast, Screenshot and RemoteDesktop | Caller's bus-authenticated PID resolves to a root-owned, non-group/world-writable installed executable, and the caller currently owns `org.freedesktop.impl.portal.desktop.gnome` (`capture_security.rs:176-277`) | `crates/compositor/src/capture_security.rs` |
 | GNOME providers (Nautilus file chooser, global-shortcuts provider) | Opening an ordinary display connection, and `mutter_x11_interop` | Same installed-executable check for the requested service type only (`capture_security.rs:9-40`). Confers no capture or input authority ([service channel](portal-service-channel.md)). | `crates/compositor/src/mutter.rs:198-293`, `x11_interop.rs` |
 | Applications | Nothing beyond their own surfaces | Ordinary clients. Discovered Flatpak/Snap identity is metadata only ([service channel](portal-service-channel.md#optional-gnome-sandbox-identities-410)). | `crates/compositor/src/sandbox_identity.rs` |
@@ -98,9 +115,12 @@ versioned, length-prefixed postcard protocol
 sets three layers of protection. First, the socket exists only in a private
 `XDG_RUNTIME_DIR` with mode `0600`. Second, `SO_PEERCRED` is read before
 any state is sent, and other UIDs are refused. Third, once supervising, the
-compositor admits only the supervised child's PID, with at most eight
-pending peers (`crates/compositor/src/control.rs:1602-1660`,
-`1785-1803`, `2297`). Decoding rejects frames over 1 MiB before postcard
+compositor admits only the supervised child, pinned by `SO_PEERPIDFD`: a
+bare `SO_PEERCRED` PID, or the pin of an exited process whose PID was
+recycled onto the shell, is refused, as is every peer on a kernel without
+`SO_PEERPIDFD` (before 6.5). At most eight peers may be pending
+(`crates/compositor/src/control.rs`, `PeerGate::admits`,
+`ControlHub::poll`). Decoding rejects frames over 1 MiB before postcard
 runs, and also rejects trailing bytes, over-long titles, oversized
 collections and a foreign major version
 (`crates/shell-control-schema/src/lib.rs:1965-2015`). Evidence:
@@ -113,15 +133,27 @@ compositor clears its own flag (`crates/compositor/src/session_lock.rs:1-11`).
 
 ### Lock and authentication
 
-Lock state lives in the compositor. Only the supervised shell's lock
-request is approved, and only the approved client's lock surfaces are shown
-(`session_lock.rs:58-110`). Engaging the lock does four things: it cancels
+Lock state lives in the compositor. A lock request is considered only from
+the supervised shell's pinned Wayland connection; every other client's is
+refused on arrival, so it can neither replace nor cancel the shell's. The
+runtime approves it only while that pinned process is still the held shell
+child, and only the approved client's lock surfaces are shown
+(`session_lock.rs`, `SessionLockHandler::lock`, `lock_request_verdict`).
+The shell asks again, with backoff, if a request is refused while the
+compositor still says locked (`shell-gtk/src/lock.rs`). Engaging the lock does four things: it cancels
 pending accelerators, stops held remote-desktop input, publishes the
 locked state to the capture authority and closes the overview
 (`runtime.rs:1661-1687`). Unlock runs the session user's own PAM
 transaction against the `tuna-lock` service (`share/pam.d/tuna-lock`) in a
 private helper. Attempts are bound to the control connection, request,
-attempt serial and lock epoch. See:
+attempt serial and lock epoch. Fingerprint unlock is its own PAM
+transaction against the `tuna-lock-fingerprint` service
+(`share/pam.d/tuna-lock-fingerprint`: `pam_fprintd` plus `login`'s account
+stack, as GDM runs `gdm-fingerprint`), so the account stack decides a
+fingerprint unlock as it decides a password one
+([ADR 0011](adr/0011-lock-auth-and-capture-grant-lifecycle.md), F5; fixed in
+#1173).
+See:
 
 - [Lock-screen authentication conversations](security/lock-conversations.md)
 - [Password result ownership](security/password-owner-epoch.md)
@@ -130,31 +162,105 @@ attempt serial and lock epoch. See:
 - [Fingerprint prompt guards](security/fingerprint-prompt-guards.md)
 - [Authentication consumer foundation](security/auth-consumer-foundation.md)
 
+#### Unlock keyboard boundary (#939)
+
+The authoritative compositor unlock transition performs a one-shot
+`WindowManager::unlock_input` handoff. It restores seat keyboard focus through
+the normal no-raise focus policy, respecting overview ownership, exclusive
+layer surfaces and popup grabs rather than unconditionally focusing or raising
+the remembered application. Session input does not depend on a later pointer
+motion to recover focus.
+
+Before restoring focus, the compositor quarantines every physically held seat
+key and removes it from the forwarded pressed-key set. The new keyboard
+owner's enter event therefore excludes lock-held keys. Quarantine suppresses
+their repeats and eventual releases for ordinary session clients and shortcuts
+until genuine key-up; a fresh press can then route normally. Physical pressed
+state and XKB state remain intact, without synthetic modifier releases.
+
+This boundary does not hide password keys from the user's trusted assistive
+technology. The same-UID, unreaped compositor-owned Orca process must own
+`org.gnome.Orca.KeyboardMonitor`; delivery targets only its admitted unique bus
+owner. Its keyboard interception runs before ordinary-session filtering,
+including post-unlock quarantine, so it receives genuine presses and held-key
+releases while its watches and grabs remain effective across lock/unlock.
+Those events are not permission to forward input to ordinary session clients.
+
+The reference is [Mutter 51.1's
+`meta_a11y_manager_notify_clients`](https://github.com/GNOME/mutter/blob/9134e3a5869ce232bf95b77519005865747ba603/src/backends/meta-a11y-manager.c#L617-L681):
+it does not redact password key content or gate keyboard monitoring on lock
+state. [GNOME Shell 51.1's screen shield](https://github.com/GNOME/gnome-shell/blob/33da06854e229c256afd5872fedd83c28cbfa176/js/ui/screenShield.js#L199-L205)
+instead takes a lock-screen modal stage grab. Trusted AT visibility and
+ordinary-client isolation are separate policies; see
+[screen reader keys while locked](accessibility-shell.md#screen-reader-keys-while-locked-936).
+This describes the input boundary, not a new test or CI receipt.
+
 ### Capture, screenshots and remote desktop
 
 Only the supervised shell or the authenticated installed portal backend
 may create ScreenCast sessions, take screenshots or create RemoteDesktop
-sessions (`Authority::authenticate_caller`,
-`capture_security.rs:220-245`). Claiming the portal's bus name alone is not
+sessions (`Authority::authenticate_caller`, `capture_security.rs`). The
+shell is the session-bus unique names it declared over its pinned control
+session, never a PID. Claiming the portal's bus name alone is not
 enough. Sessions belong to their unique creator, are single-use, and are
 bounded at 256 sessions and 64 streams per session. Revocation is
 permanent. A 100 ms scan on the D-Bus thread revokes a grant when its
-owner disconnects, the trusted portal name changes hands, the shell PID
-changes or the session locks (`mutter.rs:1339-1392`). Capture paths also
+owner disconnects, the trusted portal name changes hands, the shell no
+longer declares the owner's name or the session locks (`mutter.rs`,
+`Authority::owner_alive`). Capture paths also
 refuse locked frames. Full detail and the qualification evidence:
 [capture admission and revocation](capture-security.md),
 [remote desktop](remote-desktop.md),
+[input capture](input-capture.md),
 [screenshot consent](portal-screenshot-consent.md).
 
 ### Privileged Wayland globals
 
 - `zwp_virtual_keyboard_manager_v1` is visible only to the compositor's IBus
   bridge (`protocols.rs:171-181`).
+- `zwlr_layer_shell_v1` is visible and bindable only to the supervised
+  shell's connection (#1048). The compositor marks a native connection as
+  the shell's when it accepts it, if the `SO_PEERPIDFD`-pinned peer process
+  is the shell child it spawned and still holds. Without a pin (a kernel
+  before 6.5, or a peer that already exited) the connection stays
+  ordinary: a bare `SO_PEERCRED` PID may have been recycled onto the shell
+  (`lib.rs`, `ClientState::admit_supervised_shell`; `layer.rs`,
+  `is_shell_peer`; `runtime.rs`, the client listener). The global filter hides it from
+  every other client and a blind bind by name is a protocol error
+  (`lib.rs:1099-1107`). Shell surfaces are still told apart by namespace,
+  but only the shell can create one. Evidence:
+  `crates/compositor/tests/protocols.rs`
+  (`layer_shell_is_visible_and_bindable_only_by_the_supervised_shell`).
 - `mutter_x11_interop` is visible only to typed service-channel
   connections (`x11_interop.rs:65-67`).
-- `ext_session_lock_manager_v1` is advertised to every client, but a lock
-  is granted only to the supervised shell's PID (`session_lock.rs:63-82`).
-- Input-method v2 is open to any client, as on GNOME (`protocols.rs:165-166`).
+- `ext_foreign_toplevel_list_v1` (every window's title and app id) is
+  visible and bindable only to the supervised shell's connection, with the
+  same filter as layer-shell (#1046). Evidence:
+  `crates/compositor/tests/protocols.rs`
+  (`the_shell_lists_toplevels_until_they_close_and_apps_cannot_bind_the_list`).
+- `ext_session_lock_manager_v1` is advertised to every client outside a
+  security context, but a lock is considered only from the supervised
+  shell's pinned connection and granted only while its pinned process is
+  the held shell child (`session_lock.rs`). Evidence:
+  `crates/compositor/tests/session_lock_protocol.rs`
+  (`a_foreign_lock_with_the_shells_pid_is_refused_on_arrival`,
+  `a_hostile_client_spamming_lock_cannot_cancel_the_shells_lock`).
+- `wp_security_context_manager_v1` lets a sandbox engine (Flatpak) open a
+  listener whose clients join tagged with the context (#1046). Every
+  privileged global's filter (`ClientState::privileged`: virtual keyboard,
+  input method, `mutter_x11_interop`, layer-shell, the foreign toplevel
+  list) refuses such a client whatever its other state, and it sees neither
+  the session lock nor the manager itself, so it cannot nest a context.
+  Evidence: `crates/compositor/tests/protocols.rs`
+  (`security_context_clients_see_no_privileged_global`). A connection the
+  listener cannot accept (no descriptor left: EMFILE, ENFILE) rests the
+  listener 250 ms and is retried, instead of ending the event loop and the
+  session (#1071, `security_listener.rs`;
+  `crates/compositor/tests/security_context_accept.rs`).
+- Input-method v2 is visible and bindable only to the compositor's IBus
+  bridge, like the virtual keyboard (`protocols.rs`, `_input_method`).
+  Evidence: `crates/compositor/tests/input_protocols.rs`
+  (`ordinary_and_spoofed_clients_cannot_discover_or_force_bind_privileged_input_managers`).
 
 ### Session-bus interfaces
 
@@ -162,10 +268,11 @@ Each interface checks its caller itself. The main policies:
 
 | Interface | Served by | Caller policy |
 |---|---|---|
-| `org.gnome.Mutter.ScreenCast`, `.RemoteDesktop`, `org.gnome.Shell.Screenshot`, `org.tuna.Screenshot` | compositor | Shell PID or authenticated installed portal. Denied while locked. |
+| `org.gnome.Mutter.ScreenCast`, `.RemoteDesktop`, `org.gnome.Shell.Screenshot`, `org.tuna.Screenshot` | compositor | Shell (its declared unique bus names) or authenticated installed portal. Denied while locked. |
+| `org.gnome.Mutter.InputCapture` | compositor | `CreateSession`: authenticated installed portal only (`Authority::admit_portal`), not the shell. Session methods: the unique owner, denied while locked. Lock closes every session at once; owner loss within the 100 ms scan. No input is captured while locked ([input capture](input-capture.md)). |
 | `org.gnome.Mutter.ServiceChannel` | compositor | Same-user caller. Typed connections require the installed provider for that type. |
-| `org.gnome.Shell.Introspect` | compositor | Shell PID or authenticated installed portal (`capture_security::Authority::admit`). Denied while locked. `TUNA_INTROSPECT_UNRESTRICTED=1` (test/development "unsafe mode") allows metadata only while unlocked (`introspect.rs`). |
-| `/org/gnome/Shell/Introspect` on `org.gnome.Shell` | GTK shell relays to the compositor | The shell holds no window data and decides nothing: it forwards each call to the compositor's `org.tuna.Introspect` with the original caller's unique name. The compositor answers only when the relay is the supervised shell's PID and the original caller passes the `org.gnome.Shell.Introspect` rule above (`Authority::admit_forwarded`; `shell-gtk/src/introspect_forward.rs`). |
+| `org.gnome.Shell.Introspect` | compositor | Shell (its declared unique bus names) or authenticated installed portal (`capture_security::Authority::admit`). Denied while locked. `TUNA_INTROSPECT_UNRESTRICTED=1` (test/development "unsafe mode") allows metadata only while unlocked (`introspect.rs`). |
+| `/org/gnome/Shell/Introspect` on `org.gnome.Shell` | GTK shell relays to the compositor | The shell holds no window data and decides nothing: it forwards each call to the compositor's `org.tuna.Introspect` with the original caller's unique name. The compositor answers only when the relay is a unique name the supervised shell declared and the original caller passes the `org.gnome.Shell.Introspect` rule above (`Authority::admit_forwarded`; `shell-gtk/src/introspect_forward.rs`). |
 | `org.gnome.Shell` (OSD, search, app grid) | GTK shell | Caller must own `org.gnome.Settings`, `org.gnome.SettingsDaemon.MediaKeys` or the GNOME portal name, as GNOME's `DBusSenderChecker`. `TUNA_SHELL_DBUS_UNRESTRICTED=1` disables this for harnesses (`shell-gtk/src/shell_dbus.rs:27-31`, `374-378`). |
 | `org.gnome.Shell.NetworkAgent` (system bus) | GTK shell | Only NetworkManager's current unique owner ([network agent](network-agent.md)). |
 | `org.freedesktop.impl.portal.Access` | shell (`org.freedesktop.impl.portal.desktop.tuna`) | Always answers "cancelled", so the requester is refused (`shell-host/src/lockdown.rs:66-83`). |
@@ -232,18 +339,18 @@ UI classification remain required for both legs.
 
 ## Known limitations
 
-- **Same-UID boundary.** PID-based shell identity and executable-identity
-  checks stop name spoofing. They do not stop a same-user process that can
-  `ptrace` or inject into the shell or portal.
+- **Same-UID boundary.** Shell identity and executable-identity
+  checks stop processes that only claim an identity. They do not stop a
+  native same-user process, and it needs no `ptrace`: `LD_PRELOAD` into the
+  genuine portal or grd binary is enough. Mitigations: a GNOME-style
+  screen-sharing and remote-access indicator with Stop and
+  gnome-remote-desktop sessions only while Remote Desktop is enabled in
+  gsettings are being built; pidfd-pinned shell identity is #1171
+  ([ADR 0010](adr/0010-same-uid-trusted-identity.md#review-findings-and-dispositions)).
 - **Name-based allowlists.** The `org.gnome.Shell` allowlist trusts
   whoever owns an allowlisted well-known name, as GNOME does. A same-user
   process that claims `org.gnome.Settings` first passes it. Those methods
   only show OSDs and open search or the app grid.
-- **Layer shell is open.** `zwlr_layer_shell_v1` is created without a client
-  filter (`crates/compositor/src/lib.rs:999`). The compositor identifies
-  shell surfaces by their client-chosen namespace, which names a role, not
-  an owner (`layer.rs:492-510`). The R14 "unauthorized layer" cases are not
-  qualified.
 - **Extension sandbox is in-process.** The Rhai engine sets an operation
   budget but no string, array or memory limits (`extensions.rs:103-146`), so
   a script can exhaust the legacy shell host's memory. A Rhai engine bug is
@@ -277,8 +384,12 @@ quality:
 - Requirements R6 (session/lock), R11 (extension boundary) and R14
   (capture/privileged surfaces) with their security cases
   ([requirements](requirements.md)).
-- The open ADR register rows for same-UID identity and the production
-  lock/auth and portal/capture lifecycle
+- The ADR register rows for same-UID identity and the production
+  lock/auth and portal/capture lifecycle, proposed in
+  [ADR 0010](adr/0010-same-uid-trusted-identity.md) and
+  [ADR 0011](adr/0011-lock-auth-and-capture-grant-lifecycle.md) (#1162) and
+  awaiting the owner's decision. Their residual risks, including the gaps
+  they record, are part of the gate 4 review
   ([ADR register](adr/README.md#decision-register)).
 
 The `portal-security` and `remote-security` CI lanes run the packaged
