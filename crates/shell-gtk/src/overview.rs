@@ -1059,6 +1059,7 @@ impl OverviewUi {
         drop(me);
         let weak = Rc::downgrade(ui);
         let attempts = std::cell::Cell::new(0usize);
+        let last_size = std::cell::Cell::new((0, 0));
         dash.add_tick_callback(move |dash, _| {
             let attempt = attempts.get() + 1;
             attempts.set(attempt);
@@ -1076,6 +1077,14 @@ impl OverviewUi {
             };
             // Tick precedes allocation; allow a completed frame before sampling.
             if attempt < 2 {
+                return gtk::glib::ControlFlow::Continue;
+            }
+            // The dash is sized to its tiles (`fit_dash`), so its surface
+            // resizes through a compositor round trip. Sample only once
+            // that size has held for a tick, or the monitor-centered
+            // origin below is computed from a stale width.
+            let size = (dash.width(), dash.height());
+            if last_size.replace(size) != size && attempt < 30 {
                 return gtk::glib::ControlFlow::Continue;
             }
             let monitor = dash.surface().and_then(|surface| {
