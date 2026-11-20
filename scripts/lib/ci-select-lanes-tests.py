@@ -192,7 +192,9 @@ class WorkflowSync(unittest.TestCase):
 
     def test_gate_waits_for_every_job(self):
         gate = self.jobs["ci-gate"]
-        self.assertEqual(gate.get("if"), "always()")
+        # Every run but a cancelled (superseded) one: failed and skipped jobs
+        # still reach the gate.
+        self.assertEqual(gate.get("if"), "${{ !cancelled() }}")
         self.assertEqual(set(self.needs(gate)), set(self.jobs) - {"ci-gate"})
 
     def test_no_lane_scripts_are_not_run_by_a_lane(self):
