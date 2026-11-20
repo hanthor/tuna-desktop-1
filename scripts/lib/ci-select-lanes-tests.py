@@ -53,6 +53,8 @@ class Selection(unittest.TestCase):
 
     def test_owned_paths_run_their_lane_without_rotation(self):
         self.assertEqual(pr("scripts/tuna-scroll-proof"), ["scroll-proof"])
+        # The vkms gates (D-*) live in the DRM smoke.
+        self.assertEqual(pr("scripts/tuna-drm-smoke"), ["drm-smoke"])
         self.assertEqual(pr("docs/walkthrough.tsv"), ["gtk-shell"])
         self.assertEqual(pr("packaging/marlin/vm-lane/Containerfile"),
                          ["arch-package", "marlin-image", "marlin-vm"])
