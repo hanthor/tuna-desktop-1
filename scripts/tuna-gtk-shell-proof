@@ -2400,7 +2400,7 @@ camera_indicator_proof() {
     cam_watch_pid=""
     cam_fail() {
         for cam_pid in "$cam_source_pid" "$cam_app_pid" "$cam_watch_pid"; do
-            [ -n "$cam_pid" ] && kill "$cam_pid" 2>/dev/null || true
+            if [ -n "$cam_pid" ]; then kill "$cam_pid" 2>/dev/null || true; fi
         done
         fail G-CAMERA-INDICATOR "$1"
     }
@@ -2429,9 +2429,10 @@ camera_indicator_proof() {
         done
         return 1
     }
-    [ -n "$PW_PIDS" ] && [ -n "$PW_DUMP_REAL" ] && command -v gst-launch-1.0 >/dev/null 2>&1 &&
-        gst-inspect-1.0 pipewiresink >/dev/null 2>&1 && gst-inspect-1.0 videotestsrc >/dev/null 2>&1 ||
+    if ! { [ -n "$PW_PIDS" ] && [ -n "$PW_DUMP_REAL" ] && command -v gst-launch-1.0 >/dev/null 2>&1 &&
+        gst-inspect-1.0 pipewiresink >/dev/null 2>&1 && gst-inspect-1.0 videotestsrc >/dev/null 2>&1; }; then
         cam_fail "needs pipewire, wireplumber, pw-dump and gst-launch-1.0 with pipewiresink and videotestsrc"
+    fi
     cam_icon hidden idle || cam_fail "the camera icon showed with no camera in use"
     gst-launch-1.0 -q videotestsrc is-live=true ! video/x-raw,width=320,height=240,framerate=15/1 ! \
         pipewiresink mode=provide stream-properties="props,node.name=tuna-proof-camera,media.class=Video/Source" \
@@ -2457,8 +2458,9 @@ camera_indicator_proof() {
     cam_watch_pid=$!
     end=$(($(date +%s) + 20))
     until grep -qx ready "$ARTIFACTS/camera-hide-watch.log"; do
-        [ "$(date +%s)" -le "$end" ] && kill -0 "$cam_watch_pid" 2>/dev/null ||
+        if [ "$(date +%s)" -gt "$end" ] || ! kill -0 "$cam_watch_pid" 2>/dev/null; then
             cam_fail "the hide watcher never found the camera icon: $(tail -1 "$ARTIFACTS/camera-hide-watch.log")"
+        fi
         sleep 0.1
     done
     cam_stopped_ns=$(date +%s%N)
