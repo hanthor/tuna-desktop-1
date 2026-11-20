@@ -47,6 +47,20 @@ and 120-second phase deadlines remain unchanged. No updater service,
 notification policy or failure log is disabled; acknowledging a banner does
 not qualify the update operation that produced it.
 
+Banners queue, as in GNOME's message tray: the shell shows one at a time and
+never times out a critical one, so closing it drops the next into the same
+layer. The probe closes each in turn, as a user would. The observer reports
+each Close control's accessible object path, which names that widget
+instance and not its content; the shell builds a new card for every banner
+it shows. A Close instance receives Return at most once. When the banner
+layer is still there 0.6 s after Return, the probe observes it again. A new
+Close instance gets the same Super+N, Tab and focused-Return sequence. The
+one it already activated is never activated again, and the capture deadline
+then fails the case. In marlin-vm run 44442598008, uupd failed three times
+and queued three critical "Some System Updates Failed" banners. The probe
+closed only the first, and the next one covered the frame until
+`V-STRIP-INSTALLED` timed out.
+
 The column-height capture also submits a real critical notification through
 the session's public notification service. It cannot pass until the original
 shell shows the fixed public fixture title, its sensitive Close button receives
@@ -685,7 +699,9 @@ That control must belong to the original shell process and its AT-SPI bus.
 It must report `FOCUSED`.
 A layer namespace alone is not proof of that owner.
 
-After the normal Close action, the banner must be absent and all keys released.
+After the normal Close action, the banner must be absent and all keys released;
+a queued banner that drops in instead gets its own focused Close (see
+"Installed strip captures").
 Original windows, focus, workspace and session mode must remain unchanged.
 Both PNG and PPM still need all original 25 color checks.
 No pointer coordinates or empirical offsets select the control.
@@ -952,8 +968,11 @@ feature tour:
 | V-POINTER-LIVE | GNOME mouse speed/natural-scroll, acceleration profile (`flat`, then `adaptive`), middle-click emulation (on, then off) and scroll-wheel emulation (button 2 → `on-button-down` with BTN_MIDDLE and button lock, then off) reach live libinput device state and restore, asserted on the compositor's per-device readback. Each option needs at least one mouse offering it; wheel emulation is asserted on mice offering button scrolling and BTN_MIDDLE in `pointer_buttons` (libinput rejects a button the device lacks). Both source-built and published guests must report profile/button state and provide GNOME 51's wheel-emulation schema; absence fails rather than skipping proof. Snapshots: lifecycle/pointer-live.json (#343) |
 | V-POINTER-HOTPLUG | A QMP-hotplugged USB mouse arrives with the current settings already applied (DRM DeviceAdded path); unplug drops it while survivors keep theirs; bus discovery, arrival and survivor snapshots retained in lifecycle/pointer-hotplug.json (#343) |
 | V-VT | VT away/back, DRM pause/activate events, unchanged process identities and app rectangles, matching body plus a fresh visible count update from the real GTK client |
-| V-SUSPEND | Real logind suspend reaches QEMU `suspended`; the first guest snapshot after `system_wakeup` must already be locked, with all application identities intact; the real varied lock mask must repaint within five seconds, matching the pre-suspend mask; QEMU inactive-output placeholders fail |
-| V-SLEEP-AUTH-FAIL-CLOSED / V-SLEEP-FRESH-AUTH | The single real suspend interrupts a correct password attempt delayed by actual pam_exec; the real PAM success from the old generation is refused, then fresh correct authentication succeeds |
+| V-SLEEP-DELAY-INHIBITOR | On the unlocked desktop the compositor's snapshot records its logind sleep delay inhibitor held, and logind's inhibitor list (`systemd-inhibit --list`) shows a `delay` inhibitor on `sleep` from "Tuna Desktop" for the session user's compositor PID, as GNOME 51's screen shield holds one while unlocked (lifecycle/sleep-delay-before.json) |
+| V-SUSPEND-UNLOCKED (with -GPU-PM / -GPU-UPLOAD) | The first real suspend starts from the unlocked desktop; the same checks as V-SUSPEND, so the first snapshot after wake must already be locked |
+| V-SUSPEND-LOCKED-FRAME | Across that suspend the compositor's `sleep_delay` record shows exactly one sleep whose inhibitor it released only once every lit output had scanned out a frame drawn locked, no release without that, no overrun of logind's `InhibitDelayMaxUSec`, and the inhibitor taken again after wake (lifecycle/sleep-delay-after.json). QEMU's display while suspended is logged as a non-gating observation |
+| V-SUSPEND | The second real suspend, from a locked session: real logind suspend reaches QEMU `suspended`; the first guest snapshot after `system_wakeup` must already be locked, with all application identities intact; the real varied lock mask must repaint within five seconds, matching the pre-suspend mask; QEMU inactive-output placeholders fail |
+| V-SLEEP-AUTH-FAIL-CLOSED / V-SLEEP-FRESH-AUTH | The second real suspend interrupts a correct password attempt delayed by actual pam_exec; the real PAM success from the old generation is refused, then fresh correct authentication succeeds |
 | V-SLEEP-CLIENT-REPAINT | The same GTK client receives a fresh key and visibly repaints after wake/unlock |
 | V-VT-FAIL-CLOSED | VT away/back while locked keeps the mask and original application processes |
 | V-AUTH-FAIL-CLOSED | Real PAM service temporarily uses `pam_deny`; fresh submitted/refused milestones prove the correct test password was attempted and denied; original service restored afterward |
@@ -965,7 +984,7 @@ feature tour:
 | V-POWER-BUTTON | gsd-media-keys (its unit's main PID, the session user) holds logind's `block` inhibitor on `handle-power-key:handle-suspend-key:handle-hibernate-key` with Why "GNOME handling keypresses". On a fixture desktop chassis, after each gsd restart a new gsd-media-keys must own its name, hold that inhibitor, have `XF86PowerOff` granted by `GrabAccelerators` and the shell must log that it yielded the bindings. QMP `system_powerdown` (ACPI power button) with `power-button-action` `interactive`: `AcceleratorActivated` reaches gsd, gsd calls `org.gnome.SessionManager.Shutdown`, the compositor calls `EndSessionDialog.Open(1, …)` and the `tuna-shell-end-session` layer shows within 15 s; 5 s after the press QEMU is `running` with the same compositor process and logind session and no logind power request; Escape (always sent, far inside the 60 s countdown) removes the layer, the shell emits `Canceled` and logs its D-Bus Power Off dialog. `nothing`: gsd receives the key, and for at least 8 s no Shutdown, dialog call, layer or logind request follows. On the image's `vm` chassis with a fixture `shutdown` block inhibitor held by root: the key reaches gsd and gsd's own process calls logind `PowerOffWithFlags(0)`; gsd sends it without a reply callback (NO_REPLY_EXPECTED), so logind's refusal has no bus reply, and 5 s later logind has emitted no `PrepareForShutdown`/`PrepareForSleep`, `PreparingForShutdown` is still false with the fixture inhibitor held, no other logind request or non-error reply followed, no dialog opened and QEMU, compositor and session are unchanged. Setting, chassis and `/etc/machine-info` are restored (lifecycle/power-button.json, #353, #589) |
 | V-RESTART-DIALOG | Both current-build and published guests must exercise the shell's own power menu by physical keys on the unlocked desktop after V-POWER-BUTTON (#589): Super+S opens quick settings; physical Tab moves until the shell's AT-SPI tree (`tuna-vm-shell-focus` end-session mode, observation only) reports Power Off Menu focused, Return opens the menu with Suspend, Restart…, Power Off… and Log Out… showing, and Tab/Return chooses Restart…. Within 15 s the shell (the `org.gnome.Shell` owner, not the compositor) has called `org.gnome.SessionManager.Reboot` and the compositor's manager has answered with the shell's `EndSessionDialog.Open(2, 0, 60, …)`, with the `tuna-shell-end-session` layer up; the dialog reads "The system will restart automatically in 60 seconds" with Cancel focused, as GNOME 51's endSessionDialog.js. It steps to 50 seconds with QEMU running, the session and compositor identity unchanged, no logind power request, `PrepareFor*` signal or `PreparingForShutdown`, and the request still unanswered; Return on the focused Cancel then emits the shell's `Canceled`, fails `Reboot` with gnome-session's `G_IO_ERROR_CANCELLED` and takes the layer down, still with logind untouched. Any failure presses Escape so no countdown is left running (lifecycle/end-session-menu.json). An older published shell does not waive the gate |
 | V-POWER-OFF-DIALOG | As V-RESTART-DIALOG for Power Off…: `org.gnome.SessionManager.Shutdown`, `Open(1, 0, 60, …)`, "The system will power off automatically in 60 seconds" stepping to 50, Cancel by Return, `Shutdown` failed as cancelled, logind untouched |
-| V-LOGOUT | Both lanes use the shell's power menu by physical keys (#589), as V-RESTART-DIALOG runs Restart…: the shell must ask `org.gnome.SessionManager.Logout(0)`, the compositor's manager must answer it once its `Open(0, 0, 60, …)` has put the dialog up, counting down from 60 with Cancel focused, and the session must outlive that countdown, whose expiry confirms the logout (the greeter may only return at least 55 s after the dialog opened). Within 30 s of the logout taking effect (90 s from the menu dialog's opening) GDM's non-root gnome-shell greeter in its active gdm-launch-environment session repaints the greeter frame captured before login and no original compositor survives. A logind `Session.Terminate` substitute or historical published build does not pass |
+| V-LOGOUT | Both lanes use the shell's power menu by physical keys (#589), as V-RESTART-DIALOG runs Restart…: the shell must ask `org.gnome.SessionManager.Logout(0)`, the compositor's manager must answer it once its `Open(0, 0, 60, …)` has put the dialog up, counting down from 60 with Cancel focused, and the session must outlive that countdown, whose expiry confirms the logout (the greeter may only return at least 55 s after the dialog opened). Within 30 s of the logout taking effect (90 s from the menu dialog's opening) GDM's non-root gnome-shell greeter in its active gdm-launch-environment session repaints the greeter frame captured before login and no original compositor survives. That pre-login frame is the first painted one (at least 8 quantized colors) that the next frame confirms settled within the same 5% tolerance, inside the unchanged greeter deadline; a greeter that never paints fails the login rather than leaving a black reference. A logind `Session.Terminate` substitute or historical published build does not pass |
 
 The original tour's `V-LOCK` still requires exactly unlocked → locked →
 unlocked. Its observations end before lifecycle operations add their own
@@ -1002,8 +1021,17 @@ can carry the preceding vblank's timestamp, so timestamps alone do not
 identify abandoned frames. A failed reset or drain keeps scanout blocked
 until recovery succeeds. Wake
 recovery does not depend on a VT change; an off-seat wake waits for seat
-activation. This does not establish a delay inhibitor or physical masked
-frame acknowledgement before sleep.
+activation.
+
+While the session is active and the lock screen is allowed, the compositor
+holds a logind `delay` inhibitor on `sleep`, as GNOME 51's `screenShield.js`
+`_syncInhibitor` does. On `PrepareForSleep(true)` it locks and closes the
+inhibitor only once every lit output has completed the page flip of a frame
+drawn locked, so the frame left on screen through sleep is the lock. It takes
+the inhibitor again on `PrepareForSleep(false)`. When logind's
+`InhibitDelayMaxUSec` runs out first, logind sleeps anyway and the session is
+still locked; the record counts an overrun. A lockdown that disables the lock
+screen, or a session off its VT, releases the inhibitor at once.
 
 These new gates require their own actual CI results before acceptance.
 Output hotplug and loss of every compositor-adjacent service remain

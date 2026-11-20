@@ -30,7 +30,8 @@ release.
 
 | Crate | Kind | In-repo dependents | Tier |
 |---|---|---|---|
-| `tuna-shell-control` (`crates/shell-control-schema`) | library | compositor, shell-host, shell-gtk, backlight | internal; its wire format is a cross-process contract |
+| `tuna-shell-control` (`crates/shell-control-schema`) | library | compositor, shell-host, shell-gtk, wallpaper | internal; its wire format is a cross-process contract |
+| `tuna-output` (`crates/output`) | library | shell-control, backlight, compositor, shell-host, shell-gtk | internal; its field order is part of the shell-control wire format |
 | `tuna-wallpaper` | library | compositor | internal |
 | `tuna-backlight` | library | shell-gtk | internal |
 | `tuna-magnifier` | library | compositor, shell-gtk | internal; its session JSON file is a cross-process contract |
@@ -186,7 +187,7 @@ if it works. A crate promoted to the unstable or stable tier must declare
   - `postcard`, because its encoding is the control-protocol wire format;
   - `rustix`, `xkbcommon` and `freedesktop-desktop-entry`.
 - Other dependencies use ordinary caret requirements, for example
-  `zbus = "5"`, `gtk4 = "0.11"` and `rhai = "1.26"`, and float within
+  `zbus = "6"`, `gtk4 = "0.11"` and `rhai = "1.26"`, and float within
   those ranges through lockfile updates.
 - `smithay` and `reis` are patched to reviewed source snapshots in
   `third-party/` (`[patch.crates-io]` in `Cargo.toml`). Renovate is disabled

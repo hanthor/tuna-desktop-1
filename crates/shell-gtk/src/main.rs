@@ -130,6 +130,7 @@ mod location;
 mod lock;
 mod lock_auth;
 mod lock_curtain;
+mod lock_notifications;
 mod lock_wiggle;
 mod lockdown;
 mod logic;
@@ -419,6 +420,9 @@ fn drain(
             }
             Handled::ClosePadOsd { pad } => out.tablet.push(TabletUi::Close(pad)),
             Handled::SeatTouchMode(touch_mode) => out.touch_mode = Some(touch_mode),
+            // Read back through `lock_screen_shown`; a frame was handled,
+            // so the screen saver syncs after this drain.
+            Handled::LockScreenShown(_) => {}
             Handled::CommandResult { id, status } => out.results.push((
                 id,
                 matches!(status, tuna_shell_control::CommandStatus::Applied),
@@ -2163,6 +2167,28 @@ fn build(app: &adw::Application) {
     }));
     render_pills(&mut shell.borrow_mut());
     orca::start(shell.clone());
+    // The compositor knows the shell on the session bus only by the unique
+    // name of GIO's shared session connection (the one every shell D-Bus
+    // call and the org.gnome.Shell name use), declared over the pinned
+    // control socket and again after every redial (ADR 0010).
+    {
+        let shell = shell.clone();
+        gio::bus_get(
+            gio::BusType::Session,
+            None::<&gio::Cancellable>,
+            move |conn| {
+                let Some(name) = conn.ok().and_then(|conn| conn.unique_name()) else {
+                    eprintln!("tuna-shell-gtk: no session bus name to declare");
+                    return;
+                };
+                if let Some(control) = shell.borrow_mut().control.as_mut() {
+                    if let Err(e) = control.declare_bus_name(name.to_string()) {
+                        eprintln!("tuna-shell-gtk: declaring the session bus name failed: {e}");
+                    }
+                }
+            },
+        );
+    }
 
     // The compositor toggles the overview on presses over the
     // Activities control (ACTIVITIES_WIDTH_PX); sending a toggle here
@@ -2324,6 +2350,20 @@ fn build(app: &adw::Application) {
             }),
         )
     };
+    // GNOME's lock screen lists unseen notifications by their policy
+    // (unlockDialog.js NotificationsBox, #348), live while locked.
+    {
+        let notify = notify.clone();
+        lock_ui.set_notifications(Rc::new(move || notify.lock_entries()));
+    }
+    {
+        let lock_ui = Rc::downgrade(&lock_ui);
+        notify.connect_lock_changed(move || {
+            if let Some(lock_ui) = lock_ui.upgrade() {
+                lock_ui.refresh_notifications();
+            }
+        });
+    }
     let brightness_policy_settings =
         settings("org.gnome.settings-daemon.plugins.power").filter(|s| {
             s.settings_schema()
@@ -2924,7 +2964,13 @@ fn build(app: &adw::Application) {
         },
         {
             let shell = shell.clone();
-            Rc::new(move || shell.borrow().control.as_ref().is_some_and(|c| c.locked()))
+            Rc::new(move || {
+                shell
+                    .borrow()
+                    .control
+                    .as_ref()
+                    .is_some_and(|c| c.lock_screen_shown())
+            })
         },
     );
     // Wellbeing (#354): screen-time history/limits and break reminders.
@@ -3542,15 +3588,15 @@ fn build(app: &adw::Application) {
                 }
             };
             let vanished = owner_changed.clone();
-            // Watched for the whole session (a WatcherId unwatches
+            // Watched for the whole session (a NameWatch unwatches
             // nothing when it drops): a restarted daemon takes its keys
             // back, a crashed one leaves the native subset.
-            let _ = gio::bus_watch_name(
-                gio::BusType::Session,
+            let _ = services::bus_watch_name(
+                services::WatchBus::Type(gio::BusType::Session),
                 keybindings::MEDIA_KEYS_DAEMON,
                 gio::BusNameWatcherFlags::NONE,
-                move |_, _, _| owner_changed(true),
-                move |_, _| vanished(false),
+                move || owner_changed(true),
+                move || vanished(false),
             );
         }
         for settings in [settings, wm_settings, mutter_settings, media_settings]
@@ -4072,6 +4118,10 @@ fn build(app: &adw::Application) {
                 } = drained;
                 let mut shell = shell.borrow_mut();
                 let locked = shell.control.as_ref().is_some_and(|c| c.locked());
+                let lock_shown = shell
+                    .control
+                    .as_ref()
+                    .is_some_and(|c| c.lock_screen_shown());
                 let auth_generation = shell.control.as_ref().map(|c| c.connection_generation());
                 let authoritative_lock = shell
                     .control
@@ -4123,6 +4173,9 @@ fn build(app: &adw::Application) {
                 };
                 drop(shell);
                 input_sources.focus(holder);
+                // No banners while locked (GNOME's lock screen session
+                // mode); the lock screen lists what arrives instead.
+                notify.set_locked(locked);
                 if locked {
                     notify.release_focus();
                     release_panel_focus(&panel_focus_window, &panel_focus_held);
@@ -4143,7 +4196,12 @@ fn build(app: &adw::Application) {
                 }
                 // Thunderbolt devices enrol only in an unlocked session.
                 thunderbolt.sync_lock(authoritative_lock);
-                screensaver.sync(locked);
+                // Active once the curtain has landed, as gnome-shell's
+                // `_lockScreenShown`: gnome-settings-daemon blanks the
+                // screen on ActiveChanged(true), which mid-slide would
+                // freeze the curtain off screen. Each confirmed unlock
+                // wakes the screen first, as `_continueDeactivate` does.
+                screensaver.sync(authoritative_lock, lock_shown);
                 // The session keyboard never shows over the lock screen.
                 osk.set_locked(locked);
                 for (focus, show, touch_auto) in osk_updates {

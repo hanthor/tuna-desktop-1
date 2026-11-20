@@ -81,6 +81,8 @@ const DEFAULT_WIDTH: i32 = 800;
 const DEFAULT_HEIGHT: i32 = 600;
 /// Cascade offset for each newly mapped window.
 const CASCADE_STEP: i32 = 50;
+/// The xdg_toplevel version that knows the `suspended` state.
+const XDG_TOPLEVEL_STATE_SUSPENDED_SINCE: u32 = 6;
 
 /// One managed window: live surface plus compositor-side geometry.
 /// The surface is the toolkit's unified window handle, so native and
@@ -443,6 +445,10 @@ pub struct WindowManager {
     /// entry holds the one unified handle.
     #[cfg(feature = "xwayland")]
     x11_index: HashMap<u32, u64>,
+    /// X11 windows last told they are iconic (`WM_STATE` IconicState and
+    /// `_NET_WM_STATE_HIDDEN`): those hidden by minimize.
+    #[cfg(feature = "xwayland")]
+    x11_iconic: HashSet<u64>,
     /// Model ids bottom-to-top; focus raises to the top.
     stacking: Vec<u64>,
     // Explicit activation history is independent of raising transient families.
@@ -598,6 +604,8 @@ pub struct WindowManager {
     grab_raise: Option<GrabRaise>,
     /// Mutter's alive checks and the close dialog (#1035).
     alive: alive::AliveState,
+    /// Mutter's suspend state of the native windows (#503).
+    suspension: crate::suspend::Suspension,
 }
 
 impl WindowManager {
@@ -761,6 +769,8 @@ impl WindowManager {
             surface_index: HashMap::new(),
             #[cfg(feature = "xwayland")]
             x11_index: HashMap::new(),
+            #[cfg(feature = "xwayland")]
+            x11_iconic: HashSet::new(),
             stacking: Vec::new(),
             focus_history: Vec::new(),
             cascade: 0,
@@ -838,6 +848,7 @@ impl WindowManager {
             auto_raise: None,
             grab_raise: None,
             alive: alive::AliveState::new(state),
+            suspension: Default::default(),
         }
     }
 
@@ -912,6 +923,8 @@ impl WindowManager {
         );
         #[cfg(feature = "xwayland")]
         check("x11_index", self.x11_index.values().any(|v| *v == id));
+        #[cfg(feature = "xwayland")]
+        check("x11_iconic", self.x11_iconic.contains(&id));
         check("stacking", self.stacking.contains(&id));
         check("focus_history", self.focus_history.contains(&id));
         check(
@@ -1054,6 +1067,7 @@ impl WindowManager {
                 window.minimized = false;
             }
         }
+        self.sync_x11_iconic();
         target
     }
 
@@ -1395,6 +1409,81 @@ impl WindowManager {
         self.workspace_tracker.next_deadline()
     }
 
+    /// Mutter's suspend state (#503). `shown` lists the windows something
+    /// on screen shows this frame (the scene, window clones, casts); the
+    /// runtime calls this before a frame is drawn and after. A native
+    /// window not shown for Mutter's 3 s is suspended; a shown one
+    /// resumes at once, so it is told before the frame that draws it.
+    /// Each change is one configure with or without `suspended`; clients
+    /// older than xdg-shell v6 are never told.
+    pub fn update_suspended(&mut self, shown: &[u64], now: std::time::Instant) {
+        let windows = self
+            .windows
+            .iter()
+            .filter(|(_, window)| {
+                matches!(
+                    window.surface.underlying_surface(),
+                    WindowSurface::Wayland(_)
+                )
+            })
+            .map(|(id, _)| (*id, shown.contains(id)));
+        for (id, suspended) in self.suspension.update(windows, now) {
+            let Some(WindowSurface::Wayland(toplevel)) = self
+                .windows
+                .get(&id)
+                .map(|window| window.surface.underlying_surface())
+            else {
+                continue;
+            };
+            if toplevel.version() < XDG_TOPLEVEL_STATE_SUSPENDED_SINCE {
+                continue;
+            }
+            toplevel.with_pending_state(|pending| {
+                if suspended {
+                    pending.states.set(xdg_toplevel::State::Suspended);
+                } else {
+                    pending.states.unset(xdg_toplevel::State::Suspended);
+                }
+            });
+            toplevel.send_pending_configure();
+        }
+    }
+
+    /// When the next hidden window is due to be suspended.
+    pub fn suspend_deadline(&self) -> Option<std::time::Instant> {
+        self.suspension.deadline()
+    }
+
+    /// Whether window `id` is suspended (Mutter's `SUSPENDED`).
+    pub fn is_suspended(&self, id: u64) -> bool {
+        self.suspension.is_suspended(id)
+    }
+
+    /// Every suspended window, in id order.
+    pub fn suspended_windows(&self) -> Vec<u64> {
+        self.suspension.suspended()
+    }
+
+    /// Root surfaces of the suspended windows whose clients were told
+    /// (xdg-shell v6 and later). Mutter sends hidden surfaces no frame
+    /// callbacks; these get none until they resume.
+    pub fn told_suspended_surfaces(&self) -> Vec<WlSurface> {
+        self.suspension
+            .suspended()
+            .into_iter()
+            .filter_map(
+                |id| match self.windows.get(&id)?.surface.underlying_surface() {
+                    WindowSurface::Wayland(toplevel)
+                        if toplevel.version() >= XDG_TOPLEVEL_STATE_SUSPENDED_SINCE =>
+                    {
+                        Some(toplevel.wl_surface().clone())
+                    }
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
     /// The workspace switch motion (stepped by the runtime).
     pub fn workspace_slide(&self) -> &crate::workspace_slide::WorkspaceSlide {
         &self.workspace_slide
@@ -1683,6 +1772,8 @@ impl WindowManager {
         // hold focus past this tick while the overview is open.
         self.reconcile_overview_focus(state);
         self.reconcile_exclusive_layer(state);
+        // Transient parents and maps change who minimize hides.
+        self.sync_x11_iconic();
         // The shell's ext-foreign-toplevel-list follows the model as it
         // stands after this tick's maps, title changes and unmaps (#1046).
         state.sync_foreign_toplevels(self.model.revision(), self.model.windows());
@@ -1778,7 +1869,7 @@ impl WindowManager {
         self.pre_overview_focus = None;
         if let Some(old) = self.overview_activated.take() {
             if Some(old) != restore {
-                self.configure(old, false);
+                self.deactivate(old);
             }
         }
         self.apply_focus(state, restore);
@@ -2223,7 +2314,7 @@ impl WindowManager {
     }
 
     /// Drain queued X11 manager events: map/unmap/size and identity
-    /// updates plus maximize/fullscreen requests, all on the one
+    /// updates plus maximize/fullscreen/minimize requests, all on the one
     /// manager call path. (xwayland feature only.)
     #[cfg(feature = "xwayland")]
     fn drain_x11_events(&mut self, state: &mut State) {
@@ -2297,6 +2388,11 @@ impl WindowManager {
                 X11ManagerEvent::Fullscreen(id, on) => {
                     if let Some(model) = self.x11_index.get(&id).copied() {
                         self.set_fullscreen(state, model, on);
+                    }
+                }
+                X11ManagerEvent::Minimize(id) => {
+                    if let Some(model) = self.x11_index.get(&id).copied() {
+                        self.minimize(state, model);
                     }
                 }
             }
@@ -2439,6 +2535,7 @@ impl WindowManager {
                 #[cfg(feature = "xwayland")]
                 WindowSurface::X11(surface) => {
                     self.x11_index.remove(&surface.window_id());
+                    self.x11_iconic.remove(&id);
                     state.window_icons.remove_cache(&format!("x11:{id}"));
                 }
             }
@@ -2519,8 +2616,8 @@ impl WindowManager {
                 WindowRequest::Unmaximize => {
                     self.set_maximized(state, id, false);
                 }
-                WindowRequest::Fullscreen => {
-                    self.set_fullscreen(state, id, true);
+                WindowRequest::Fullscreen(output) => {
+                    self.set_fullscreen_on(state, id, output.as_deref());
                 }
                 WindowRequest::Unfullscreen => {
                     self.set_fullscreen(state, id, false);
@@ -2660,7 +2757,7 @@ impl WindowManager {
         }
         if self.overview_activated != id {
             if let Some(old) = self.overview_activated {
-                self.configure(old, false);
+                self.deactivate(old);
             }
             if let Some(id) = id {
                 self.configure(id, true);
@@ -2725,7 +2822,7 @@ impl WindowManager {
         let serial = SERIAL_COUNTER.next_serial();
         for old in [previous, self.activated.take()].into_iter().flatten() {
             if Some(old) != id {
-                self.configure(old, false);
+                self.deactivate(old);
             }
         }
         if let Some(id) = id {
@@ -2792,10 +2889,56 @@ impl WindowManager {
         let _ = id;
     }
 
+    /// Mutter's meta_window_x11_set_wm_state and set_net_wm_state: an X11
+    /// window hidden by minimize (its own or a transient ancestor's, as
+    /// meta_window_showing_on_its_workspace has it) is `WM_STATE`
+    /// IconicState with `_NET_WM_STATE_HIDDEN`, and restoring it makes it
+    /// NormalState without, so the client can pause rendering and playback
+    /// while hidden. Only changes reach the X server.
+    fn sync_x11_iconic(&mut self) {
+        #[cfg(feature = "xwayland")]
+        {
+            if self.x11_index.is_empty() {
+                return;
+            }
+            let hidden = self.hidden_by_minimize();
+            for (id, window) in &self.windows {
+                let WindowSurface::X11(surface) = window.surface.underlying_surface() else {
+                    continue;
+                };
+                let iconic = hidden.contains(id);
+                if iconic == self.x11_iconic.contains(id) {
+                    continue;
+                }
+                if let Err(error) = surface.set_iconic(iconic) {
+                    eprintln!("tuna-compositor: window {id} X11 WM_STATE refused: {error}");
+                }
+                if iconic {
+                    self.x11_iconic.insert(*id);
+                } else {
+                    self.x11_iconic.remove(id);
+                }
+            }
+        }
+    }
+
     /// Send a configure advertising this window's geometry, activation
     /// flag, and presentation state. X11 windows take the toolkit's
     /// X11 configure path with the same geometry and activation.
     fn configure(&self, id: u64, activated: bool) {
+        self.configure_with(id, activated, false);
+    }
+
+    /// Tell `id` it is no longer activated. Like Mutter, which configures
+    /// on a change of the window's state, a native window already told
+    /// gets no second, identical configure: one focus change deactivates
+    /// the previously focused and the previously activated window, often
+    /// the same one (#503).
+    fn deactivate(&self, id: u64) {
+        self.configure_with(id, false, true);
+    }
+
+    fn configure_with(&self, id: u64, activated: bool, only_changes: bool) {
         self.pointer_scene_dirty.set(true);
         let Some(window) = self.windows.get(&id) else {
             return;
@@ -2807,10 +2950,16 @@ impl WindowManager {
                 // picks its own.
                 let size = (!(window.unplaced && layout == WindowLayout::Floating))
                     .then_some(window.geometry.size);
-                Self::configure_wayland(toplevel, &layout, size, activated);
+                Self::configure_wayland(toplevel, &layout, size, activated, only_changes);
             }
             #[cfg(feature = "xwayland")]
             WindowSurface::X11(surface) => {
+                if only_changes
+                    && surface.is_activated() == activated
+                    && surface.geometry() == window.geometry
+                {
+                    return;
+                }
                 if surface.set_activated(activated).is_err()
                     || surface.configure(Some(window.geometry)).is_err()
                 {
@@ -2821,12 +2970,14 @@ impl WindowManager {
     }
 
     /// Advertise geometry, activation, and presentation state to one
-    /// native client.
+    /// native client; with `only_changes`, only if they differ from what
+    /// it was last told.
     fn configure_wayland(
         surface: &ToplevelSurface,
         layout: &WindowLayout,
         size: Option<Size<i32, Logical>>,
         activated: bool,
+        only_changes: bool,
     ) {
         surface.with_pending_state(|pending| {
             pending.size = size;
@@ -2861,7 +3012,11 @@ impl WindowManager {
                 pending.states.set(state);
             }
         });
-        surface.send_configure();
+        if only_changes {
+            surface.send_pending_configure();
+        } else {
+            surface.send_configure();
+        }
     }
 
     fn strip_grab_owner(grab: PointerGrab) -> Option<StripPointer> {
@@ -4349,8 +4504,8 @@ impl WindowManager {
     /// focused window. Handing an Exclusive hold back to a window (or
     /// nothing) strands the panel inactive with GTK focus intact but no
     /// keyboard (G-PANEL-FOCUS). Unlock walks the same owners through
-    /// [`Self::unlock_input`], which also honours a surviving popup grab
-    /// and never raises.
+    /// [`Self::unlock_input`], which also honours a popup grab taken
+    /// while locked and never raises.
     pub fn restore_keyboard_owner(&mut self, state: &mut State) {
         if let Some(held) = self.overview_held.clone() {
             let serial = SERIAL_COUNTER.next_serial();
@@ -4375,10 +4530,12 @@ impl WindowManager {
     /// physical/XKB state until real keyup. Trusted AT runs before this filter.
     ///
     /// The keyboard goes back to what had it, as GNOME Shell's `popModal`
-    /// does (screenShield.js locks with a modal stage grab, which revokes
-    /// Mutter's Wayland popup grab without dismissing it): the topmost popup
-    /// of a grab that outlived the lock, else the owner a popup grab hands
-    /// back to (the parked overview, an Exclusive layer, the focused window).
+    /// does. The lock dismissed the shell's popup grabs
+    /// ([`crate::State::dismiss_shell_popup_grab_for_lock`]); an
+    /// application's grab outlived it, revoked rather than dismissed as
+    /// by GNOME's modal stage grab, and gets the keyboard back (its
+    /// topmost popup); otherwise the owner a popup grab hands back to
+    /// (the parked overview, an Exclusive layer, the focused window).
     pub fn unlock_input(&mut self, state: &mut State) {
         if let Some(keyboard) = &self.keyboard {
             self.unlock_quarantined.extend(keyboard.pressed_keys());
@@ -4804,6 +4961,7 @@ impl WindowManager {
             let workspace = self.model.active_workspace();
             self.focus_topmost(state, workspace);
         }
+        self.sync_x11_iconic();
         true
     }
 
@@ -5172,13 +5330,22 @@ impl WindowManager {
         }
     }
 
-    /// Whole output, including the panel strip, for fullscreen windows.
-    fn fullscreen_area(state: &State) -> Rectangle<i32, Logical> {
-        let primary = state.primary_size();
-        Rectangle {
-            loc: (0, 0).into(),
-            size: (primary.w.max(0), primary.h.max(0)).into(),
-        }
+    /// Whole output, including the panel strip, for a fullscreen window
+    /// whose floating rectangle is `floating`: the output that rectangle
+    /// is on, as Mutter fullscreens a window on its own monitor
+    /// (`window->monitor`), else the primary.
+    fn fullscreen_area(
+        state: &State,
+        floating: Rectangle<i32, Logical>,
+    ) -> Rectangle<i32, Logical> {
+        let outputs = state.output_slices();
+        Self::output_of(floating, &outputs)
+            .or_else(|| {
+                let primary = state.primary_output_name()?;
+                outputs.iter().find(|(name, _)| *name == primary)
+            })
+            .map(|(_, rect)| *rect)
+            .unwrap_or_default()
     }
 
     /// Gap between scroll-mode strip columns (niri default).
@@ -6271,8 +6438,9 @@ impl WindowManager {
         }
     }
 
-    /// Cover the output with a window, stashing its floating geometry.
-    /// Idempotent; false for unknown ids.
+    /// Cover the window's output (the one its floating rectangle is on)
+    /// with it, stashing its floating geometry. Idempotent; false for
+    /// unknown ids.
     pub fn set_fullscreen(&mut self, state: &mut State, id: u64, fullscreen: bool) -> bool {
         // Forced strip membership, like maximize: fullscreen changes
         // mid-scroll stay columns instead of covering the screen.
@@ -6283,6 +6451,59 @@ impl WindowManager {
             self.apply_layout(state, id, WindowLayout::Fullscreen)
         } else {
             self.restore_window(id)
+        }
+    }
+
+    /// Fullscreen a window on the output `xdg_toplevel.set_fullscreen`
+    /// named, as Mutter's `xdg_toplevel_set_fullscreen` does: the window
+    /// first moves to that monitor (`meta_window_move_to_monitor`), then
+    /// covers it. No output, or one that is gone, fullscreens the window
+    /// where it is. False for unknown ids.
+    fn set_fullscreen_on(&mut self, state: &mut State, id: u64, output: Option<&str>) -> bool {
+        if self.mode != SessionMode::Scroll {
+            if let Some(name) = output {
+                self.move_to_output(state, id, name);
+            }
+        }
+        self.set_fullscreen(state, id, true)
+    }
+
+    /// Mutter's `meta_window_move_to_monitor`: the window's floating
+    /// rectangle (its geometry, or the restore rectangle of a managed
+    /// layout) moves from its output to `name` as an output change moves
+    /// it, and `name` becomes the output it prefers. Unknown outputs and
+    /// ids are ignored.
+    fn move_to_output(&mut self, state: &State, id: u64, name: &str) {
+        let outputs = state.output_slices();
+        let Some((_, new_rect)) = outputs.iter().find(|(output, _)| output == name) else {
+            return;
+        };
+        let primary = state.primary_output_name();
+        let Some(window) = self.windows.get_mut(&id) else {
+            return;
+        };
+        window.preferred_output = Some(name.to_owned());
+        let floating = window.layout == WindowLayout::Floating;
+        let shown = floating_rect(window);
+        let Some((_, old_rect)) = Self::output_of(shown, &outputs).or_else(|| {
+            let primary = primary.as_deref()?;
+            outputs.iter().find(|(output, _)| output == primary)
+        }) else {
+            return;
+        };
+        if old_rect == new_rect {
+            return;
+        }
+        if floating {
+            let free = match window.unconstrained {
+                Some((free, at)) if at == shown => free,
+                _ => shown,
+            };
+            let (free, geo) = move_between_outputs(shown, free, *old_rect, *new_rect);
+            window.unconstrained = (free != geo).then_some((free, geo));
+            window.geometry = geo;
+        } else {
+            window.restore = Some(move_between_outputs(shown, shown, *old_rect, *new_rect).1);
         }
     }
 
@@ -6326,7 +6547,10 @@ impl WindowManager {
             WindowLayout::Floating => return self.restore_window(id),
             WindowLayout::Maximized => Self::work_area(state),
             WindowLayout::Tiled(side) => Self::tile_area(state, side),
-            WindowLayout::Fullscreen => Self::fullscreen_area(state),
+            WindowLayout::Fullscreen => match self.windows.get(&id) {
+                Some(window) => Self::fullscreen_area(state, floating_rect(window)),
+                None => return false,
+            },
             WindowLayout::Strip => self.strip_column_area(state, id),
         };
         let Some(window) = self.windows.get_mut(&id) else {
@@ -6414,9 +6638,7 @@ impl WindowManager {
                 .or_else(|| find(old))
                 .or_else(|| primary.as_deref().and_then(find))
         };
-        // meta_window_move_between_rects: move_rect_between_rects on the
-        // unconstrained rect `free` of the window shown at `shown`, then
-        // the constraints (META_MOVE_RESIZE_CONSTRAIN) on the new layout.
+        // meta_window_move_between_rects on the new layout.
         let relocate = |shown: Rectangle<i32, Logical>,
                         free: Rectangle<i32, Logical>,
                         preferred: Option<&str>| {
@@ -6425,16 +6647,7 @@ impl WindowManager {
             if new_rect == old_rect {
                 return None;
             }
-            let moved = move_rect_between_rects(free, *old_rect, *new_rect);
-            let constrained = crate::output_constraints::keep_fully_visible(
-                rect_tuple(shown),
-                floating_workarea((old_rect.loc.x, old_rect.loc.y), old_rect.size),
-                rect_tuple(moved),
-                floating_workarea((new_rect.loc.x, new_rect.loc.y), new_rect.size),
-            )
-            .map_or(moved, |(x, y, _, _)| {
-                Rectangle::new((x, y).into(), moved.size)
-            });
+            let (moved, constrained) = move_between_outputs(shown, free, *old_rect, *new_rect);
             Some((new_name, moved, constrained))
         };
         let mut moved = 0;
@@ -8194,6 +8407,40 @@ fn output_workareas(state: &State) -> Vec<(String, crate::output_constraints::Re
 
 fn rect_tuple(rect: Rectangle<i32, Logical>) -> crate::output_constraints::Rect {
     (rect.loc.x, rect.loc.y, rect.size.w, rect.size.h)
+}
+
+/// The rectangle a window floats at: its geometry while floating, else
+/// the restore rectangle its managed layout stashed.
+fn floating_rect(window: &ManagedWindow) -> Rectangle<i32, Logical> {
+    match window.layout {
+        WindowLayout::Floating => window.geometry,
+        _ => window.restore.unwrap_or(window.geometry),
+    }
+}
+
+/// Mutter's `meta_window_move_between_rects` from output `old` to
+/// output `new`: `move_rect_between_rects` on the unconstrained rect
+/// `free` of the window shown at `shown`, then the constraints
+/// (META_MOVE_RESIZE_CONSTRAIN): wholly visible before, it stays wholly
+/// inside the new output's workarea. The moved and the constrained
+/// rectangle.
+fn move_between_outputs(
+    shown: Rectangle<i32, Logical>,
+    free: Rectangle<i32, Logical>,
+    old: Rectangle<i32, Logical>,
+    new: Rectangle<i32, Logical>,
+) -> (Rectangle<i32, Logical>, Rectangle<i32, Logical>) {
+    let moved = move_rect_between_rects(free, old, new);
+    let constrained = crate::output_constraints::keep_fully_visible(
+        rect_tuple(shown),
+        floating_workarea((old.loc.x, old.loc.y), old.size),
+        rect_tuple(moved),
+        floating_workarea((new.loc.x, new.loc.y), new.size),
+    )
+    .map_or(moved, |(x, y, _, _)| {
+        Rectangle::new((x, y).into(), moved.size)
+    });
+    (moved, constrained)
 }
 
 /// Mutter's `move_rect_between_rects` (window.c): a window that fits

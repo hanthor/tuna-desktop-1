@@ -589,6 +589,77 @@ fn a_new_grab_keeps_focus_when_the_old_popup_closed_in_the_same_tick() {
 }
 
 #[test]
+fn locking_dismisses_the_grab_and_unlock_never_returns_to_the_menu() {
+    // beta.3: Super+V then Super+L left the date menu's grab alive
+    // behind the lock, and the shell's toolkit grab kept the lock
+    // screen from hearing a key until Escape closed the hidden menu.
+    // GNOME's lock closes its own shell menu and its grab.
+    let mut f = shell_fixture();
+    let (popup_surface, popup) = open_popup(&mut f, true);
+    assert!(f.comp.state.popup_grab_active());
+    assert_eq!(
+        f.client.keyboard_entered.last().copied(),
+        Some(popup_surface.id().protocol_id())
+    );
+    let entered = f.client.keyboard_entered.len();
+    assert!(f.comp.state.dismiss_shell_popup_grab_for_lock());
+    // No lock surface up yet: the keyboard belongs to nobody.
+    f.manager.hold_lock_focus(&mut f.comp.state, None);
+    pump(&mut f, |c| c.popup_done);
+    assert!(!f.comp.state.popup_grab_active(), "the lock ended the grab");
+    // The menu closes as GTK closes it on popup_done; nothing behind
+    // the lock takes the keyboard back meanwhile.
+    popup.destroy();
+    popup_surface.destroy();
+    sync(&mut f);
+    sync(&mut f);
+    assert_eq!(
+        f.client.keyboard_entered.len(),
+        entered,
+        "the session got the keyboard back while locked"
+    );
+    f.manager.unlock_input(&mut f.comp.state);
+    sync(&mut f);
+    assert_eq!(
+        f.client.keyboard_entered.last().copied(),
+        Some(f.toplevel_surface.id().protocol_id()),
+        "unlock hands the keyboard to the window, not the dismissed menu"
+    );
+}
+
+#[test]
+fn an_app_popup_grab_outlives_the_lock_and_gets_the_keyboard_back() {
+    // S-LOCK-GRAB: GNOME 51 locks with a modal stage grab that revokes
+    // an application's Wayland popup grab without dismissing it. The
+    // lock holds the keyboard meanwhile; the popup has it again after.
+    let mut f = fixture();
+    let (popup_surface, _popup) = open_popup(&mut f, true);
+    let entered = f.client.keyboard_entered.len();
+    assert!(
+        !f.comp.state.dismiss_shell_popup_grab_for_lock(),
+        "an application's grab is not the shell's to dismiss"
+    );
+    f.manager.hold_lock_focus(&mut f.comp.state, None);
+    sync(&mut f);
+    sync(&mut f);
+    assert!(!f.client.popup_done, "the app's menu survives the lock");
+    assert!(f.comp.state.popup_grab_active(), "its grab survives too");
+    assert_eq!(
+        f.client.keyboard_entered.len(),
+        entered,
+        "the kept grab did not take the keyboard while locked"
+    );
+    f.manager.unlock_input(&mut f.comp.state);
+    sync(&mut f);
+    assert_eq!(
+        f.client.keyboard_entered.last().copied(),
+        Some(popup_surface.id().protocol_id()),
+        "unlock hands the keyboard back to the grabbing popup"
+    );
+    assert!(!f.client.popup_done);
+}
+
+#[test]
 fn popup_slides_back_onto_the_output() {
     use wayland_protocols::xdg::shell::client::xdg_positioner::ConstraintAdjustment;
     let mut f = fixture();

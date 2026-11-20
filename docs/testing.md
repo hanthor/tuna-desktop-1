@@ -48,10 +48,10 @@ base, and picks the proof lanes the change can affect:
   `test_notify_callback_contract.py`); a test only `check` runs selects none.
   `WorkflowSync.test_lane_run_tests_select_their_lane` fails when a lane job
   runs a test the selector does not map.
-- a packaged conffile (`share/pam.d/`, installed as `/etc/pam.d/tuna-lock`):
-  `journey`, whose disposable Debian lifecycle fails when its bytes drift
-  from the released package's, plus the core lanes and every package
-  consumer.
+- a packaged conffile (`share/pam.d/`, installed as `/etc/pam.d/tuna-lock`
+  and `/etc/pam.d/tuna-lock-fingerprint`): `journey`, whose disposable Debian
+  lifecycle fails when `tuna-lock`'s bytes drift from the released package's,
+  plus the core lanes and every package consumer.
 - anything else (crates, `share/`, other scripts): `gtk-shell` plus a
   round-robin slice of the other end-to-end lanes, rotated by run number.
   The slice size is the repository variable `CI_ROUND_ROBIN_SIZE`
@@ -60,7 +60,7 @@ base, and picks the proof lanes the change can affect:
 
 The step summary of `select-lanes` names the chosen lanes and why.
 Independent lanes start after selection, without waiting for workspace
-tests. GTK, grid comparison and fingerprint admission still require the
+tests. GTK and grid comparison admission still require the
 successful current-run `check`; the ledger also consumes its test list,
 and image publication waits for it. Package and screenshot consumers still
 wait for their producing proof jobs.
@@ -118,7 +118,7 @@ action invokes its paired installer through `GITHUB_ACTION_PATH` and hashes
 those actual workflow-owned files, not similarly named candidate files.
 Older PR heads need not contain the cache action or staged installer.
 The required `check` job tests the PR merge ref and exports its actual
-`tested_sha`; GTK authentication, fingerprint and grid comparison proofs
+`tested_sha`; GTK authentication and grid comparison proofs
 check out that exact revision. Admission separately validates the workflow
 event commit, checked output, clean checkout/tree and API triggering head,
 so a green job's `head_sha` is never mistaken for its tested merge tree.
@@ -138,10 +138,10 @@ Ubuntu keys include the native distro ID/version in addition to the
 pinned cache action's compiler, architecture, environment and dependency
 identity. `check` includes the standalone `third-party/reis` and
 `third-party/smithay` targets. Grid comparison has separate cached
-old/fixed targets under `target/ci-grid`, keyed to its reviewed old source;
-fingerprint uses `target/ci-fprint`. Setting `CARGO_TARGET_DIR` opts these
-two proof scripts into persistent build targets; without it, local runs
-keep isolated targets inside their fresh artifact directory. Receipts,
+old/fixed targets under `target/ci-grid`, keyed to its reviewed old source.
+Setting `CARGO_TARGET_DIR` opts its proof script into persistent build
+targets; without it, local runs keep isolated targets inside their fresh
+artifact directory. Receipts,
 admissions and verdicts are always freshly produced outside the cache.
 
 The Arch job shares an explicit Cargo home between cache restoration and
@@ -192,6 +192,14 @@ source/icon lifetime, and touch controls remain in the same test target.
 This matches Mutter 51's initial-focus path:
 [attaching the drag handler immediately invalidates focus](https://github.com/GNOME/mutter/blob/51.0/src/wayland/meta-wayland-input.c#L288-L325),
 and [drag focus sends the destination its offer while restricting source-less drags to the origin client](https://github.com/GNOME/mutter/blob/51.0/src/wayland/meta-wayland-data-device.c#L337-L397).
+
+The GTK proof's focused slices (`--*-only`) run one at a time. A new slice
+adds its usage line above `# end of --help` in the script's header (`--help`
+prints up to that line) and one case arm that calls `only_mode` with its flag
+and the traits it needs: `source-build` refuses `--installed-package`, and
+`no-media-source`, `no-examples` and `no-camera-policy` skip the full run's
+media-source receipt, example-client build and camera policy. No other
+slice's checks change.
 
 `scripts/tuna-gtk-shell-proof --window-leak-only --artifacts DIR` runs
 G-WINDOW-LEAK (#1088): after five warm-up windows, 100 libadwaita windows
@@ -523,6 +531,28 @@ start from an empty list. Remove it first:
 rm -rf gtk-shell-artifacts
 TUNA_REQUIRE_PAM_WRAPPER=1 scripts/tuna-gtk-shell-proof --artifacts gtk-shell-artifacts
 ```
+
+`--notify-lock-only` stops after panel readiness and runs just the
+lock-screen notification, notification sound and disabled-app restore
+gates (G-NOTIFY-LOCK, G-NOTIFY-LOCK-PIXELS, G-NOTIFY-LOCK-LIVE,
+G-NOTIFY-SOUND, G-NOTIFY-RESTORE); it needs pam_wrapper to unlock. The
+proof's `canberra-gtk-play` stand-in records every event sound the shell
+asks for in `canberra-calls`.
+The restore gate opens the real message-tray binding after retaining the
+long-word redaction-test notifications in history. Card text must wrap at
+character boundaries when needed, and collapsed groups must measure only
+their visible page horizontally, so hidden expanded content cannot force
+the date popup wider than the nested output.
+
+The full GTK proof's media callback barrier waits at most 25 seconds:
+one key can execute four serialized `wpctl` subprocesses with five-second
+production timeouts, plus callback dispatch. It still requires accepted
+tokens to finish successfully and the actual scheduler to be idle; a
+fixture volume write alone never proves completion.
+The power-save proof admits both dim and undim after live idle-brightness
+writes finish: only the explicit pending-transaction reply waits, for at
+most ten seconds. Other errors still fail immediately, and exact backlight
+readbacks remain required before blanking and fixture teardown.
 
 `scripts/tuna-drm-smoke` loads a kernel module and starts seatd as root.
 Run it in a VM or a disposable machine rather than your desktop session.
@@ -912,15 +942,24 @@ budget. The owner observation is null while locked.
 The compositor state (`TUNA_COMPOSITOR_STATE`) carries `frame_cost`, one
 entry per output describing its last drawn frame: `rendered` and `culled`
 element counts, `damage_rects` and `damage_area` against `output_area`,
+the box around the damage (`damage_bounds`, `[x, y, w, h]`),
 and the window ids the frame shows (`drawn_windows`) or wholly hides
 behind opaque surfaces (`culled_windows`). Both cover the whole output, so
 a frame that repaints only the panel or the cursor still lists the windows
 it leaves on screen as drawn. `throttled_windows` lists the windows
 whose frame callbacks run at the hidden rate (about 1 Hz): off the scene
-or wholly culled, unless the overview, the switcher or a cast shows them.
+or wholly culled, unless the overview, the switcher or a cast shows them;
+every window while locked. After 3 s hidden a window is suspended
+(`suspended_windows`, the xdg_toplevel `suspended` state) and a client
+told so gets no frame callbacks until it shows again.
 Proof `G-OCCLUSION-CULL` fullscreens an opaque window over another and
 requires the lower one to be culled and throttled, then drawn at full
 rate again once the upper window's translucent shadow returns.
+Proof `G-CLOCK-DAMAGE` (#1154) turns on clock-show-seconds and requires
+a frame whose damage lies inside the panel bar and covers under 2% of the
+output: the clock's rectangle. Before #1154 the nested output's buffer
+age read as 0 after every client commit, so each one repainted the whole
+output.
 
 ## Settings writes in proofs
 
