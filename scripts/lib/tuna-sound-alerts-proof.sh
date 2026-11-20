@@ -24,6 +24,17 @@ sound_alerts_feedback() {
     awk -v id="$1" '$2 == "--id" && $3 == id' "$ARTIFACTS/canberra-calls" | wc -l
 }
 
+# Wait up to $2 seconds for the feedback count to reach $1 (a loaded runner
+# delivers the debounced player spawn late), then let a duplicate show up.
+sound_alerts_wait_feedback() {
+    local i
+    for i in $(seq 1 $(($2 * 5))); do
+        [ "$(sound_alerts_feedback audio-volume-change)" -ge "$1" ] && break
+        sleep 0.2
+    done
+    sleep 1
+}
+
 # Wait for the compositor to hold the policy the shell just published.
 sound_alerts_policy() {
     cstate ".bell_policy.audible == $1 and .bell_policy.visual == $2 and .bell_policy.frame_flash == $3 and .bell_policy.event_sounds == $4" \
@@ -244,7 +255,7 @@ TROUGH
         drag_volume="$(cat "$VOLUME_FILE")"
         drag_sounds="$(sound_alerts_feedback audio-volume-change)"
         xdotool mouseup 1
-        sleep 1.5
+        sound_alerts_wait_feedback $((before + 1)) 8
     }
     feedback_set_sink() {
         echo "$1" >"$ARTIFACTS/sink-state"
@@ -264,7 +275,7 @@ TROUGH
     before="$(sound_alerts_feedback audio-volume-change)"
     scroll_volume="$(cat "$VOLUME_FILE")"
     xdotool mousemove --window "$WID" $(((trough_x0 + trough_x1) / 2)) "$trough_y" click 5
-    sleep 1.5
+    sound_alerts_wait_feedback $((before + 1)) 8
     [ "$(cat "$VOLUME_FILE")" != "$scroll_volume" ] || fail G-QS-VOLUME-FEEDBACK "the scroll did not move the volume"
     [ "$(sound_alerts_feedback audio-volume-change)" = $((before + 1)) ] ||
         fail G-QS-VOLUME-FEEDBACK "a scroll sounded $(($(sound_alerts_feedback audio-volume-change) - before)) times, not once"
