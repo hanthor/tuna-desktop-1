@@ -119,7 +119,22 @@ pub fn dialog_text(action: Action, seconds: u32) -> (String, String, String) {
 
 /// Whether this login screen's logind is its own.
 fn hardware() -> bool {
-    std::env::var("TUNA_SESSION_KIND").is_ok_and(|kind| kind == "hardware")
+    hardware_session(std::env::var_os("TUNA_SESSION_KIND").as_deref())
+}
+
+/// The compositor's `TUNA_SESSION_KIND` (`hardware` or `nested`, as the
+/// shell reads it): anything but `hardware` is nested.
+fn hardware_session(kind: Option<&std::ffi::OsStr>) -> bool {
+    kind.is_some_and(|kind| kind == "hardware")
+}
+
+/// Which of [`Action::ALL`] the menu offers, from logind's answers, and
+/// whether the power button shows at all: `systemActions.js` hides every
+/// action under `disable-restart-buttons`, and with none left the
+/// quick-settings button goes too.
+fn offered(can: [bool; 3], disabled: bool) -> ([bool; 3], bool) {
+    let shown = can.map(|can| can && !disabled);
+    (shown, shown.contains(&true))
 }
 
 /// The power button and its menu, and the dialog.
@@ -251,13 +266,9 @@ impl Power {
     }
 
     fn sync(&self) {
-        let can = *self.can.borrow();
-        let disabled = self.disabled.get();
-        let mut any = false;
-        for ((action, item), can) in self.items.iter().zip(can) {
-            let shown = can && !disabled;
+        let (shown, any) = offered(*self.can.borrow(), self.disabled.get());
+        for ((action, item), shown) in self.items.iter().zip(shown) {
             item.set_visible(shown);
-            any |= shown;
             crate::trace(&format!(
                 "greeter power {} available={shown}",
                 action.name()
@@ -498,5 +509,30 @@ mod tests {
             dialog_text(Action::PowerOff, 1).1,
             "The system will power off automatically in 1 second"
         );
+    }
+
+    #[test]
+    fn disable_restart_buttons_hides_every_action_and_the_button() {
+        let all = [true; 3];
+        assert_eq!(offered(all, false), (all, true));
+        assert_eq!(offered(all, true), ([false; 3], false));
+        // logind's own answers: only what it can do shows.
+        assert_eq!(
+            offered([false, true, false], false),
+            ([false, true, false], true)
+        );
+        // Nothing available (a nested login screen never asks logind).
+        assert_eq!(offered([false; 3], false), ([false; 3], false));
+        assert_eq!(offered([false; 3], true), ([false; 3], false));
+    }
+
+    #[test]
+    fn only_a_hardware_session_offers_power_actions() {
+        use std::ffi::OsStr;
+        assert!(hardware_session(Some(OsStr::new("hardware"))));
+        for kind in ["nested", "", "Hardware", "hardware "] {
+            assert!(!hardware_session(Some(OsStr::new(kind))), "{kind:?}");
+        }
+        assert!(!hardware_session(None));
     }
 }

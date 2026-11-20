@@ -40,6 +40,7 @@ const A11Y_INTERFACE_SCHEMA: &str = "org.gnome.desktop.a11y.interface";
 const KEYBOARD_SCHEMA: &str = "org.gnome.desktop.a11y.keyboard";
 const WM_SCHEMA: &str = "org.gnome.desktop.wm.preferences";
 const TEXT_SCALING_FACTOR: &str = "text-scaling-factor";
+const SCREEN_READER: &str = "screen-reader-enabled";
 /// accessibility.js `DPI_FACTOR_LARGE`.
 pub const DPI_FACTOR_LARGE: f64 = 1.25;
 /// loginDialog.js `N_A11Y_MENU_COLUMNS`.
@@ -79,7 +80,7 @@ pub const TOGGLES: [Toggle; 10] = [
         title: "Screen Reader",
         icon: "accessibility-screen-reader-symbolic",
         schema: APPLICATIONS_SCHEMA,
-        key: "screen-reader-enabled",
+        key: SCREEN_READER,
     },
     Toggle {
         title: "Screen Keyboard",
@@ -215,10 +216,8 @@ fn toggle_button(toggle: &Toggle) -> gtk::ToggleButton {
 pub fn follow(window: &gtk::Window, control: &Rc<Control>, keyboard: &Rc<PromptKeyboard>) {
     if let Some(apps) = settings(APPLICATIONS_SCHEMA) {
         let reader = |apps: &gio::Settings, control: &Control| {
-            if has_key(apps, "screen-reader-enabled") {
-                let on = apps.boolean("screen-reader-enabled");
-                crate::trace(&format!("greeter a11y screen-reader={on}"));
-                control.set_screen_reader(on);
+            if has_key(apps, SCREEN_READER) {
+                screen_reader(apps.boolean(SCREEN_READER), control);
             }
         };
         let osk = |apps: &gio::Settings, keyboard: &Rc<PromptKeyboard>| {
@@ -233,7 +232,7 @@ pub fn follow(window: &gtk::Window, control: &Rc<Control>, keyboard: &Rc<PromptK
         let control = control.clone();
         let keyboard = keyboard.clone();
         apps.connect_changed(None, move |apps, key| match key {
-            "screen-reader-enabled" => reader(apps, &control),
+            SCREEN_READER => reader(apps, &control),
             "screen-keyboard-enabled" => osk(apps, &keyboard),
             _ => {}
         });
@@ -272,6 +271,14 @@ pub fn follow(window: &gtk::Window, control: &Rc<Control>, keyboard: &Rc<PromptK
     tuna_magnifier::gsettings::start_sync("tuna-greeter");
 }
 
+/// `screen-reader-enabled` changed: the compositor's trusted Orca runs
+/// for the login screen while it is on (GNOME's login screen starts Orca
+/// from the same key).
+fn screen_reader(on: bool, control: &Control) {
+    crate::trace(&format!("greeter a11y screen-reader={on}"));
+    control.set_screen_reader(on);
+}
+
 /// GTK's `gtk-xft-dpi` for a text scaling factor (Mutter scales the
 /// login screen's fonts from 96 dpi by the same factor).
 pub fn xft_dpi(factor: f64) -> i32 {
@@ -294,6 +301,7 @@ fn keep(settings: gio::Settings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tuna_shell_control::{CommandKind, Message};
 
     #[test]
     fn the_menu_has_gnomes_toggles_in_gnomes_order() {
@@ -321,5 +329,29 @@ mod tests {
         assert_eq!(xft_dpi(DPI_FACTOR_LARGE), 122_880);
         assert_eq!(xft_dpi(f64::NAN), 98_304);
         assert_eq!(xft_dpi(0.0), 98_304);
+    }
+
+    #[test]
+    fn the_screen_reader_toggle_starts_and_stops_the_compositors_orca() {
+        let toggle = TOGGLES.iter().find(|t| t.title == "Screen Reader").unwrap();
+        assert_eq!(
+            (toggle.schema, toggle.key),
+            (APPLICATIONS_SCHEMA, SCREEN_READER)
+        );
+        let (control, mut compositor) = crate::control::testing::pair();
+        assert!(matches!(
+            crate::control::testing::read_message(&mut compositor),
+            Message::Hello { .. }
+        ));
+        for (id, on) in [(1, true), (2, false)] {
+            screen_reader(on, &control);
+            assert_eq!(
+                crate::control::testing::read_message(&mut compositor),
+                Message::Command {
+                    id,
+                    kind: CommandKind::SetScreenReader { enabled: on },
+                }
+            );
+        }
     }
 }
