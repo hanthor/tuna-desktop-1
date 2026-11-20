@@ -55,6 +55,11 @@ tested on virtual KMS in CI; physical GPU qualification is still open.
   curl -fsSL https://raw.githubusercontent.com/tuna-os/tuna-desktop/main/scripts/try-tuna-desktop | bash
   ```
 
+  It verifies the image signature before downloading and refuses an
+  unsigned build; the current `marlin:tuna` build is unsigned, so until a
+  signed one publishes use one of the routes below
+  ([details](docs/install.md#test-drive-in-a-vm-one-command)).
+
 - **Installed**: [docs/install.md](docs/install.md) covers the TunaOS image,
   the Debian-format package, building from source and logging in through
   GDM.
