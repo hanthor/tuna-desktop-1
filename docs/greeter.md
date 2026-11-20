@@ -336,15 +336,23 @@ AT-SPI, the mock's call log, Orca's speech (speech-dispatcher's generic
 module writing `spoken.log`, as `scripts/tuna-orca-speech-proof`) and the
 compositor's state; `A-1-user-list.png`, `C-1-prompt.png` and
 `F-0-chrome.png` are the review shots against GNOME 51's login dialog.
+Last, `G-GREETER-I18N` starts a second login screen in `de_DE.UTF-8`
+(built with `localedef` into a private `LOCPATH`, as the runners generate
+only `C.UTF-8`, which ignores catalogs) with a fixture German
+`gnome-shell.mo` that `msgfmt` compiles into the greeter's data dir, and
+reads the translated "Not listed?" and "Accessibility" back through AT-SPI
+(`G-1-i18n.png`).
 Gates: `G-GREETER-READY`, `-USER-LIST`, `-NO-SHELL`, `-SERVICES`, `-LOGO`,
 `-INPUT-SOURCE`, `-A11Y-MENU`, `-LARGE-TEXT`, `-OSK`, `-POWER`,
 `-NOT-LISTED`, `-GIVE-UP`, `-SESSION`, `-WRONG-PASSWORD`, `-PASSWORD`,
-`-START`, `-SUPERVISION`, `-HYGIENE`. `G-GREETER-ORCA` needs Orca 50 or
+`-START`, `-SUPERVISION`, `-I18N`, `-HYGIENE`. `G-GREETER-ORCA` needs Orca 50 or
 later: the compositor starts Orca without `DISPLAY`, where Ubuntu 24.04's
 Orca 46 dies. The default run skips it and says so;
 `scripts/tuna-greeter-proof --orca-only` (`G-GREETER-READY`, then
 `G-GREETER-ORCA`) runs in the orca-speech CI job on its Orca 50, and the
-parity ledger reads both jobs' assertions. Nested only: no real GDM, PAM,
+parity ledger reads both jobs' assertions. `scripts/ci-select-lanes`
+selects both jobs for the proof, its fixtures, `crates/greeter` and the
+compositor's `login_services.rs`. Nested only: no real GDM, PAM,
 gnome-session or DRM.
 
 ## Security model
@@ -395,10 +403,10 @@ gnome-session or DRM.
 | `disable-user-list` | yes | read at startup | — |
 | Wiggle, fades | yes | no | — |
 | Fingerprint (re-auth only in 51), smartcard, switchable auth, ChoiceList, CustomJSON web login | yes | no | #1164 |
-| Accessibility menu (bottom right, GNOME's ten toggles in order) and their effects: Orca, OSK, Zoom, Large Text, High Contrast, Visual Alerts, keyboard aids | yes | yes | G-GREETER-A11Y-MENU, G-GREETER-ORCA, G-GREETER-OSK, G-GREETER-LARGE-TEXT; cargo: `a11y::tests::*` |
-| Input sources before login (indicator, switching) | yes (localed) | yes (greeter user's sources, else localed's) | G-GREETER-INPUT-SOURCE; cargo: `input::tests::*` |
-| Quick settings: battery, network, Suspend/Restart…/Power Off…, end-session dialog | yes | yes (hardware only; primary connection only; no volume) | G-GREETER-POWER; cargo: `power::tests::*`, `quick::tests::*` |
-| Only the `gdm` mode's services | yes | yes | G-GREETER-SERVICES; cargo: `login_services::tests::*` |
+| Accessibility menu (bottom right, GNOME's ten toggles in order) and their effects: Orca, OSK, Zoom, Large Text, High Contrast, Visual Alerts, keyboard aids | yes | yes | G-GREETER-A11Y-MENU, G-GREETER-ORCA, G-GREETER-OSK, G-GREETER-LARGE-TEXT; cargo: `a11y::tests::*` (Screen Reader → `SetScreenReader`), `control::tests::*` (the control socket's frames and dial errors), `chrome::tests::*` (the prompt keyboard's focus and layout) |
+| Input sources before login (indicator, switching) | yes (localed) | yes (greeter user's sources, else localed's) | G-GREETER-INPUT-SOURCE; cargo: `input::tests::*`, `the_keyboard_follows_the_current_input_source` |
+| Quick settings: battery, network, Suspend/Restart…/Power Off…, end-session dialog | yes | yes (hardware only; primary connection only; no volume) | G-GREETER-POWER; cargo: `power::tests::*` (`disable-restart-buttons`, `TUNA_SESSION_KIND`), `quick::tests::*` |
+| Only the `gdm` mode's services | yes | yes | G-GREETER-SERVICES (every served and refused name); cargo: `login_services::tests::*` |
 | Timed/auto login, conflicting session dialog, realmd hint | yes | no | — |
-| Translations (gnome-shell's catalogs and msgids) | yes | yes | cargo: `i18n::tests::*` (no translated proof run: the CI hosts have no `gnome-shell.mo`) |
+| Translations (gnome-shell's catalogs and msgids) | yes | yes | G-GREETER-I18N (fixture catalog, `de_DE.UTF-8`); cargo: `i18n::tests::*` |
 | Greeter on every variant, `org.gnome.Shell@gdm.service` gone | — | no packaging yet | V-GREETER-LIST, V-GDM-LOGIN, V-GDM-FALLBACK |

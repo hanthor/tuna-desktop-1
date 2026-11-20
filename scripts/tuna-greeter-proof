@@ -58,8 +58,10 @@
 # calls, localed (us,de), UPower (a 57 % battery) and NetworkManager (wired);
 # GDM 51.1.1's org.gnome.login-screen schema (scripts/lib) is installed for
 # the greeter, which runs with TUNA_SESSION_KIND=hardware against that bus:
-#   G-GREETER-SERVICES   the compositor owns only the gdm mode's session-bus
-#                        names (no ScreenCast, RemoteDesktop, InputCapture,
+#   G-GREETER-SERVICES   the compositor owns exactly the gdm mode's session-bus
+#                        names (DisplayConfig, IdleMonitor, a11y.Manager,
+#                        ServiceChannel, ColorManager, Introspect, Screenshot;
+#                        no ScreenCast, RemoteDesktop, InputCapture,
 #                        SettingsDaemon.Color, SessionManager, IBus bridge)
 #   G-GREETER-LOGO       banner text, banner file and logo follow
 #                        org.gnome.login-screen live (F-0-chrome.png)
@@ -83,6 +85,10 @@
 #                        Suspend and the end-session dialog's Power Off
 #                        reach logind, Cancel does not; disable-restart-
 #                        buttons hides all three live
+#   G-GREETER-I18N       a second login screen in de_DE.UTF-8 (localedef into
+#                        a private LOCPATH) shows gnome-shell's msgids in the
+#                        German of a fixture catalog that msgfmt compiled into
+#                        the greeter's data dir (G-1-i18n.png)
 # Screenshots (x11grab of the nested window) and AT-SPI dumps for each step;
 # A-1-user-list.png, C-1-prompt.png and F-0-chrome.png are the review shots
 # against GNOME 51's login dialog. Writes assertions.txt and receipt.json;
@@ -104,7 +110,7 @@ while [ $# -gt 0 ]; do
         --display) DISPLAY_ARG="$2"; shift 2 ;;
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
         --orca-only) ORCA_ONLY=1; shift ;;
-        --help|-h) sed -n '2,89p' "$0"; exit 0 ;;
+        --help|-h) sed -n '2,95p' "$0"; exit 0 ;;
         *) echo "tuna-greeter-proof: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -285,7 +291,8 @@ receipt = {
     'compositor_exit_status': int(status) if status.isdigit() else None,
     'review_screenshots': [] if orca_only else [
         'A-1-user-list.png', 'C-1-prompt.png', 'C-2-wrong-password.png', 'F-0-chrome.png',
-        'F-1-quick-settings.png', 'F-2-a11y-menu.png', 'F-3-end-session.png', 'F-4-osk.png'],
+        'F-1-quick-settings.png', 'F-2-a11y-menu.png', 'F-3-end-session.png', 'F-4-osk.png',
+        'G-1-i18n.png'],
     'cleanup': {'swept_pids': swept,
                 'leftover_pids': (out / 'leftover-pids.txt').read_text().split()},
     'scope': 'nested winit session on Xvfb; GDM 51 greeter API and AccountsService as a D-Bus '
@@ -427,7 +434,7 @@ type_password() {
 if [ "$ORCA_ONLY" = 1 ]; then
     tools="orca speech-dispatcher"
 else
-    tools="ffmpeg"
+    tools="ffmpeg msgfmt localedef"
 fi
 for tool in Xvfb xdotool jq gdbus dbus-daemon pgrep sha256sum gsettings $tools; do
     command -v "$tool" >/dev/null 2>&1 || fail SETUP "$tool is required"
@@ -606,19 +613,27 @@ for _ in $(seq 1 50); do [ -S "$RUN_PRIV/notify" ] && break; sleep 0.1; done
     sha256sum "$BIN_DIR/tuna-compositor" "$BIN_DIR/tuna-greeter"
 } >"$ARTIFACTS/manifest.txt"
 
-env DBUS_SYSTEM_BUS_ADDRESS="$SYS_ADDR" NOTIFY_SOCKET="$RUN_PRIV/notify" \
-    TUNA_GREETER_BIN="$BIN_DIR/tuna-greeter" TUNA_GREETER_TRACE=1 RUST_BACKTRACE=1 \
-    "$BIN_DIR/tuna-compositor" --backend winit --socket "tuna-greeter-$$" --greeter --screen-reader \
-    >>"$LOG" 2>&1 &
-COMPOSITOR_PID=$!
-for _ in $(seq 1 90); do
-    alive || fail SETUP "the compositor exited during startup"
-    WID="$(xdotool search --name Smithay 2>/dev/null | head -1 || true)"
-    [ -n "$WID" ] && break
-    sleep 1
-done
-[ -n "$WID" ] || fail SETUP "no nested window"
-xdotool windowfocus --sync "$WID"
+# The nested login screen: `start_login_screen SOCKET [VAR=VALUE...]`, the
+# extra environment for the compositor and so the greeter it supervises.
+start_login_screen() {
+    socket="$1"
+    shift
+    env DBUS_SYSTEM_BUS_ADDRESS="$SYS_ADDR" TUNA_GREETER_BIN="$BIN_DIR/tuna-greeter" \
+        TUNA_GREETER_TRACE=1 RUST_BACKTRACE=1 "$@" \
+        "$BIN_DIR/tuna-compositor" --backend winit --socket "$socket" --greeter --screen-reader \
+        >>"$LOG" 2>&1 &
+    COMPOSITOR_PID=$!
+    WID=""
+    for _ in $(seq 1 90); do
+        alive || fail "$CURRENT_GATE" "the compositor exited during startup"
+        WID="$(xdotool search --name Smithay 2>/dev/null | head -1 || true)"
+        [ -n "$WID" ] && break
+        sleep 1
+    done
+    [ -n "$WID" ] || fail "$CURRENT_GATE" "no nested window"
+    xdotool windowfocus --sync "$WID"
+}
+start_login_screen "tuna-greeter-$$" NOTIFY_SOCKET="$RUN_PRIV/notify"
 
 # --- helpers of the chrome gates (F) and G-GREETER-ORCA -------------------
 gs() { gsettings "$@" 2>>"$ARTIFACTS/gsettings.err"; }
@@ -747,10 +762,15 @@ CURRENT_GATE=G-GREETER-SERVICES
 gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
     --method org.freedesktop.DBus.ListNames >"$ARTIFACTS/session-bus-names.txt" ||
     fail G-GREETER-SERVICES "the session bus did not list its names"
-for name in org.gnome.Mutter.DisplayConfig org.gnome.Mutter.IdleMonitor org.gnome.Shell.Introspect \
+# login_services.rs's gdm-mode table: what runs is owned and never
+# reported refused; the rest is neither owned nor running, each refusal said.
+for name in org.gnome.Mutter.DisplayConfig org.gnome.Mutter.IdleMonitor org.freedesktop.a11y.Manager \
+    org.gnome.Mutter.ServiceChannel org.gnome.Mutter.ColorManager org.gnome.Shell.Introspect \
     org.gnome.Shell.Screenshot; do
     grep -qF "'$name'" "$ARTIFACTS/session-bus-names.txt" ||
         fail G-GREETER-SERVICES "$name is not served at the login screen"
+    ! grep -qF "tuna-compositor: greeter: not serving $name (" "$LOG" ||
+        fail G-GREETER-SERVICES "the compositor says it refuses $name, which the gdm mode runs"
 done
 for name in org.gnome.Mutter.ScreenCast org.gnome.Mutter.RemoteDesktop org.gnome.Mutter.InputCapture \
     org.gnome.SettingsDaemon.Color org.gnome.SessionManager; do
@@ -763,7 +783,7 @@ pgrep -P "$COMPOSITOR_PID" -f tuna-ibus-bridge >/dev/null &&
     fail G-GREETER-SERVICES "tuna-ibus-bridge runs at the login screen"
 grep -qF "tuna-compositor: greeter: not serving tuna-ibus-bridge (" "$LOG" ||
     fail G-GREETER-SERVICES "the compositor did not say it starts no IBus bridge"
-pass G-GREETER-SERVICES "DisplayConfig, IdleMonitor, Introspect and Screenshot are owned; ScreenCast, RemoteDesktop, InputCapture, SettingsDaemon.Color and SessionManager are not, each refusal logged; no tuna-ibus-bridge"
+pass G-GREETER-SERVICES "DisplayConfig, IdleMonitor, a11y.Manager, ServiceChannel, ColorManager, Introspect and Screenshot are owned; ScreenCast, RemoteDesktop, InputCapture, SettingsDaemon.Color and SessionManager are not, each refusal logged; no tuna-ibus-bridge"
 
 CURRENT_GATE=G-GREETER-LOGO
 twait 0 "greeter logo path=" 5 >/dev/null || fail G-GREETER-LOGO "the greeter did not read the logo key"
@@ -1213,6 +1233,57 @@ COMPOSITOR_PID=""
 grep -qF "tuna-compositor: greeter restart budget exhausted; ending the login screen" "$LOG" ||
     fail G-GREETER-SUPERVISION "the compositor did not say the greeter's budget ran out"
 pass G-GREETER-SUPERVISION "a killed greeter came back as pid $restarted (was $first) with a new GDM channel and the user list; after $kills kills the budget ran out and the compositor exited $COMPOSITOR_STATUS"
+
+# --- G: the login screen in the system's language -----------------------
+CURRENT_GATE=G-GREETER-I18N
+# GDM starts the greeter in the system's locale (LANG); its words are
+# gnome-shell's msgids from the gnome-shell catalog of the first data dir
+# that has one (i18n.rs), here the greeter's own fixture dir as GDM's
+# /usr/share/gdm/greeter. The runners generate C.UTF-8 only, which ignores
+# catalogs, so de_DE.UTF-8 is built into a private LOCPATH.
+mkdir -p "$FIXTURE/share/locale/de/LC_MESSAGES" "$FIXTURE/locales"
+cat >"$FIXTURE/gnome-shell-de.po" <<'PO'
+msgid ""
+msgstr ""
+"Language: de\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "Not listed?"
+msgstr "Nicht aufgeführt?"
+
+msgid "Accessibility"
+msgstr "Barrierefreiheit"
+PO
+msgfmt --check -o "$FIXTURE/share/locale/de/LC_MESSAGES/gnome-shell.mo" "$FIXTURE/gnome-shell-de.po" ||
+    fail G-GREETER-I18N "msgfmt did not compile the fixture catalog"
+localedef -i de_DE -f UTF-8 "$FIXTURE/locales/de_DE.UTF-8" >"$ARTIFACTS/localedef.log" 2>&1 ||
+    [ -s "$FIXTURE/locales/de_DE.UTF-8/LC_MESSAGES/SYS_LC_MESSAGES" ] ||
+    fail G-GREETER-I18N "localedef could not build de_DE.UTF-8"
+rm -f "$CSTATE"
+m="$(mark)"; g="$(gmark)"
+start_login_screen "tuna-greeter-i18n-$$" LOCPATH="$FIXTURE/locales" LANG=de_DE.UTF-8
+cstate '.layers | any(.namespace == "tuna-greeter")' 120 || fail G-GREETER-I18N "the German login screen's layer never mapped"
+await_greeter "" 20 || fail G-GREETER-I18N "no tuna-greeter child of the German login screen's compositor"
+gwait "$g" "$(call RegisterDisplay)" 20 || fail G-GREETER-I18N "the German greeter did not register with GDM"
+twait "$m" "greeter users names=ada,grace,katherine" 20 >/dev/null ||
+    fail G-GREETER-I18N "the German greeter did not list its users"
+tr '\0' '\n' <"/proc/$GREETER_PID/environ" | grep -qx 'LANG=de_DE.UTF-8' ||
+    fail G-GREETER-I18N "the greeter does not run in de_DE.UTF-8"
+sleep 1.5
+dump G-1-i18n
+shot G-1-i18n
+for name in "Nicht aufgeführt?" "Barrierefreiheit" "Ada Lovelace"; do
+    showing G-1-i18n "$name" || fail G-GREETER-I18N "'$name' is not showing"
+done
+for name in "Not listed?" "Accessibility"; do
+    hidden G-1-i18n "$name" || fail G-GREETER-I18N "the English '$name' still shows"
+done
+stop_pid "$COMPOSITOR_PID"
+COMPOSITOR_PID=""
+pass G-GREETER-I18N "in de_DE.UTF-8 the greeter showed 'Nicht aufgeführt?' and 'Barrierefreiheit' from the msgfmt-compiled fixture gnome-shell catalog instead of 'Not listed?' and 'Accessibility' (G-1-i18n.png)"
 
 # --- Z: hygiene ---------------------------------------------------------
 CURRENT_GATE=G-GREETER-HYGIENE
