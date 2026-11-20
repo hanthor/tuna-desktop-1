@@ -56,6 +56,7 @@ class Selection(unittest.TestCase):
         self.assertEqual(pr("docs/walkthrough.tsv"), ["gtk-shell"])
         self.assertEqual(pr("packaging/marlin/vm-lane/Containerfile"),
                          ["arch-package", "marlin-image", "marlin-vm"])
+        self.assertEqual(pr("scripts/lib/vm_unlock_wake.py"), ["arch-package", "marlin-vm"])
         self.assertEqual(pr("docs/parity-ledger.md"),
                          ["journey", "drm-smoke", "gtk-shell", "orca-speech",
                           "arch-package", "marlin-vm", "parity-ledger"])
