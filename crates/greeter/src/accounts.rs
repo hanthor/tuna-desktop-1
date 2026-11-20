@@ -109,6 +109,13 @@ pub async fn load(system: &gio::DBusConnection) -> Result<Vec<User>, glib::Error
     Ok(users)
 }
 
+/// The AccountsService signals that change who the list shows
+/// (libaccountsservice's `user-added`/`user-removed`, which gnome-shell's
+/// `UserList` follows).
+pub fn changes_the_list(signal_name: &str) -> bool {
+    matches!(signal_name, "UserAdded" | "UserDeleted")
+}
+
 /// Call `changed` whenever AccountsService adds or removes a user.
 pub fn watch(
     system: &gio::DBusConnection,
@@ -122,7 +129,7 @@ pub fn watch(
         None,
         gio::DBusSignalFlags::NONE,
         move |signal| {
-            if matches!(signal.signal_name, "UserAdded" | "UserDeleted") {
+            if changes_the_list(signal.signal_name) {
                 changed();
             }
         },
@@ -189,5 +196,38 @@ mod tests {
         assert_eq!(user.name, "");
         assert!(!user.system_account);
         assert!(!user.listed());
+    }
+
+    #[test]
+    fn a_readable_avatar_file_is_the_users_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("ada.png");
+        std::fs::write(&file, b"png").unwrap();
+        let path = file.to_str().unwrap().to_owned();
+        let user = User {
+            name: "ada".into(),
+            icon_file: path.clone(),
+            ..User::default()
+        };
+        assert_eq!(user.icon(), Some(path.as_str()));
+        let directory = User {
+            icon_file: dir.path().to_str().unwrap().to_owned(),
+            ..user.clone()
+        };
+        assert_eq!(directory.icon(), None, "a directory is no avatar");
+        let unset = User {
+            icon_file: String::new(),
+            ..user
+        };
+        assert_eq!(unset.icon(), None, "no IconFile is the default icon");
+    }
+
+    #[test]
+    fn only_added_and_deleted_users_change_the_list() {
+        assert!(changes_the_list("UserAdded"));
+        assert!(changes_the_list("UserDeleted"));
+        for other in ["UserChanged", "Changed", "PropertiesChanged", ""] {
+            assert!(!changes_the_list(other), "{other}");
+        }
     }
 }

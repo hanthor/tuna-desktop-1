@@ -95,8 +95,9 @@ OWNED = [
     ("scripts/tuna-slow-portal-proof", ["gtk-shell"]),
     ("scripts/tuna-session-restore-proof", ["gtk-shell"]),
     # The login screen (#1164): tuna-compositor --greeter and tuna-greeter
-    # against a GDM 51 and AccountsService mock; orca-speech runs its
-    # G-GREETER-ORCA (--orca-only) on Orca 50.
+    # against a GDM 51 and AccountsService mock, with GDM's own
+    # org.gnome.login-screen schema; orca-speech runs its G-GREETER-ORCA
+    # (--orca-only) on Orca 50.
     ("scripts/tuna-greeter-proof", ["gtk-shell", "orca-speech"]),
     ("scripts/lib/tuna-gdm-mock.py", ["gtk-shell", "orca-speech"]),
     ("scripts/lib/org.gnome.login-screen.gschema.xml", ["gtk-shell", "orca-speech"]),

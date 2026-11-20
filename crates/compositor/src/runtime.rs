@@ -536,6 +536,36 @@ pub fn resolve_greeter_bin_in(
     resolve_bin_in(&[GREETER_BINARY], configured, env_bin, exe_dir, path_var)
 }
 
+/// Whether idle, suspend and logind's `Lock` lock the session. The login
+/// screen never locks: GDM 51's greeter profile sets
+/// `org.gnome.desktop.lockdown disable-lock-screen`
+/// (`data/dconf/defaults/00-upstream-settings`), so GNOME Shell's
+/// `screenShield.lock` refuses there, and the greeter has no lock surface
+/// to show.
+pub fn session_locks(greeter: bool) -> bool {
+    !greeter
+}
+
+/// Whether the session has the overview and workspaces: GNOME Shell's
+/// `gdm` mode has neither (`hasOverview`, `hasWorkspaces` false), so the
+/// login screen takes no Super, hot corner or shell swipe.
+pub fn session_has_overview(greeter: bool) -> bool {
+    !greeter
+}
+
+/// Whether the overview opens at start (`--startup-overview`, as GNOME
+/// greets a login): never on the login screen.
+pub fn startup_overview(requested: bool, greeter: bool) -> bool {
+    requested && session_has_overview(greeter)
+}
+
+/// Whether to send `READY=1` for `tuna-greeter.service` now: in greeter
+/// mode, once, when the greeter's layer first maps (a restarted greeter
+/// sends nothing more).
+pub fn greeter_ready_due(greeter: bool, layer_mapped: bool, sent: bool) -> bool {
+    greeter && layer_mapped && !sent
+}
+
 /// The first of `names` the inputs find, in [`resolve_shell_bin`]'s
 /// order; the last name, bare, when none is installed.
 fn resolve_bin_in(
@@ -684,6 +714,41 @@ mod shell_bin_tests {
         assert_eq!(
             resolve(Some("/x/greeter")),
             std::path::PathBuf::from("/x/greeter")
+        );
+    }
+
+    #[test]
+    fn the_login_screen_never_locks_and_has_no_overview() {
+        // A user session locks on idle, suspend and logind's Lock, and
+        // has the overview (Super, hot corner, swipes, startup overview).
+        assert!(session_locks(false));
+        assert!(session_has_overview(false));
+        assert!(startup_overview(true, false));
+        assert!(!startup_overview(false, false));
+        // GNOME Shell's gdm mode under GDM's greeter profile: none of it.
+        assert!(!session_locks(true));
+        assert!(!session_has_overview(true));
+        assert!(
+            !startup_overview(true, true),
+            "--startup-overview is ignored with --greeter"
+        );
+    }
+
+    #[test]
+    fn ready_is_sent_once_when_the_greeter_first_maps() {
+        assert!(!greeter_ready_due(true, false, false), "nothing mapped yet");
+        assert!(greeter_ready_due(true, true, false));
+        assert!(
+            !greeter_ready_due(true, true, true),
+            "a restarted greeter's map sends nothing more"
+        );
+        assert!(
+            !greeter_ready_due(true, false, true),
+            "between greeter restarts"
+        );
+        assert!(
+            !greeter_ready_due(false, true, false),
+            "a user session is no notify unit"
         );
     }
 }
@@ -1814,7 +1879,7 @@ impl Runtime {
             }
         }
         // GNOME Shell greets a login with the overview.
-        if session.startup_overview && !session.greeter {
+        if startup_overview(session.startup_overview, session.greeter) {
             runtime.control.set_overview(true);
         }
         Ok((runtime, event_loop))
@@ -2007,9 +2072,9 @@ impl Runtime {
     /// snapshots), overview dismissed, and the exclusive lock surface
     /// up with an empty list — no window titles while locked.
     fn engage_lock(&mut self) {
-        // GNOME Shell's `gdm` session mode has no screen shield: idle,
-        // suspend and logind's Lock leave the login screen as it is.
-        if self.greeter {
+        // The login screen never locks ([`session_locks`]): idle, suspend
+        // and logind's Lock leave it as it is.
+        if !session_locks(self.greeter) {
             self.lock.unlock(self.lock_now_ms());
             return;
         }
@@ -2521,7 +2586,7 @@ impl Runtime {
         // Swipes of three or more fingers are the shell's (GNOME 51):
         // consumed here. Other swipes reach the client.
         // The login screen has no workspaces or overview to swipe to.
-        if !self.greeter && self.shell_swipe_input(&input) {
+        if session_has_overview(self.greeter) && self.shell_swipe_input(&input) {
             self.publish_workspace_progress();
             return;
         }
@@ -2573,7 +2638,7 @@ impl Runtime {
             let popup = crate::layer::exclusive_popup_keyboard_layer(&self.state).is_some();
             // The login screen has no overview (`gdm` mode's hasOverview
             // is false): Super and the hot corner do nothing.
-            let action = if inhibited || popup || self.greeter {
+            let action = if inhibited || popup || !session_has_overview(self.greeter) {
                 self.triggers.cancel();
                 TriggerAction::None
             } else {
@@ -6401,7 +6466,7 @@ impl Runtime {
                 .and_then(|name| self.state.lock_surface_for(&name))
                 .is_some();
         let shell_ready = !crate::layer::layer_layout(&self.state).is_empty();
-        if self.greeter && shell_ready && !self.greeter_ready_sent {
+        if greeter_ready_due(self.greeter, shell_ready, self.greeter_ready_sent) {
             // The login screen is up: `tuna-greeter.service` is ready.
             self.greeter_ready_sent = true;
             crate::session_services::notify_ready();

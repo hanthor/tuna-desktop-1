@@ -28,6 +28,11 @@ pub fn banner_text(enabled: bool, source: &str, text: &str, file: Option<&str>) 
     Some(text.to_owned()).filter(|t| !t.is_empty())
 }
 
+/// The logo for the `logo` key: none when the key is empty.
+pub fn logo_path(key: &str) -> Option<String> {
+    Some(key.to_owned()).filter(|path| !path.is_empty())
+}
+
 pub struct Branding {
     pub banner: gtk::Label,
     pub logo: gtk::Picture,
@@ -133,8 +138,7 @@ impl Branding {
         let path = self
             .settings
             .as_ref()
-            .map(|s| s.string("logo").to_string())
-            .filter(|p| !p.is_empty());
+            .and_then(|s| logo_path(&s.string("logo")));
         crate::trace(&format!(
             "greeter logo path={}",
             path.as_deref().unwrap_or("")
@@ -169,5 +173,14 @@ mod tests {
             Some("From file".to_owned())
         );
         assert_eq!(banner_text(true, "file", "Hi", None), None);
+    }
+
+    #[test]
+    fn the_logo_shows_only_when_named() {
+        assert_eq!(logo_path(""), None);
+        assert_eq!(
+            logo_path("/usr/share/pixmaps/logo.png").as_deref(),
+            Some("/usr/share/pixmaps/logo.png")
+        );
     }
 }

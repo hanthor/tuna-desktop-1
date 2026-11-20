@@ -202,8 +202,10 @@ logind) → fade out → `StartSessionWhenReady(service, true)`.
   supervised client is `tuna-greeter` (`TUNA_GREETER_BIN`, sibling, `PATH`)
   with the shell's restart budget; when the budget runs out the compositor
   exits non-zero so GDM's own greeter recovery restarts the login screen.
-  No lock (idle, suspend and logind `Lock` are ignored, as the `gdm` mode has
-  no shield), no overview or hot corner, no shell swipes, no startup
+  No lock (idle, suspend and logind `Lock` are ignored: GDM's greeter dconf
+  profile sets `org.gnome.desktop.lockdown disable-lock-screen`, so GNOME
+  Shell's shield never locks the login screen), no overview or hot corner
+  (`gdm` mode's `hasOverview`), no shell swipes, no startup
   overview, no user-settings upgrade. On DRM it imports `WAYLAND_DISPLAY` to
   systemd and D-Bus activation but starts no `tuna-session.target`, holds
   no leader FIFO and does not register with GDM: gnome-session leads, and
@@ -330,24 +332,29 @@ localed (`us,de`), UPower (a 57 % battery) and NetworkManager (wired) are
 `scripts/lib/tuna-gdm-mock.py` on a private system bus, serving the API
 above with GDM 51.1.1's signal order and failure text. GDM 51.1.1's own
 `org.gnome.login-screen` schema (`scripts/lib`, unmodified) is installed
-for the greeter and its keys are set with `gsettings`. Users are chosen and
-passwords typed with real X11 keys, and the result is read back through
-AT-SPI, the mock's call log, Orca's speech (speech-dispatcher's generic
-module writing `spoken.log`, as `scripts/tuna-orca-speech-proof`) and the
-compositor's state; `A-1-user-list.png`, `C-1-prompt.png` and
-`F-0-chrome.png` are the review shots against GNOME 51's login dialog.
-Last, `G-GREETER-I18N` starts a second login screen in `de_DE.UTF-8`
+for the greeter, its keys are set with `gsettings` on the keyfile backend,
+and the login screen runs as on hardware (`TUNA_SESSION_KIND=hardware`,
+the mock's logind). Users are chosen and passwords typed with real X11
+keys, and the result is read back through AT-SPI, the mock's call log,
+Orca's speech (speech-dispatcher's generic module writing `spoken.log`, as
+`scripts/tuna-orca-speech-proof`) and the compositor's state;
+`A-1-user-list.png`, `C-1-prompt.png`, `F-0-chrome.png` and
+`P-1-policy.png` are the review shots against GNOME 51's login dialog.
+Gates: `G-GREETER-READY`, `-USER-LIST`, `-NO-SHELL`, `-SERVICES`, `-LOGO`,
+`-INPUT-SOURCE`, `-A11Y-MENU`, `-LARGE-TEXT`, `-OSK`, `-POWER`,
+`-NOT-LISTED`, `-GIVE-UP`, `-SESSION`, `-WRONG-PASSWORD`, `-PASSWORD`,
+`-START`, `-SUPERVISION`. A second login screen on the same mock then
+starts with `org.gnome.login-screen` set, and the mock's control interface
+(`org.tuna.Proof.GdmMock`) adds and deletes users and closes GDM's
+channels: `G-GREETER-POLICY`, `-CAPS-LOCK`, `-LIVE-USERS`, `-RECONNECT`.
+Last, `G-GREETER-I18N` starts a third login screen in `de_DE.UTF-8`
 (built with `localedef` into a private `LOCPATH`, as the runners generate
 only `C.UTF-8`, which ignores catalogs) with a fixture German
 `gnome-shell.mo` that `msgfmt` compiles into the greeter's data dir, and
 reads the translated "Not listed?" and "Accessibility" back through AT-SPI
-(`G-1-i18n.png`).
-Gates: `G-GREETER-READY`, `-USER-LIST`, `-NO-SHELL`, `-SERVICES`, `-LOGO`,
-`-INPUT-SOURCE`, `-A11Y-MENU`, `-LARGE-TEXT`, `-OSK`, `-POWER`,
-`-NOT-LISTED`, `-GIVE-UP`, `-SESSION`, `-WRONG-PASSWORD`, `-PASSWORD`,
-`-START`, `-SUPERVISION`, `-I18N`, `-HYGIENE`. `G-GREETER-ORCA` needs Orca 50 or
-later: the compositor starts Orca without `DISPLAY`, where Ubuntu 24.04's
-Orca 46 dies. The default run skips it and says so;
+(`G-1-i18n.png`); then `G-GREETER-HYGIENE`. `G-GREETER-ORCA` needs Orca 50
+or later: the compositor starts Orca without `DISPLAY`, where Ubuntu
+24.04's Orca 46 dies. The default run skips it and says so;
 `scripts/tuna-greeter-proof --orca-only` (`G-GREETER-READY`, then
 `G-GREETER-ORCA`) runs in the orca-speech CI job on its Orca 50, and the
 parity ledger reads both jobs' assertions. `scripts/ci-select-lanes`
@@ -381,8 +388,9 @@ gnome-session or DRM.
   spent: the compositor exits non-zero, the unit fails, gnome-session shuts
   down, GDM sees the greeter session end and restarts the display (GDM's
   own limits apply; text consoles remain).
-- GDM channel closed: every owed result is denied, the prompt resets, and
-  the greeter reconnects every second.
+- GDM channel closed: the greeter asks for a new channel at once, then
+  every second until it gets one; the begin owed a result is denied and the
+  prompt begins again on the new channel (`G-GREETER-RECONNECT`).
 - Login: `VerificationComplete` → `SessionOpened` →
   `StartSessionWhenReady`; GDM starts the user session and stops the greeter
   session (SIGTERM to its process group).
@@ -391,16 +399,18 @@ gnome-session or DRM.
 
 | Area | GDM 51 | Tuna greeter now | Gate |
 |---|---|---|---|
-| User list from AccountsService, filtered like `UserList.addUser` | yes | yes (live add/remove) | G-GREETER-USER-LIST |
+| User list from AccountsService, filtered like `UserList.addUser`, with avatars | yes | yes (`IconFile` avatars, live add/remove) | G-GREETER-USER-LIST, G-GREETER-LIVE-USERS; cargo: `a_readable_avatar_file_is_the_users_image`, `only_added_and_deleted_users_change_the_list` |
 | Password through `gdm-password`, GNOME's prompt and messages | yes | yes (shared AuthPrompt machine) | G-GREETER-PASSWORD; cargo: `conversation::tests::*`, `gdm::tests::*` |
-| Wrong password: GDM's problem shown, retry, `allowed-failures` back to the list | yes | yes | G-GREETER-WRONG-PASSWORD, G-GREETER-GIVE-UP; cargo: `a_host_done_trying_gives_up_once_the_problem_is_read`, `failure_then_stop_is_one_denied_result_and_counts` |
-| "Not listed?" username entry | yes | yes | G-GREETER-NOT-LISTED |
+| Wrong password: GDM's problem shown, retry, `allowed-failures` back to the list | yes | yes | G-GREETER-WRONG-PASSWORD, G-GREETER-GIVE-UP, G-GREETER-POLICY; cargo: `a_host_done_trying_gives_up_once_the_problem_is_read`, `failure_then_stop_is_one_denied_result_and_counts` |
+| "Not listed?" username entry | yes | yes | G-GREETER-NOT-LISTED; cargo: `a_typed_username_is_trimmed_and_matched_to_the_list` |
+| Caps-lock warning under a secret question ("Caps lock is on") | yes | yes | G-GREETER-CAPS-LOCK; cargo: `the_caps_lock_warning_belongs_to_secret_questions` |
 | Session type in Login Options, `DefaultSessionNameChanged` | yes | yes (re-selected after GDM resets) | G-GREETER-SESSION; cargo: `sessions::tests::*` |
-| `StartSessionWhenReady` after `SessionOpened` | yes | yes | G-GREETER-START |
-| No overview, lock or panel layers; greeter supervised | yes (`gdm` mode) | yes | G-GREETER-NO-SHELL, G-GREETER-SUPERVISION |
-| Register session/display with GDM | yes | yes | G-GREETER-READY (mock GDM); V-GDM-LOGIN once packaged |
-| Banner (text and file), logo, `disable-restart-buttons` | yes | yes, followed live | G-GREETER-LOGO, G-GREETER-POWER; cargo: `branding::tests::*` |
-| `disable-user-list` | yes | read at startup | — |
+| `StartSessionWhenReady` after `SessionOpened` | yes | yes (at once: GNOME's `AuthPrompt.finish` waits for queued messages first) | G-GREETER-START; cargo: `only_session_opened_starts_a_session_after_verification` |
+| GDM's channel closes: reconnect, owed results denied | yes | yes | G-GREETER-RECONNECT; cargo: `wire_failures_and_disconnects_deny_what_is_owed` |
+| No overview, lock or panel layers; greeter supervised | yes (`gdm` mode) | yes | G-GREETER-NO-SHELL, G-GREETER-SUPERVISION; cargo: `the_login_screen_never_locks_and_has_no_overview`, `ready_is_sent_once_when_the_greeter_first_maps`, `greeter_flag_makes_a_login_screen_session`, `help_documents_greeter_mode`, `a_spent_greeter_budget_fails_the_unit` |
+| Register session/display with GDM | yes | yes (the greeter; the compositor only publishes the display) | G-GREETER-READY (mock GDM); cargo: `the_greeter_publishes_only_its_display`; V-GDM-LOGIN once packaged |
+| Banner (text and file), logo, `disable-restart-buttons` | yes | yes, read at start and followed live | G-GREETER-POLICY (at start), G-GREETER-LOGO, G-GREETER-POWER (live); cargo: `the_banner_shows_gnomes_text_or_file`, `the_logo_shows_only_when_named`, `disable_restart_buttons_hides_every_action_and_the_button` |
+| `disable-user-list`, `allowed-failures` | yes | read at start | G-GREETER-POLICY; cargo: `login_screen_keys_make_the_policy`, `failures_allow_one_try_and_mistyped_keys_read_as_zero` |
 | Wiggle, fades | yes | no | — |
 | Fingerprint (re-auth only in 51), smartcard, switchable auth, ChoiceList, CustomJSON web login | yes | no | #1164 |
 | Accessibility menu (bottom right, GNOME's ten toggles in order) and their effects: Orca, OSK, Zoom, Large Text, High Contrast, Visual Alerts, keyboard aids | yes | yes | G-GREETER-A11Y-MENU, G-GREETER-ORCA, G-GREETER-OSK, G-GREETER-LARGE-TEXT; cargo: `a11y::tests::*` (Screen Reader → `SetScreenReader`), `control::tests::*` (the control socket's frames and dial errors), `chrome::tests::*` (the prompt keyboard's focus and layout) |
