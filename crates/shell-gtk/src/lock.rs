@@ -27,6 +27,7 @@ use tuna_shell_control::{AuthEvent, AuthService};
 
 use crate::lock_auth::{AuthMachine, Effect, Host, MessageKind, View};
 use crate::lock_curtain::{self, Curtain, Page, Source};
+use crate::lock_notifications::{LockEntry, NotificationsBox};
 use crate::lock_wiggle::Wiggle;
 use crate::logic;
 
@@ -38,6 +39,8 @@ fn touchpad_settings() -> Option<gio::Settings> {
     gio::SettingsSchemaSource::default()?.lookup(SCHEMA, true)?;
     Some(gio::Settings::new(SCHEMA))
 }
+/// What the lock screen's notifications show now.
+pub type LockNotifications = Rc<dyn Fn() -> Vec<LockEntry>>;
 
 /// Sends a password with the single-password `Unlock`; returns the
 /// request id.
@@ -216,6 +219,8 @@ struct Screen {
     message_wiggle: Wiggle,
     /// The clock's hint; the [`lock_curtain::HintWatch`] holds it weakly.
     _hint: Rc<lock_curtain::Hint>,
+    /// The unseen notifications (unlockDialog.js `NotificationsBox`).
+    notifications: NotificationsBox,
 }
 
 impl Screen {
@@ -285,6 +290,13 @@ pub struct LockUi {
     screens: RefCell<Vec<Screen>>,
     /// A lock was asked of the compositor and not yet released.
     requested: Cell<bool>,
+    /// The compositor's lock flag as last synced: a refused lock request
+    /// is retried only while it still says locked.
+    wants_lock: Cell<bool>,
+    /// Refused lock requests since the last granted one, for the backoff.
+    lock_attempts: Cell<u32>,
+    /// A retry is scheduled.
+    retry_pending: Cell<bool>,
     connection_generation: Cell<Option<u64>>,
     clock_format: Box<dyn Fn() -> logic::ClockFormat>,
     /// Wakes the clock on the minute while the lock screens are up.
@@ -294,6 +306,8 @@ pub struct LockUi {
     osk: RefCell<Option<Rc<crate::osk::Osk>>>,
     /// What the clocks' hints follow (idle time, power save, touch-mode).
     hints: Rc<lock_curtain::HintWatch>,
+    /// Where the notifications box reads what to show (#348).
+    notifications: RefCell<Option<LockNotifications>>,
 }
 
 impl LockUi {
@@ -313,18 +327,35 @@ impl LockUi {
             applying: Cell::new(false),
             screens: RefCell::new(Vec::new()),
             requested: Cell::new(false),
+            wants_lock: Cell::new(false),
+            lock_attempts: Cell::new(0),
+            retry_pending: Cell::new(false),
             connection_generation: Cell::new(None),
             clock_format,
             wall_clock: RefCell::new(None),
             osk: RefCell::new(None),
             hints: lock_curtain::HintWatch::new(),
+            notifications: RefCell::new(None),
         });
         {
+            // A refused request (ext_session_lock_v1.finished) leaves the
+            // session locked without a prompt unless the shell asks again:
+            // retry with backoff while the compositor still says locked.
             let weak = Rc::downgrade(&ui);
             ui.instance.connect_failed(move |_| {
                 eprintln!("tuna-shell-gtk: the compositor refused the session lock");
                 if let Some(ui) = weak.upgrade() {
                     ui.release_screens();
+                    ui.requested.set(false);
+                    ui.retry_lock();
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(&ui);
+            ui.instance.connect_locked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.lock_attempts.set(0);
                 }
             });
         }
@@ -348,6 +379,28 @@ impl LockUi {
     /// Give each lock window GNOME's on-screen keyboard for its prompt.
     pub fn set_osk(&self, osk: Rc<crate::osk::Osk>) {
         *self.osk.borrow_mut() = Some(osk);
+    }
+
+    /// Read the lock screen's notifications from `source`.
+    pub fn set_notifications(&self, source: LockNotifications) {
+        *self.notifications.borrow_mut() = Some(source);
+    }
+
+    /// Bring every lock screen's notifications up to date: an arrival, a
+    /// banner seen, or a notification policy key (GNOME's
+    /// `NotificationsBox` follows its sources' counts and policies live).
+    pub fn refresh_notifications(&self) {
+        let screens = self.screens.borrow();
+        if screens.is_empty() {
+            return;
+        }
+        let Some(source) = self.notifications.borrow().clone() else {
+            return;
+        };
+        let entries = source();
+        for screen in screens.iter() {
+            screen.notifications.show(&entries);
+        }
     }
 
     /// Drop every lock window. Their entries are wiped at once, which is
@@ -374,6 +427,10 @@ impl LockUi {
     /// Follow the compositor's lock flag: lock when it says locked,
     /// release when it says unlocked.
     pub fn sync(self: &Rc<Self>, locked: bool) {
+        self.wants_lock.set(locked);
+        if !locked {
+            self.lock_attempts.set(0);
+        }
         if locked && !self.requested.get() {
             self.requested.set(true);
             if !self.instance.lock() {
@@ -399,6 +456,7 @@ impl LockUi {
             }
             self.refresh_clock();
             self.hints.arm();
+            self.refresh_notifications();
             let weak = Rc::downgrade(self);
             *self.wall_clock.borrow_mut() =
                 Some(crate::wall_clock::WallClock::new(false, move || {
@@ -410,6 +468,25 @@ impl LockUi {
             self.requested.set(false);
             self.instance.unlock();
         }
+    }
+
+    /// Ask for the lock again after a refusal, once the backoff for this
+    /// attempt has passed, if the compositor still says locked by then.
+    fn retry_lock(self: &Rc<Self>) {
+        if self.retry_pending.replace(true) {
+            return;
+        }
+        let attempt = self.lock_attempts.get();
+        self.lock_attempts.set(attempt.saturating_add(1));
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local_once(lock_retry_delay(attempt), move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.retry_pending.set(false);
+                if ui.wants_lock.get() {
+                    ui.sync(true);
+                }
+            }
+        });
     }
 
     /// A transport generation change aborts local entry only. It never releases
@@ -587,6 +664,11 @@ impl LockUi {
         }
         window.add_css_class("tuna-lock");
         window.set_title(Some("Lock Screen"));
+        // Its own window group: GTK sends a group's key and button
+        // events to the group's grab widget, and an open panel menu
+        // (autohide popover) holds that grab in the default group, so
+        // the lock screen would never hear a key until the menu closed.
+        gtk::WindowGroup::new().add_window(&window);
 
         // The clock page (unlock-dialog-clock).
         let clock = gtk::Label::new(None);
@@ -731,6 +813,10 @@ impl LockUi {
         overlay.set_child(Some(&curtain));
         bar.set_valign(gtk::Align::Start);
         overlay.add_overlay(&bar);
+        // GNOME's NotificationsBox: the bottom of the column under the
+        // clock and the prompt.
+        let notifications = NotificationsBox::new();
+        overlay.add_overlay(notifications.widget());
         // GNOME's keyboard box sits over the lock screen too: it opens
         // when the prompt takes the focus and types into that prompt
         // alone (`_onKeyFocusChanged`).
@@ -768,17 +854,27 @@ impl LockUi {
 
         // Vertical placement: GNOME puts the stack a third of the way
         // down (UnlockDialogLayout), which lands the 1280x800 clock at
-        // y 275 and the prompt at y 205.
+        // y 275 and the prompt at y 205. The notifications take the
+        // bottom, never reaching up into the clock.
         {
             let (clock_box, prompt) = (clock_box.clone(), prompt.clone());
+            let scroller = notifications.widget().clone();
             let last = Cell::new(-1);
             window.add_tick_callback(move |w, _| {
                 let height = w.height();
+                let (clock_top, prompt_top) = logic::lock_offsets(height);
                 if height != last.get() {
                     last.set(height);
-                    let (clock_top, prompt_top) = logic::lock_offsets(height);
                     clock_box.set_margin_top(clock_top);
                     prompt.set_margin_top(prompt_top);
+                }
+                // The measure includes margins, and may still hold the old
+                // ones for a frame: take the clock's own height.
+                let (_, natural, _, _) = clock_box.measure(gtk::Orientation::Vertical, -1);
+                let clock = natural - clock_box.margin_top() - clock_box.margin_bottom();
+                let room = (height - clock_top - clock).max(0);
+                if scroller.max_content_height() != room {
+                    scroller.set_max_content_height(room);
                 }
                 glib::ControlFlow::Continue
             });
@@ -1155,6 +1251,7 @@ impl LockUi {
             _keyboard: keyboard,
             message_wiggle,
             _hint: hint_fade,
+            notifications,
         };
         screen.apply(&self.auth.borrow().view());
         self.screens.borrow_mut().push(screen);
@@ -1167,6 +1264,14 @@ impl Drop for Screen {
         // Never leave typed text behind in a dead window.
         self.entry.clear();
     }
+}
+
+/// The wait before lock request `attempt` (0 = first retry) after a
+/// refusal: 100 ms, doubling, at most 5 s.
+fn lock_retry_delay(attempt: u32) -> std::time::Duration {
+    const FIRST_MS: u64 = 100;
+    const MAX_MS: u64 = 5_000;
+    std::time::Duration::from_millis(FIRST_MS.saturating_mul(1 << attempt.min(16)).min(MAX_MS))
 }
 
 fn generation_changed(current: &Cell<Option<u64>>, next: Option<u64>) -> bool {
@@ -1549,5 +1654,21 @@ mod auth_transport_ui_tests {
             "the lock window is destroyed"
         );
         assert_eq!(entry.text.text(), "", "nothing typed survives");
+    }
+}
+
+#[cfg(test)]
+mod lock_retry_tests {
+    use super::lock_retry_delay;
+    use std::time::Duration;
+
+    #[test]
+    fn refused_locks_are_retried_with_a_bounded_backoff() {
+        let delays: Vec<_> = (0..8).map(lock_retry_delay).collect();
+        assert_eq!(
+            delays,
+            [100, 200, 400, 800, 1600, 3200, 5000, 5000].map(Duration::from_millis)
+        );
+        assert_eq!(lock_retry_delay(u32::MAX), Duration::from_secs(5));
     }
 }

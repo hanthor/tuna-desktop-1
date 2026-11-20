@@ -510,7 +510,8 @@ def inventory():
                          | {k: state.get(k) for k in ("overview_open", "pointer_position",
                                                       "native_relative_motion_count", "input_devices",
                                                       "mouse_left_handed", "touchpad_left_handed",
-                                                      "hot_corners", "auth_owner", "power_save_mode")},
+                                                      "hot_corners", "auth_owner", "power_save_mode",
+                                                      "sleep_delay")},
                 "processes": sorted(processes, key=lambda item: item["pid"])}
     except Exception as error:
         error.inventory_stage = stage
@@ -2728,6 +2729,10 @@ def main():
     if os.geteuid() != 0 or OWNER.pw_uid == 0:
         raise RuntimeError("probe must be root and session owner must not be root")
     action = sys.argv[1]
+    # V-PICKER / V-INTROSPECT probes live in their own fixed root helper; the
+    # guest agent only ever executes this lifecycle path.
+    if action.startswith("app-"):
+        os.execv("/usr/libexec/tuna-vm-app-integration", ["tuna-vm-app-integration", *sys.argv[1:]])
     if action == "colour":
         if len(sys.argv) != 4 or sys.argv[2] not in {"init", "start", "state", "ack", "finish", "cleanup", "file"}:
             raise ValueError("colour requires one fixed operation and one JSON payload")
@@ -3127,6 +3132,11 @@ print(json.dumps(result))
         result = {"session": session,
                   "locked_hint": call("loginctl", "show-session", session, "--property=LockedHint",
                                       "--value")}
+    elif action == "sleep-inhibitors":
+        # logind's inhibitors, the rows `systemd-inhibit --list` prints,
+        # with that listing as evidence.
+        result = {"inhibitors": logind_inhibitors(),
+                  "listing": call("systemd-inhibit", "--list", "--no-pager", check=False)[-16384:]}
     elif action in ("lock-session", "unlock-session"):
         # The session owner's own loginctl, as typed in a terminal: logind
         # authorizes the owner and emits Lock/Unlock on the session object.
@@ -3254,12 +3264,14 @@ print(json.dumps(result))
             result = {"available": True,
                       "stored": call("gsettings", "get", "org.gnome.desktop.peripherals.mouse", "scroll-wheel-emulation-button", user=True) == button
                       and call("gsettings", "get", "org.gnome.desktop.peripherals.mouse", "scroll-wheel-emulation-button-lock", user=True) == lock}
-    elif action in ("input-count", "input-ready", "input-buttons"):
+    elif action in ("input-count", "input-key-events", "input-ready", "input-buttons"):
         result = json.loads(pathlib.Path(RUNTIME, "tuna-vm-input.json").read_text())
         if pathlib.Path(f"/proc/{result['pid']}").stat().st_uid != OWNER.pw_uid:
             raise RuntimeError("input probe has the wrong owner")
         if action == "input-count":
             result = {key: result[key] for key in ("pid", "count")}
+        elif action == "input-key-events":
+            result = {key: result[key] for key in ("pid", "count", "key_releases")}
         elif action == "input-buttons":
             result = {key: result[key] for key in
                       ("pid", "buttons", "button_releases", "event_count", "motions", "gtk_version")}
