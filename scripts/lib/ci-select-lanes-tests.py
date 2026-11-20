@@ -53,9 +53,16 @@ class Selection(unittest.TestCase):
 
     def test_owned_paths_run_their_lane_without_rotation(self):
         self.assertEqual(pr("scripts/tuna-scroll-proof"), ["scroll-proof"])
+        # The vkms gates (D-*) live in the DRM smoke.
+        self.assertEqual(pr("scripts/tuna-drm-smoke"), ["drm-smoke"])
         self.assertEqual(pr("docs/walkthrough.tsv"), ["gtk-shell"])
         self.assertEqual(pr("packaging/marlin/vm-lane/Containerfile"),
                          ["arch-package", "marlin-image", "marlin-vm"])
+        # The Marlin VM gates (V-*) live in the VM lane.
+        self.assertEqual(pr("scripts/tuna-vm-lane"), ["arch-package", "marlin-vm"])
+        # The nested GTK gates (G-*) live in the GTK shell proof; journey
+        # runs it against the installed package.
+        self.assertEqual(pr("scripts/tuna-gtk-shell-proof"), ["journey", "gtk-shell"])
         self.assertEqual(pr("docs/parity-ledger.md"),
                          ["journey", "drm-smoke", "gtk-shell", "orca-speech",
                           "arch-package", "marlin-vm", "parity-ledger"])
