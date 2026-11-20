@@ -951,7 +951,7 @@ def run(args):
                                          f"connector, then were back at it on {A}, {B}, {C}; overview and "
                                          f"pointer input after the replug"]
         final = samples[-1]
-        # Diagnostic limits for a bounded storm, as tuna-stress's.
+        # Diagnostic limits for a bounded storm, as the churn lane's.
         pss_limit = baseline["pss_kib"] * 1.25 + 65536
         fd_limit = baseline["fds"] + 32
         # The owner of the rise: the largest changes since round 0 by

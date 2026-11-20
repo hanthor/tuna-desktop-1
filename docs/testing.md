@@ -516,6 +516,7 @@ cannot satisfy the gate.
 | `gtk-shell` | `scripts/tuna-scale-proof --artifacts gtk-shell-artifacts/scale` | as above | The same session at 150 percent scale; writes `assertions.txt` |
 | `gtk-shell` | `scripts/tuna-slow-portal-proof --artifacts gtk-shell-artifacts/slow-portal` | as above | On a dbus-daemon bus whose portal activation hangs, the shell owns `org.gnome.Shell` within 15 s (40 s on GTK before 4.17, whose GtkApplication always waits on the inhibit portal) and makes no GDK portal call; writes `assertions.txt` |
 | `drm-smoke` | `scripts/tuna-drm-smoke --artifacts drm-smoke-artifacts` | `seatd jq ffmpeg kmod python3-evdev python3-gi gir1.2-gtk-4.0 gsettings-desktop-schemas`; run `scripts/ci-install-vkms` after `apt-get update` to ensure vkms for the running kernel | Hardware backend on the vkms virtual KMS device; needs `sudo` for `modprobe`, seatd and uinput |
+| `hotplug` | `scripts/tuna-hotplug-stress --rounds 4 --out hotplug-artifacts` | as for `drm-smoke`, plus `libpam-wrapper colord pipewire wireplumber gstreamer1.0-pipewire gstreamer1.0-tools xdg-desktop-portal-gnome`; Linux 6.19+ for vkms configfs (the job pins `ubuntu-26.04`) | Connector hotplug on vkms: outputs, window re-homing, a full unplug, lock, colord and screencast gates (see [Output hotplug storm](#output-hotplug-storm)); writes `assertions.txt` |
 
 `app-content` and `scroll-proof` download Playwright and Chromium into a
 temporary venv on every run, so they need network access.
@@ -1044,6 +1045,7 @@ scripts/tuna-ledger check --tests test-list.txt \
   --assertions gtk-shell-artifacts/assertions.txt \
   --assertions gtk-shell-artifacts/scale/assertions.txt \
   --assertions drm-smoke-artifacts/assertions.txt \
+  --assertions hotplug-artifacts/assertions.txt \
   --assertions vm-lane-artifacts/assertions.txt
 ```
 
@@ -1076,7 +1078,10 @@ the states are in [pixel parity with GNOME 51](gnome-parity.md).
 ## Output hotplug storm
 
 The nested backend has one fixed output, so hotplug runs on real DRM: the
-`hotplug` job of the `nested stress` workflow (nightly, on
+`hotplug` lane of `ci.yml` (4 rounds; `scripts/ci-select-lanes` selects it
+for the harness and for the DRM, window, lock, colord, ScreenCast and
+DisplayConfig code, and its `H-*` assertions feed the parity ledger), and
+the `hotplug` job of the `nested stress` workflow (nightly at 30 rounds, on
 `workflow_dispatch`, and on pull requests touching
 `scripts/tuna-hotplug-stress` or the workflow). `scripts/tuna-hotplug-stress`
 creates a vkms configfs instance (Linux 6.19 or newer; the job pins
