@@ -252,6 +252,7 @@ jobs:
           /usr/bin/python3 scripts/lib/tuna-corral-ssh-export-tests.py
       - run: python3 scripts/lib/tuna-perf-repeatability-tests.py
       - run: python3 scripts/lib/tuna-perf-gate-tests.py
+      - run: python3 scripts/lib/tuna-perf-tests.py
       - run: python3 scripts/lib/perf-operation-budget-tests.py
       # Performance budgets only ratchet tighter; any change cites a run and
       # loosening needs an ADR (docs/perf/README.md, roadmap change control).
@@ -959,6 +960,8 @@ jobs:
           if exit_status != 0 or not unchanged or '1 passed; 0 failed; 0 ignored' not in text or 'COUNTDOWN-OSD pass ' not in text:
               raise RuntimeError('actual admitted countdown OSD test did not pass')
           PY
+      # Each proof's marker line is its assertions.txt ("<ID> pass <desc>"):
+      # the parity ledger reads lock-idle-frames' (#1122).
       - name: Prove real GTK OSD fade-out, panel menu close/switch (#501), lock curtain (#502) and a settled lock screen's idle frame clock (#1122)
         run: |
           /usr/bin/python3 - <<'PY'
@@ -1004,6 +1007,7 @@ jobs:
                   raise RuntimeError(f'actual admitted {name} test did not pass')
               if name == 'grid-tick-trace' and any(required not in text for required in ('grid-anim page-switch tick ', 'schedstat=available', 'grid-anim page-clock phase=before-paint ', 'grid-anim page-clock phase=after-paint ')):
                   raise RuntimeError('grid tick/paint observer did not emit actual clock and populated scheduler observations')
+              (artifacts / 'assertions.txt').write_text(text[text.index(marker):].splitlines()[0] + '\n')
           PY
       - name: Prove real MediaKeys callback completion and forced clamp interleave
         run: |
@@ -2138,6 +2142,7 @@ jobs:
           --assertions ledger-in/gtk-shell/session-restore/assertions.txt
           --assertions ledger-in/gtk-shell/osk/assertions.txt
           --assertions ledger-in/gtk-shell/lock-auth/assertions.txt
+          --assertions ledger-in/gtk-shell/lock-idle-frames/assertions.txt
           --assertions ledger-in/orca-speech/assertions.txt
           --assertions ledger-in/drm-smoke/assertions.txt
           --assertions ledger-in/marlin-vm/assertions.txt
