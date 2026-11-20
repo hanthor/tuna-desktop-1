@@ -15,14 +15,21 @@
 #   --keyboard-routes-only runs panel readiness and the P-A11Y-02 keyboard
 #   route gates (G-PANEL-MENU-KEYS, G-QS-MENU-KEY, G-NOTIFICATION-KEYS,
 #   G-SCREENSHOT-CTRL-C) only.
+#   --datemenu-only runs panel readiness, the date menu's gates (G-CAL-OPEN,
+#   G-CAL-EVENTS, G-CAL-PREFS, G-CAL-LAUNCH, G-DATEMENU-WORLD-CLOCKS,
+#   G-DATEMENU-WEATHER), its accessibility golden and G-SHELL-STABLE only.
 #   --search-leak-only runs panel readiness, G-SEARCH-LEAK (50 searches with
 #   results leave shm mappings and descriptors where they were, #1084) and
 #   G-SHELL-STABLE only.
 #   --window-leak-only runs panel readiness, G-WINDOW-LEAK (100 libadwaita
 #   windows opened and closed leave the compositor's memory within a fixed
 #   bound of its warm state, #1088) and G-SHELL-STABLE only.
+#   --lock-menu-only runs panel readiness, G-LOCK-WITH-MENU-OPEN and
+#   G-SHELL-STABLE only (needs pam_wrapper).
 #   --grid-cancel-only --grid-cancel-admission FILE is an exact CI comparison slice.
 #   --expect-grid-cancel-old-negative is permitted only in that admitted slice.
+#   Run at most one --*-only slice at a time.
+# end of --help
 #
 # Runs the nested compositor with tuna-shell-gtk as its supervised shell
 # on a private session bus with the AT-SPI accessibility bus, then:
@@ -35,6 +42,17 @@
 #   G-CAL-OPEN  clicking the clock opens the calendar popover (xdg popup
 #               on the layer surface, #88)
 #   G-CAL-PREFS live first-weekday and ISO-week changes, plus locale reset
+#   G-DATEMENU-WORLD-CLOCKS installing GNOME Clocks shows the World
+#               Clocks card; its clocks follow gnome-shell's setting, the
+#               Locations a running Clocks exports, clock-format and the
+#               minute live, sorted by UTC offset in aligned columns;
+#               the card activates Clocks (P-PN-04)
+#   G-DATEMENU-WEATHER installing GNOME Weather shows the Weather card:
+#               location prompt, loading, offline, unavailable, five
+#               hourly forecasts from now in even columns; with all three
+#               cards the menu stays on the output and its displays
+#               section scrolls; the card activates Weather; both cards
+#               hide again when their apps go (P-PN-04)
 #   G-QS-OPEN   clicking the system indicators opens quick settings
 #   A11Y-QS     quick-settings toggles and the volume slider are exposed
 #   G-WINDOWS   three libadwaita app windows map
@@ -68,6 +86,11 @@
 #   G-GRID-ACTIVATE-RUNNING a running app's grid tile raises its window
 #                  without launching it again or zooming; Ctrl+click
 #                  opens a new window with the zoom (AppIcon.activate)
+#   G-DASH-MOTION  dash items zoom and fade in and out over 200 ms
+#                  ease-out-quad (a leaving item reverses from where it
+#                  stands) and hover labels fade in over 150 ms after
+#                  300 ms and out over 100 ms; Reduced Motion only
+#                  fades, animations off are instant (frozen proof clock)
 #   G-GRID-FADE    Show Apps fades the grid in over 400 ms after 100 ms
 #   G-APP-FOLDERS  GNOME's app-folders settings group the app grid: the
 #                  folder replaces its apps and opens to show them
@@ -142,7 +165,8 @@
 #   G-OV-SHELL-UI  the overview shows the search entry and the dash
 #   G-OV-SEARCH typing lists matching apps (#57)
 #   G-OV-SEARCH-STILL the focused, unchanged overview search draws no
-#               frames: the shell's caret is steady, as GNOME's (#503)
+#               frames: the shell's caret is steady, as GNOME's (#503);
+#               the window never spans the panel clock's minute turn
 #   G-OV-LAUNCH Enter launches the top result and closes the overview
 #   G-OV-APPGRID Show Apps opens the app grid
 #   G-X11-APP      XWayland is on by default: an X11 app launched from
@@ -248,6 +272,10 @@
 #                  unlocks, fades only under Reduced Motion, instant
 #                  with animations off
 #                  (these sample TUNA_ANIMATION_CLOCK at exact delays)
+#   G-LOCK-WITH-MENU-OPEN Super+L with the date menu (then quick
+#                  settings) open closes the menu; the very next typed
+#                  password and Return unlock through PAM, and the menu
+#                  stays closed after unlocking
 #   G-DISPLAY-SETTINGS GNOME Settings' DisplayConfig as Mutter 51 answers
 #                  it: modes and scales listed, verify/stale/bad-mode
 #                  errors, temporary changes unsaved, persistent ones
@@ -506,44 +534,73 @@ NOTIFY_LOCK_ONLY=0
 TRAY_ONLY=0
 GRID_HOVER_ONLY=0
 KEYBOARD_ROUTES_ONLY=0
+DATEMENU_ONLY=0
 SEARCH_LEAK_ONLY=0
 WINDOW_LEAK_ONLY=0
+LOCK_MENU_ONLY=0
 GRID_CANCEL_ONLY=0
 GRID_CANCEL_OLD_NEGATIVE=0
 GRID_CANCEL_ADMISSION=""
 COMPANIONS="${TUNA_PROOF_COMPANIONS:-$ROOT/target/debug/examples}"
+# Focused slices: each --*-only case arm calls only_mode with its flag and
+# what it leaves out of the full run's setup, so a new slice touches only
+# its own arm. Traits: source-build (refuses --installed-package),
+# no-media-source (no GTK media-source receipt), no-examples (no
+# icon-probe or shortcut-inhibit-client build), no-camera-policy (the
+# camera is not disabled first).
+ONLY_MODES=""
+ONLY_SOURCE_BUILD=""
+ONLY_NO_MEDIA_SOURCE=0
+ONLY_NO_EXAMPLES=0
+ONLY_NO_CAMERA_POLICY=0
+only_mode() {
+    ONLY_MODES="${ONLY_MODES:+$ONLY_MODES }$1"
+    only_flag="$1"
+    shift
+    for only_trait in "$@"; do
+        case "$only_trait" in
+            source-build) ONLY_SOURCE_BUILD="$only_flag" ;;
+            no-media-source) ONLY_NO_MEDIA_SOURCE=1 ;;
+            no-examples) ONLY_NO_EXAMPLES=1 ;;
+            no-camera-policy) ONLY_NO_CAMERA_POLICY=1 ;;
+            *) echo "tuna-gtk-shell-proof: unknown slice trait $only_trait" >&2; exit 1 ;;
+        esac
+    done
+}
 while [ $# -gt 0 ]; do
     case "$1" in
         --installed-package) INSTALLED_PACKAGE=1; shift ;;
-        --grid-cancel-only) GRID_CANCEL_ONLY=1; shift ;;
+        --grid-cancel-only) GRID_CANCEL_ONLY=1; only_mode "$1" no-media-source; shift ;;
         --expect-grid-cancel-old-negative) GRID_CANCEL_OLD_NEGATIVE=1; shift ;;
         --grid-cancel-admission) GRID_CANCEL_ADMISSION="$2"; shift 2 ;;
-        --screenshot-keys-only) SCREENSHOT_KEYS_ONLY=1; shift ;;
-        --a11y-focus-only) A11Y_FOCUS_ONLY=1; shift ;;
-        --notify-lock-only) NOTIFY_LOCK_ONLY=1; shift ;;
-        --tray-only) TRAY_ONLY=1; shift ;;
-        --grid-hover-only) GRID_HOVER_ONLY=1; shift ;;
-        --keyboard-routes-only) KEYBOARD_ROUTES_ONLY=1; shift ;;
-        --search-leak-only) SEARCH_LEAK_ONLY=1; shift ;;
-        --window-leak-only) WINDOW_LEAK_ONLY=1; shift ;;
+        --screenshot-keys-only) SCREENSHOT_KEYS_ONLY=1; only_mode "$1" no-media-source no-examples no-camera-policy; shift ;;
+        --a11y-focus-only) A11Y_FOCUS_ONLY=1; only_mode "$1" no-media-source no-examples no-camera-policy; shift ;;
+        --notify-lock-only) NOTIFY_LOCK_ONLY=1; only_mode "$1"; shift ;;
+        --tray-only) TRAY_ONLY=1; only_mode "$1"; shift ;;
+        --grid-hover-only) GRID_HOVER_ONLY=1; only_mode "$1" no-examples; shift ;;
+        --keyboard-routes-only) KEYBOARD_ROUTES_ONLY=1; only_mode "$1" no-media-source; shift ;;
+        --datemenu-only) DATEMENU_ONLY=1; only_mode "$1" source-build no-media-source no-examples no-camera-policy; shift ;;
+        --search-leak-only) SEARCH_LEAK_ONLY=1; only_mode "$1" no-media-source no-examples; shift ;;
+        --window-leak-only) WINDOW_LEAK_ONLY=1; only_mode "$1" no-media-source no-examples; shift ;;
+        --lock-menu-only) LOCK_MENU_ONLY=1; only_mode "$1" no-media-source no-examples; shift ;;
         --display) DISPLAY_ARG="$2"; shift 2 ;;
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
-        --help|-h) sed -n '2,28p' "$0"; exit 0 ;;
+        --help|-h) sed -n '2,/^# end of --help$/{/^# end of --help$/!p;}' "$0"; exit 0 ;;
         *) echo "tuna-gtk-shell-proof: unknown argument $1" >&2; exit 1 ;;
     esac
 done
-if [ "$GRID_HOVER_ONLY" = 1 ] && { [ "$SCREENSHOT_KEYS_ONLY" = 1 ] || [ "$A11Y_FOCUS_ONLY" = 1 ] || [ "$GRID_CANCEL_ONLY" = 1 ] || [ "$GRID_CANCEL_OLD_NEGATIVE" = 1 ] || [ -n "$GRID_CANCEL_ADMISSION" ]; }; then
-    echo "--grid-hover-only cannot be combined with other focused or grid admission flags" >&2; exit 1
+case "$ONLY_MODES" in
+    *" "*) echo "$ONLY_MODES: run one --*-only slice at a time" >&2; exit 1 ;;
+esac
+if [ "$INSTALLED_PACKAGE" = 1 ] && [ -n "$ONLY_SOURCE_BUILD" ]; then
+    echo "$ONLY_SOURCE_BUILD cannot be combined with --installed-package" >&2; exit 1
 fi
 if [ "$GRID_CANCEL_ONLY" = 1 ]; then
-    if [ "$INSTALLED_PACKAGE" != 0 ] || [ "$SCREENSHOT_KEYS_ONLY" != 0 ] || [ "$A11Y_FOCUS_ONLY" != 0 ] || [ "$KEYBOARD_ROUTES_ONLY" != 0 ] || [ -z "$GRID_CANCEL_ADMISSION" ]; then
+    if [ "$INSTALLED_PACKAGE" != 0 ] || [ -z "$GRID_CANCEL_ADMISSION" ]; then
         echo "grid comparison requires an admitted source-mode tuple" >&2; exit 1
     fi
 elif [ "$GRID_CANCEL_OLD_NEGATIVE" = 1 ] || [ -n "$GRID_CANCEL_ADMISSION" ]; then
     echo "old-negative/admission flags require --grid-cancel-only" >&2; exit 1
-fi
-if [ "$SCREENSHOT_KEYS_ONLY" = 1 ] && [ "$A11Y_FOCUS_ONLY" = 1 ]; then
-    echo "--screenshot-keys-only and --a11y-focus-only are separate slices" >&2; exit 1
 fi
 mkdir -p "$ARTIFACTS"
 ARTIFACTS="$(cd "$ARTIFACTS" && pwd)"
@@ -645,6 +702,26 @@ cat >"$ARTIFACTS/config/mimeapps.list" <<EOF
 [Default Applications]
 x-scheme-handler/calendar=tuna-calendar-probe.desktop;
 EOF
+# GNOME Clocks and GNOME Weather stay "not installed" until
+# G-DATEMENU-WORLD-CLOCKS installs probes for them: a Hidden entry masks
+# any host copy, so the date menu's earlier frames and goldens show the
+# same cards on every host.
+datemenu_mask() {
+    printf '[Desktop Entry]\nType=Application\nName=Masked\nExec=true\nHidden=true\n' >"$ARTIFACTS/$1.desktop"
+    mv "$ARTIFACTS/$1.desktop" "$XDG_DATA_HOME/applications/$1.desktop"
+}
+datemenu_mask org.gnome.clocks
+datemenu_mask org.gnome.Weather
+# The Weather card's location and forecast come from this file (the
+# shell's TUNA_WEATHER_FIXTURE hook, read each time the card is shown),
+# never from the network.
+TUNA_WEATHER_FIXTURE="$ARTIFACTS/weather-fixture.json"
+weather_fixture() {
+    printf '%s\n' "$1" >"$TUNA_WEATHER_FIXTURE.tmp"
+    mv "$TUNA_WEATHER_FIXTURE.tmp" "$TUNA_WEATHER_FIXTURE"
+}
+weather_fixture '{"state": "none"}'
+export TUNA_WEATHER_FIXTURE
 # A GNOME Shell search provider owned by the probe app (#57).
 SEARCH_MARKER="$ARTIFACTS/search-marker"
 rm -f "$SEARCH_MARKER"
@@ -687,6 +764,7 @@ SCREENSAVER_PID=""
 ICON_PID=""
 HINTS_PID=""
 PERMISSIONS_PID=""
+DATEMENU_STUB_PID=""
 INHIBITOR_PID=""
 SCROLL_PROBE_PID=""
 SET_FONTS_PID=""
@@ -706,6 +784,7 @@ cleanup() {
     if [ -n "$HINTS_PID" ]; then kill "$HINTS_PID" 2>/dev/null || true; fi
     if [ -n "$INHIBITOR_PID" ]; then kill "$INHIBITOR_PID" 2>/dev/null || true; fi
     if [ -n "$PERMISSIONS_PID" ]; then kill "$PERMISSIONS_PID" 2>/dev/null || true; fi
+    if [ -n "$DATEMENU_STUB_PID" ]; then kill "$DATEMENU_STUB_PID" 2>/dev/null || true; fi
     if [ -n "$SCROLL_PROBE_PID" ]; then kill "$SCROLL_PROBE_PID" 2>/dev/null || true; fi
     if [ -n "$SET_FONTS_PID" ]; then kill "$SET_FONTS_PID" 2>/dev/null || true; fi
     if [ -n "$HOT_CORNER_PID" ]; then kill "$HOT_CORNER_PID" 2>/dev/null || true; fi
@@ -986,6 +1065,7 @@ pass G-GRID-ON-DEMAND "no grid tiles on the window picker or after close; a held
 . "$ROOT/scripts/lib/tuna-a11y-focus-proof.sh"
 . "$ROOT/scripts/lib/tuna-notify-lock-proof.sh"
 . "$ROOT/scripts/lib/tuna-keyboard-routes-proof.sh"
+. "$ROOT/scripts/lib/tuna-datemenu-proof.sh"
 . "$ROOT/scripts/lib/tuna-search-leak-proof.sh"
 . "$ROOT/scripts/lib/tuna-window-leak-proof.sh"
 
@@ -1178,6 +1258,16 @@ if ! gsettings range org.gnome.desktop.calendar week-start-day >/dev/null 2>&1; 
     GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas"
     export GSETTINGS_SCHEMA_DIR
 fi
+# gnome-shell's copies of Clocks' and Weather's settings (P-PN-04), for
+# hosts without gnome-shell's schema.
+if ! gsettings list-schemas 2>/dev/null | grep -qx org.gnome.shell.world-clocks; then
+    mkdir -p "$ARTIFACTS/schemas"
+    cp "$ROOT/tests/settings/gnome51-shell-datemenu.gschema.xml" "$ARTIFACTS/schemas/"
+    glib-compile-schemas --strict "$ARTIFACTS/schemas"
+    GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas"
+    export GSETTINGS_SCHEMA_DIR
+fi
+gsettings reset org.gnome.shell.world-clocks locations
 # Wellbeing schemas for hosts without gsettings-desktop-schemas 51 (#354).
 # The shell reads them live from startup, so they must exist before the
 # nested session launches; after that the gates drive the real keys.
@@ -1401,6 +1491,9 @@ export TUNA_GRID_TRACE
 # settled (G-TRANSIENT-*).
 TUNA_TRANSIENT_TRACE=1
 export TUNA_TRANSIENT_TRACE
+# The dash logs its item and label eases, frame by frame (G-DASH-MOTION).
+TUNA_DASH_TRACE=1
+export TUNA_DASH_TRACE
 TUNA_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
 export TUNA_PROOF_SWIPE_INPUT
 # G-ANIMATION-CLOCK drives compositor animation time through this file;
@@ -1413,9 +1506,8 @@ export TUNA_ANIMATION_CLOCK
 # overrides remain useful diagnostics but cannot qualify canonical media.
 MEDIA_SOURCE=0
 "$PY" "$ROOT/scripts/lib/gtk_media_source.py" invalidate "$ROOT" "$ARTIFACTS"
-if [ "$INSTALLED_PACKAGE" = 0 ] && [ "$SCREENSHOT_KEYS_ONLY" = 0 ] &&
-   [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$KEYBOARD_ROUTES_ONLY" = 0 ] &&
-   [ "$GRID_CANCEL_ONLY" = 0 ] && [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ] &&
+if [ "$INSTALLED_PACKAGE" = 0 ] && [ "$ONLY_NO_MEDIA_SOURCE" = 0 ] &&
+   [ -z "${TUNA_PROOF_BIN_DIR:-}" ] &&
    [ -z "${TUNA_PROOF_SHELL_BIN:-}" ] && [ -z "${TUNA_SHELL_BIN:-}" ] &&
    [ -n "${GITHUB_RUN_ID:-}" ] && [ -n "${GITHUB_RUN_ATTEMPT:-}" ] &&
    [ -n "${GITHUB_SHA:-}" ]; then
@@ -1424,7 +1516,7 @@ if [ "$INSTALLED_PACKAGE" = 0 ] && [ "$SCREENSHOT_KEYS_ONLY" = 0 ] &&
 fi
 if [ "$INSTALLED_PACKAGE" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ]; then
     cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor -p tuna-wallpaper-svg -p tuna-shell-gtk -p tuna-shell-host
-    if [ "$SCREENSHOT_KEYS_ONLY" = 0 ] && [ "$A11Y_FOCUS_ONLY" = 0 ] && [ "$GRID_HOVER_ONLY" = 0 ] && [ "$SEARCH_LEAK_ONLY" = 0 ] && [ "$WINDOW_LEAK_ONLY" = 0 ]; then
+    if [ "$ONLY_NO_EXAMPLES" = 0 ]; then
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example icon-probe
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example shortcut-inhibit-client
     fi
@@ -1437,7 +1529,7 @@ fi
 : >"$LOG"
 # Persist the disabled policy before the GTK publisher starts. The portal
 # probe must observe it on first acquisition, before testing live toggles.
-if [ "$SCREENSHOT_KEYS_ONLY" != 1 ] && [ "$A11Y_FOCUS_ONLY" != 1 ]; then
+if [ "$ONLY_NO_CAMERA_POLICY" = 0 ]; then
     gsettings set org.gnome.desktop.privacy disable-camera true
 fi
 if [ -n "$PAM_ON" ]; then
@@ -1707,6 +1799,56 @@ tray_x11_gate() {
     fi
 }
 
+# G-LOCK-WITH-MENU-OPEN: GNOME's lock dismisses the open shell menu and
+# its grab, and the lock screen has the keyboard at once. Each menu is
+# opened from its keybinding, Super+L locks over it, and the password
+# is typed straight away: its first printable key lifts the curtain and
+# becomes the first character, so PAM unlocking proves every key reached
+# the lock screen (the open menu's grab once swallowed them all until an
+# Escape closed it, beta.3 qualification).
+lock_with_menu_gate() {
+    [ -n "$PAM_ON" ] || fail G-LOCK-WITH-MENU-OPEN "pam_wrapper is required to unlock"
+    for lock_menu in "super+v:Previous month:date-menu" "super+s:Dark Style:quick-settings"; do
+        lock_menu_key=${lock_menu%%:*}
+        lock_menu_rest=${lock_menu#*:}
+        lock_menu_probe=${lock_menu_rest%%:*}
+        lock_menu_name=${lock_menu_rest#*:}
+        cstate '(.locked | not)' "$lock_menu_name lock ready" 15 ||
+            fail G-LOCK-WITH-MENU-OPEN "the session was locked before opening the $lock_menu_name"
+        xdotool key "$lock_menu_key"
+        sleep 1.5
+        "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-open.json" 20 ||
+            fail G-LOCK-WITH-MENU-OPEN "accessibility dump failed"
+        showing "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-open.json" "$lock_menu_probe" ||
+            fail G-LOCK-WITH-MENU-OPEN "$lock_menu_key did not open the $lock_menu_name"
+        scrot "$ARTIFACTS/lock-menu-$lock_menu_name-01-open.png" >/dev/null
+        xdotool key super+l
+        cstate '.locked' "locked over the $lock_menu_name" 10 ||
+            fail G-LOCK-WITH-MENU-OPEN "Super+L did not lock with the $lock_menu_name open"
+        sleep 1
+        "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-locked.json" 20 ||
+            fail G-LOCK-WITH-MENU-OPEN "accessibility dump failed"
+        hidden "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-locked.json" "$lock_menu_probe" ||
+            fail G-LOCK-WITH-MENU-OPEN "the $lock_menu_name stayed open behind the lock"
+        scrot "$ARTIFACTS/lock-menu-$lock_menu_name-02-locked.png" >/dev/null
+        lock_menu_first=${UNLOCK_PASSWORD%"${UNLOCK_PASSWORD#?}"}
+        xdotool type --delay 30 "$lock_menu_first"
+        sleep 0.3
+        xdotool type --delay 30 "${UNLOCK_PASSWORD#?}"
+        scrot "$ARTIFACTS/lock-menu-$lock_menu_name-03-typed.png" >/dev/null
+        xdotool key Return
+        cstate '(.locked | not)' "unlocked from the $lock_menu_name lock" 15 ||
+            fail G-LOCK-WITH-MENU-OPEN "the password typed after locking over the $lock_menu_name did not reach the lock screen"
+        sleep 1
+        "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-unlocked.json" 20 ||
+            fail G-LOCK-WITH-MENU-OPEN "accessibility dump failed"
+        hidden "$ARTIFACTS/a11y-lock-menu-$lock_menu_name-unlocked.json" "$lock_menu_probe" ||
+            fail G-LOCK-WITH-MENU-OPEN "the $lock_menu_name came back after unlocking"
+        scrot "$ARTIFACTS/lock-menu-$lock_menu_name-04-unlocked.png" >/dev/null
+    done
+    pass G-LOCK-WITH-MENU-OPEN "locking over the open date menu or quick settings closes it; the password typed at once and Return unlock through PAM"
+}
+
 # The panel is up once the shell registers on the a11y bus with its
 # controls; that also proves the accessible tree.
 "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-panel.json" 60 ||
@@ -1782,6 +1924,16 @@ if [ "$WINDOW_LEAK_ONLY" = 1 ]; then
     shell_stable_gate
     exit 0
 fi
+if [ "$LOCK_MENU_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "lock menu desktop ready" ||
+        fail G-LOCK-WITH-MENU-OPEN "desktop never became ready"
+    # Let the startup cover settle before the first menu.
+    sleep 3
+    lock_with_menu_gate
+    grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
+    shell_stable_gate
+    exit 0
+fi
 if [ "$SCREENSHOT_KEYS_ONLY" = 1 ]; then
     cstate '.active_workspace != null and .locked == false' "screenshot desktop ready" ||
         fail G-SCREENSHOT-KEYS "desktop never became ready"
@@ -1833,6 +1985,22 @@ if [ "$GRID_HOVER_ONLY" = 1 ]; then
     sleep 3
     grid_hover_proof
     grid_on_demand_proof
+    grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
+    shell_stable_gate
+    exit 0
+fi
+if [ "$DATEMENU_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "date menu desktop ready" ||
+        fail G-CAL-OPEN "desktop never became ready"
+    # The startup cover must be gone before frames are read.
+    sleep 3
+    calendar_proof
+    datemenu_proof
+    xdotool key Escape
+    sleep 1
+    "$ROOT/scripts/tuna-a11y-golden" check "$ARTIFACTS" calendar ||
+        fail A11Y-GOLDEN "the date menu's accessible tree differs from tests/a11y/calendar.txt (see above)"
+    pass A11Y-GOLDEN "the date menu's tree without Clocks and Weather matches its golden"
     grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
     shell_stable_gate
     exit 0
@@ -1958,57 +2126,13 @@ pass G-WALLPAPER-URI "spaces, Unicode and literal percent escapes identify the a
 # A popover counts as open only when its contents are showing in the
 # accessible tree: a pixel diff passes on a mere hover highlight.
 
-xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
-sleep 2
-scrot "$ARTIFACTS/02-calendar.png" >/dev/null
-"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-calendar.json" 20 ||
-    fail G-CAL-OPEN "accessibility dump failed"
-showing "$ARTIFACTS/a11y-calendar.json" "No Notifications" ||
-    fail G-CAL-OPEN "calendar popover contents not showing"
-pass G-CAL-OPEN "clock opens the calendar and notification list"
-for name in "Design review" "Release day" "All Day" "10:00 – 10:30"; do
-    showing "$ARTIFACTS/a11y-calendar.json" "$name" ||
-        fail G-CAL-EVENTS "the events card does not show \"$name\""
-done
-if showing "$ARTIFACTS/a11y-calendar.json" "Retro"; then
-    fail G-CAL-EVENTS "tomorrow's event shows under today"
+calendar_proof
+
+# World clocks and weather (P-PN-04). The comparison slice runs old
+# binaries that predate the cards.
+if [ "$GRID_CANCEL_ONLY" != 1 ]; then
+    datemenu_proof
 fi
-pass G-CAL-EVENTS "today's calendar-server events list in the events card, timed as GNOME does"
-# The open popover must update from real GSettings changes without a restart.
-"$PY" "$ROOT/scripts/lib/tuna-calendar-preferences-proof.py" "$ARTIFACTS/a11y-calendar.json" default false ||
-    fail G-CAL-PREFS "initial locale calendar is invalid"
-for first in Monday Thursday Sunday; do
-    gsettings set org.gnome.desktop.calendar week-start-day "$(printf '%s' "$first" | tr '[:upper:]' '[:lower:]')"
-    gsettings set org.gnome.desktop.calendar show-weekdate true
-    sleep 1
-    "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-calendar-$first.json" 20 ||
-        fail G-CAL-PREFS "live calendar tree is unavailable"
-    "$PY" "$ROOT/scripts/lib/tuna-calendar-preferences-proof.py" "$ARTIFACTS/a11y-calendar-$first.json" "$first" true ||
-        fail G-CAL-PREFS "weekday order or ISO week numbers did not follow $first"
-done
-gsettings reset org.gnome.desktop.calendar week-start-day
-gsettings reset org.gnome.desktop.calendar show-weekdate
-sleep 1
-"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-calendar-reset.json" 20 ||
-    fail G-CAL-PREFS "reset calendar tree is unavailable"
-"$PY" "$ROOT/scripts/lib/tuna-calendar-preferences-proof.py" "$ARTIFACTS/a11y-calendar-reset.json" default false ||
-    fail G-CAL-PREFS "locale reset or hiding week numbers failed"
-jq '[.[] | select(.showing and .role == "label" and (.name | test("^(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)$"))) | .name]' "$ARTIFACTS/a11y-calendar.json" >"$ARTIFACTS/calendar-initial-headings.json"
-jq '[.[] | select(.showing and .role == "label" and (.name | test("^(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)$"))) | .name]' "$ARTIFACTS/a11y-calendar-reset.json" >"$ARTIFACTS/calendar-reset-headings.json"
-cmp "$ARTIFACTS/calendar-initial-headings.json" "$ARTIFACTS/calendar-reset-headings.json" ||
-    fail G-CAL-PREFS "reset did not restore the initial locale headings"
-scrot "$ARTIFACTS/02-calendar-reset.png" >/dev/null
-pass G-CAL-PREFS "live weekday changes, six ISO week labels and locale reset are visible in the same shell"
-"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-calendar-launch.json" 20 --press "Open Calendar" ||
-    fail G-CAL-LAUNCH "events card has no accessible launch action"
-sleep 1
-[ "$(cat "$ARTIFACTS/calendar-launch" 2>/dev/null)" = "calendar:///$(date +%F)" ] ||
-    fail G-CAL-LAUNCH "default calendar did not launch at the selected day"
-"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-calendar-closed.json" 20
-if showing "$ARTIFACTS/a11y-calendar-closed.json" "Open Calendar"; then
-    fail G-CAL-LAUNCH "calendar popover stayed open after launch"
-fi
-pass G-CAL-LAUNCH "default calendar launches selected day through Tuna Desktop and closes the menu"
 
 xdotool key Escape
 sleep 1
@@ -2808,7 +2932,26 @@ scrot "$ARTIFACTS/10-search.png" >/dev/null
 # A blinking GTK caret would redraw the entry at the display rate. The
 # grid-cancel comparison's old role runs pinned pre-#503 binaries through
 # this stage, so the gate belongs to the current build only.
+# The overview keeps the top bar, whose clock redraws once as the minute
+# turns (wall_clock.rs, as GnomeWallClock): a legitimate frame, not the
+# entry's. The window never spans a turn: within 3 s of one it first
+# waits for that turn's frame to be drawn, and within 1 s after one it
+# starts once the turn is 1 s old.
 if [ "$GRID_CANCEL_OLD_NEGATIVE" != 1 ]; then
+    minute_ms() { echo $(($(date +%s%3N) % 60000)); }
+    sleep_ms() { sleep "$(printf '%d.%03d' $(($1 / 1000)) $(($1 % 1000)))"; }
+    search_still_ms="$(minute_ms)"
+    if [ "$search_still_ms" -ge 57000 ]; then
+        search_still_frames="$(jq .rendered_frames "$CSTATE")"
+        search_still_ms="$(minute_ms)"
+    fi
+    if [ "$search_still_ms" -ge 57000 ]; then
+        sleep_ms $((60000 - search_still_ms))
+        cstate ".rendered_frames > $search_still_frames" "the clock's minute turn drawn" 5 ||
+            fail G-OV-SEARCH-STILL "the panel clock drew no frame as the minute turned"
+    elif [ "$search_still_ms" -lt 1000 ]; then
+        sleep_ms $((1000 - search_still_ms))
+    fi
     search_still_frames="$(jq .rendered_frames "$CSTATE")"
     sleep 1.5
     [ "$(jq .rendered_frames "$CSTATE")" = "$search_still_frames" ] ||
@@ -3683,16 +3826,20 @@ RUNNING_MARKER="$ARTIFACTS/running-app-relaunched"
 rm -f "$RUNNING_MARKER"
 printf '[Desktop Entry]\nName=Tuna Running Probe\nExec=touch %s\nType=Application\n' "$RUNNING_MARKER" >"$running_desktop"
 sleep 1.5
-# The tile, on whichever grid page holds it: its centre on the output
-# from the App Grid window's own nodes (the dash lists the app too).
-running_tile() {
-    jq -er --arg name "Tuna Running Probe" --argjson ox "$grid_origin_x" --argjson oy "$grid_origin_y" --argjson width "$WIDTH" '
+# A showing button's centre on the output, from one shell window's own
+# nodes ($2: its frame's name) at that window's origin ($4, $5).
+frame_point() {
+    jq -er --arg frame "$2" --arg name "$3" --argjson ox "$4" --argjson oy "$5" --argjson width "$WIDTH" '
         [foreach .[] as $n (null; if $n.role == "frame" then $n.name else . end; [., $n])]
-        | map(select(.[0] == "App Grid") | .[1]
+        | map(select(.[0] == $frame) | .[1]
             | select(.showing and (.role == "push button" or .role == "button") and .name == $name
                 and .bounds[2] > 0 and .bounds[3] > 0
                 and .bounds[0] + $ox >= 0 and .bounds[0] + $ox + .bounds[2] <= $width))
         | first | .bounds | "\((.[0] + $ox + .[2] / 2) | floor) \((.[1] + $oy + .[3] / 2) | floor)"' "$1"
+}
+# The tile, on whichever grid page holds it (the dash lists the app too).
+running_tile() {
+    frame_point "$1" "App Grid" "Tuna Running Probe" "$grid_origin_x" "$grid_origin_y"
 }
 running_open_grid() {
     xdotool key super+a
@@ -3747,6 +3894,170 @@ cstate '.overview_open | not' "closed after Ctrl+click" ||
 cp "$ARTIFACTS/running-app-hidden.desktop" "$running_desktop"
 sleep 1.5
 pass G-GRID-ACTIVATE-RUNNING "a running app's grid tile raises its window without relaunching or zooming; Ctrl+click opens another with the zoom"
+
+# GNOME's dash (dash.js:16-190, 640-780): an app joining the dash zooms
+# and fades in over DASH_ANIMATION_TIME 200 ms ease-out-quad and one
+# leaving zooms and fades out from where it is drawn; a hovered item's
+# label fades in above it over 150 ms after DASH_ITEM_HOVER_TIMEOUT
+# 300 ms and out over 100 ms. The shell reads this proof's animation
+# clock, so its traced frames (TUNA_DASH_TRACE) are sampled at exact
+# delays. Test windows are window-backed dash items.
+motion_policy Full
+xdotool key Super_L
+cstate '.overview_open and .overview_progress == 1' "overview for the dash" ||
+    fail G-DASH-MOTION "the overview did not open"
+sleep 1
+anim_clock 0
+cstate '.animation_clock_manual' "frozen dash clock" ||
+    fail G-DASH-MOTION "the clock file did not freeze animation time"
+dash_clock=0
+# Move the frozen animation clock on by $1 ms.
+dash_after() {
+    dash_clock=$((dash_clock + $1))
+    anim_clock "$dash_clock"
+}
+# Map test window $1 ($2: its colour); dash_key names its dash item.
+dash_window() {
+    dash_windows=$(jq '.windows | length' "$CSTATE")
+    WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/tuna-test-window.py" "$1" "$2" \
+        >"$ARTIFACTS/window-dash-$1.log" 2>&1 &
+    dash_pid=$!
+    cstate "(.windows | length) == $((dash_windows + 1))" "$1 mapped" ||
+        fail G-DASH-MOTION "$1 never mapped"
+    dash_app="tuna-test-$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+    dash_key="window:$(jq -r --arg a "$dash_app" '[.windows[] | select(.app_id == $a) | .id] | max' "$CSTATE")"
+    cstate '.overview_open' "overview kept" || fail G-DASH-MOTION "mapping $1 closed the overview"
+}
+dash_close() {
+    kill "$1"
+    cstate "(.windows | length) == $dash_windows" "window gone" ||
+        fail G-DASH-MOTION "a test window did not close"
+}
+dash_mark="$(log_mark)"
+dash_window Delta '#c061cb'
+delta_pid=$dash_pid
+delta_key=$dash_key
+log_wait "$dash_mark" "dash item $delta_key show start from=0.0000,0.0000 ms=200 motion=full clock=manual" ||
+    fail G-DASH-MOTION "a new running app did not start GNOME's 200 ms zoom in on the frozen clock"
+dash_after 100
+log_wait "$dash_mark" "dash item $delta_key frame scale=0.7500 opacity=0.7500" ||
+    fail G-DASH-MOTION "100 ms in, the new item was not at ease-out-quad 75% size and opacity"
+scrot "$ARTIFACTS/dash-add-100ms.png" >/dev/null
+dash_after 100
+log_wait "$dash_mark" "dash item $delta_key settle scale=1.0000 opacity=1.0000" ||
+    fail G-DASH-MOTION "the new item did not settle 200 ms in"
+# Its hover label, above it.
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-dash-motion.json" 20 ||
+    fail G-DASH-MOTION "accessibility dump failed"
+cstate '.layers | any(.namespace == "tuna-shell-dash")' "dash layer" || fail G-DASH-MOTION "dash layer missing"
+dash_ox="$(jq '.layers[] | select(.namespace == "tuna-shell-dash") | .rect[0]' "$CSTATE")"
+dash_oy="$(jq '.layers[] | select(.namespace == "tuna-shell-dash") | .rect[1]' "$CSTATE")"
+dash_point="$(frame_point "$ARTIFACTS/a11y-dash-motion.json" Dash tuna-test-delta "$dash_ox" "$dash_oy")" ||
+    fail G-DASH-MOTION "the new dash item has no bounds"
+dash_mark="$(log_mark)"
+# shellcheck disable=SC2086
+xdotool mousemove --window "$WID" $dash_point
+sleep 0.1
+log_has "$dash_mark" "dash label $delta_key show" &&
+    fail G-DASH-MOTION "the label showed before GNOME's 300 ms hover timeout"
+log_wait "$dash_mark" "dash label $delta_key show start from=0.0000 ms=150 motion=full clock=manual" ||
+    fail G-DASH-MOTION "hovering the item did not start its label's 150 ms fade"
+dash_after 75
+log_wait "$dash_mark" "dash label $delta_key frame opacity=0.7500" ||
+    fail G-DASH-MOTION "75 ms in, the label was not at ease-out-quad 75%"
+scrot "$ARTIFACTS/dash-label-75ms.png" >/dev/null
+dash_after 75
+log_wait "$dash_mark" "dash label $delta_key settle opacity=1.0000" ||
+    fail G-DASH-MOTION "the label did not settle 150 ms in"
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-dash-label.json" 20 ||
+    fail G-DASH-MOTION "accessibility dump failed"
+# The label shows as a plain label (GNOME's chrome St.Label); the item's
+# button stays the one control carrying the name.
+jq -e 'any(.[]; .showing and .role == "label" and .name == "tuna-test-delta")' \
+    "$ARTIFACTS/a11y-dash-label.json" >/dev/null ||
+    fail G-DASH-MOTION "the hovered item's label did not show"
+[ "$(jq '[.[] | select(.showing and .role != "label" and .name == "tuna-test-delta")] | length' "$ARTIFACTS/a11y-dash-label.json")" = 1 ] ||
+    fail G-DASH-MOTION "the label added a second control named like the item"
+dash_mark="$(log_mark)"
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 3))
+log_wait "$dash_mark" "dash label $delta_key hide start from=1.0000 ms=100 motion=full clock=manual" ||
+    fail G-DASH-MOTION "leaving the item did not start its label's 100 ms fade out"
+dash_after 50
+log_wait "$dash_mark" "dash label $delta_key frame opacity=0.2500" ||
+    fail G-DASH-MOTION "50 ms out, the label was not at ease-out-quad 25%"
+dash_after 50
+log_wait "$dash_mark" "dash label $delta_key settle opacity=0.0000" ||
+    fail G-DASH-MOTION "the label did not fade out in 100 ms"
+# An item leaving while it still zooms in shrinks back from where it is
+# drawn, over the whole 200 ms.
+dash_mark="$(log_mark)"
+dash_window Epsilon '#986a44'
+log_wait "$dash_mark" "dash item $dash_key show start from=0.0000,0.0000 ms=200" ||
+    fail G-DASH-MOTION "the second item did not zoom in"
+dash_after 100
+log_wait "$dash_mark" "dash item $dash_key frame scale=0.7500 opacity=0.7500" ||
+    fail G-DASH-MOTION "the second item was not at 75% 100 ms in"
+dash_close "$dash_pid"
+log_wait "$dash_mark" "dash item $dash_key hide start from=0.7500,0.7500 ms=200 motion=full clock=manual" ||
+    fail G-DASH-MOTION "the item leaving mid-zoom did not reverse from where it was drawn"
+log_has "$dash_mark" "dash item $dash_key frame scale=0.0000" &&
+    fail G-DASH-MOTION "the item leaving mid-zoom jumped"
+dash_after 100
+log_wait "$dash_mark" "dash item $dash_key frame scale=0.1875 opacity=0.1875" ||
+    fail G-DASH-MOTION "100 ms into the reversal the item was not at ease-out-quad from 75%"
+dash_after 100
+log_wait "$dash_mark" "dash item $dash_key settle scale=0.0000 opacity=0.0000" ||
+    fail G-DASH-MOTION "the reversed item did not leave 200 ms after its window closed"
+dash_mark="$(log_mark)"
+dash_windows=$(($(jq '.windows | length' "$CSTATE") - 1))
+dash_close "$delta_pid"
+log_wait "$dash_mark" "dash item $delta_key hide start from=1.0000,1.0000 ms=200 motion=full clock=manual" ||
+    fail G-DASH-MOTION "a closed app's item did not start zooming out"
+dash_after 100
+log_wait "$dash_mark" "dash item $delta_key frame scale=0.2500 opacity=0.2500" ||
+    fail G-DASH-MOTION "100 ms out, the item was not at ease-out-quad 25%"
+dash_after 100
+log_wait "$dash_mark" "dash item $delta_key settle scale=0.0000 opacity=0.0000" ||
+    fail G-DASH-MOTION "the closed app's item did not leave in 200 ms"
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-dash-removed.json" 20 ||
+    fail G-DASH-MOTION "accessibility dump failed"
+showing "$ARTIFACTS/a11y-dash-removed.json" tuna-test-delta &&
+    fail G-DASH-MOTION "the removed item stayed in the dash"
+# Reduced Motion: the item keeps its size and only fades.
+motion_policy FadesOnly
+dash_mark="$(log_mark)"
+dash_window Epsilon '#986a44'
+log_wait "$dash_mark" "dash item $dash_key show start from=0.0000,0.0000 ms=200 motion=fade-only clock=manual" ||
+    fail G-DASH-MOTION "Reduced Motion dropped the item's fade"
+dash_after 100
+log_wait "$dash_mark" "dash item $dash_key frame scale=1.0000 opacity=0.7500" ||
+    fail G-DASH-MOTION "under Reduced Motion the item zoomed, or did not fade"
+dash_after 100
+log_wait "$dash_mark" "dash item $dash_key settle scale=1.0000 opacity=1.0000" ||
+    fail G-DASH-MOTION "under Reduced Motion the item did not settle"
+dash_close "$dash_pid"
+log_wait "$dash_mark" "dash item $dash_key hide start from=1.0000,1.0000 ms=200 motion=fade-only" ||
+    fail G-DASH-MOTION "under Reduced Motion the leaving item did not fade"
+dash_after 100
+log_wait "$dash_mark" "dash item $dash_key frame scale=1.0000 opacity=0.2500" ||
+    fail G-DASH-MOTION "under Reduced Motion the leaving item shrank"
+dash_after 100
+log_wait "$dash_mark" "dash item $dash_key settle scale=1.0000 opacity=0.0000" ||
+    fail G-DASH-MOTION "under Reduced Motion the leaving item did not settle"
+# Animations off: in and out at once.
+motion_policy Off
+dash_mark="$(log_mark)"
+dash_window Epsilon '#986a44'
+log_wait "$dash_mark" "dash item $dash_key show instant motion=off" ||
+    fail G-DASH-MOTION "with animations off the item still zoomed in"
+dash_close "$dash_pid"
+log_wait "$dash_mark" "dash item $dash_key hide instant motion=off" ||
+    fail G-DASH-MOTION "with animations off the item still zoomed out"
+motion_policy Full
+real_clock || fail G-DASH-MOTION "removing the clock file did not resume real time"
+xdotool key Escape
+cstate '.overview_open | not' "dash overview closed" || fail G-DASH-MOTION "the overview would not close"
+pass G-DASH-MOTION "dash items zoom and fade in and out over 200 ms ease-out-quad, a leaving item reverses from where it stands, hover labels fade 150/100 ms after 300 ms; Reduced Motion only fades, off is instant"
 
 # Notifications (#56). Close whatever the grid left open first (#97).
 xdotool key Escape
@@ -12029,6 +12340,7 @@ if [ -n "$PAM_ON" ]; then
     cp "$CSTATE" "$ARTIFACTS/locate-after-dbus-unlock.json"
     gsettings set org.gnome.desktop.interface locate-pointer false
     pass G-POINTER-TRACE-PRIVATE "D-Bus lock during an actual rendered frozen-clock ripple redacts cursor diagnostics; unlock retains no activity/history"
+    lock_with_menu_gate
     # Reduced Motion keeps GNOME's opacity change and drops the slide.
     gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
     cstate '.motion_policy == "fade-only"' "reduced curtain" ||
