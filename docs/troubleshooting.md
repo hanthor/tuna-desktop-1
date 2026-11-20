@@ -30,7 +30,7 @@ names, and add `git rev-parse HEAD`.
 
 | Symptom | Cause and fix |
 |---|---|
-| `pkg-config` cannot find `libseat`, `libinput`, `libudev`, `gbm`, `libdrm`, `xkbcommon`, `gtk4`, `libadwaita-1`, `libpipewire-0.3` or `gtk4-layer-shell-0` | A development package is missing. Install the list in [Prerequisites](development.md#prerequisites) for your distribution. |
+| `pkg-config` cannot find `libseat`, `libinput`, `libudev`, `gbm`, `libdrm`, `xkbcommon`, `gtk4`, `libadwaita-1`, `gweather4`, `libpipewire-0.3` or `gtk4-layer-shell-0` | A development package is missing. Install the list in [Prerequisites](development.md#prerequisites) for your distribution. |
 | `gtk4-layer-shell-0` is missing on Ubuntu 24.04 | Ubuntu 24.04 does not package it. Build it with `scripts/ci-install-gtk4-layer-shell`, as CI does. The shell needs version 1.1 or later. |
 | The `pipewire` or `libspa` crate's build script fails to find `libclang` | Install `libclang-dev` (Ubuntu) or `clang` (Arch); bindgen needs it at build time. |
 | A dependency says it needs a newer `rustc` | No MSRV is declared and CI uses the current stable toolchain. Run `rustup update stable`. |
@@ -94,9 +94,10 @@ qualified yet.
   dependency resolution fails because the package needs gtk4-layer-shell 1.1
   or later ([install guide](install.md#from-the-debian-format-package)).
   Build from source there instead.
-- `/etc/pam.d/tuna-lock` is a configuration file. If you changed or deleted
-  it, dpkg can stop and ask what to do during an upgrade; an unattended
-  upgrade then leaves the package unconfigured. Answer the prompt, then run
+- `/etc/pam.d/tuna-lock` and `/etc/pam.d/tuna-lock-fingerprint` (fingerprint
+  unlock) are configuration files. If you changed or deleted one, dpkg can
+  stop and ask what to do during an upgrade; an unattended upgrade then leaves
+  the package unconfigured. Answer the prompt, then run
   `sudo dpkg --configure -a`.
 - Upgrading from a package with the project's former name is covered in the
   [upgrade and recovery guide](legacy-upgrade.md).
@@ -115,7 +116,7 @@ Build it from a checkout with:
 TUNA_LOCAL_SRC="$PWD" makepkg -f --dir packaging/arch
 ```
 
-Both PAM files are in the package's `backup` array, so pacman keeps a file you
+Every PAM file is in the package's `backup` array, so pacman keeps a file you
 changed and writes the new one as `.pacnew` beside it. Compare the two and
 merge by hand ([legacy upgrade](legacy-upgrade.md#arch-replacement)).
 
@@ -126,7 +127,8 @@ merge by hand ([legacy upgrade](legacy-upgrade.md#arch-replacement)).
   binaries into the same directory
   ([install guide](install.md#installing)).
 - Install `share/pam.d/tuna-lock` as `/etc/pam.d/tuna-lock`, or the lock
-  screen cannot be unlocked.
+  screen cannot be unlocked, and `share/pam.d/tuna-lock-fingerprint` as
+  `/etc/pam.d/tuna-lock-fingerprint`, or fingerprint unlock fails.
 
 ### TunaOS Marlin
 
