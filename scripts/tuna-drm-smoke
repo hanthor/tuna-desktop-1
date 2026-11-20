@@ -102,7 +102,15 @@ cleanup() {
     colord_stop
     if [ -n "$SYSTEM_BUS_PID" ]; then kill "$SYSTEM_BUS_PID" 2>/dev/null || true; fi
     if [ -n "$DBUS_PID" ]; then kill "$DBUS_PID" 2>/dev/null || true; fi
-    if [ -n "$SEATD_PID" ]; then sudo kill "$SEATD_PID" 2>/dev/null || true; fi
+    # Our seatd unlinks /run/seatd.sock as it exits, so it must be gone
+    # before the system seatd comes back: otherwise it removes the system
+    # one's fresh socket and leaves the host's seatd listening on nothing.
+    # SEATD_PID is the backgrounded sudo, which relays the signal and only
+    # exits once seatd has.
+    if [ -n "$SEATD_PID" ]; then
+        sudo kill "$SEATD_PID" 2>/dev/null || true
+        wait "$SEATD_PID" 2>/dev/null || true
+    fi
     # Put a stopped system seatd back exactly as we found it.
     if [ -n "$SYSTEM_SEATD" ]; then sudo systemctl start seatd 2>/dev/null || true; fi
 }
