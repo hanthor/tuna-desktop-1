@@ -35,6 +35,7 @@ GREETER_DROP_IN = 'usr/share/tuna-desktop/greeter/gnome-login.session.conf'
 SESSION = 'usr/share/wayland-sessions/tuna.desktop'
 OLD_SESSION = 'usr/share/wayland-sessions/roost.desktop'
 PAM = 'etc/pam.d/tuna-lock'
+FP_PAM = 'etc/pam.d/tuna-lock-fingerprint'
 OLD_PAM = 'etc/pam.d/roost-lock'
 DESKTOP = '''[Desktop Entry]
 Name=Tuna Desktop
@@ -46,7 +47,8 @@ DesktopNames=Tuna;GNOME;
 X-GDM-SessionRegisters=true
 '''
 PAM_TEXT = 'auth include login\naccount include login\n'
-CONFFILES = '/etc/pam.d/tuna-lock\n/etc/pam.d/roost-lock\n'
+FP_PAM_TEXT = 'auth required pam_fprintd.so\naccount include login\n'
+CONFFILES = '/etc/pam.d/tuna-lock\n/etc/pam.d/tuna-lock-fingerprint\n/etc/pam.d/roost-lock\n'
 
 
 def member(name, body=b'', kind=tarfile.REGTYPE, mode=0o644, target=''):
@@ -124,7 +126,7 @@ int main(int argc, char **argv) {
             shutil.copyfile(cls.elf, path)
             path.chmod(0o755)
         for name, body in ((SESSION, DESKTOP), (OLD_SESSION, DESKTOP + 'NoDisplay=true\n'),
-                           (PAM, PAM_TEXT), (OLD_PAM, PAM_TEXT),
+                           (PAM, PAM_TEXT), (FP_PAM, FP_PAM_TEXT), (OLD_PAM, PAM_TEXT),
                            ('usr/lib/systemd/user/tuna-session.target', '[Unit]\nDescription=Fixture session\n'),
                            (GREETER_UNIT, (ROOT / 'share/systemd/user/tuna-greeter.service').read_text()),
                            (GREETER_DROP_IN, (ROOT / 'share/greeter/gnome-login.session.conf').read_text()),
@@ -297,12 +299,12 @@ printf '%s\\n' 'shlibs:Depends=libc6 (>= 2.34)'
                                 reason='forbidden-legacy-path')
 
     def test_missing_each_current_or_transition_file_is_rejected(self):
-        for path in (SESSION, OLD_SESSION, PAM, OLD_PAM):
+        for path in (SESSION, OLD_SESSION, PAM, FP_PAM, OLD_PAM):
             with self.subTest(path=path):
                 self.reject(data=replace(self.data, path), reason='transition-file-missing')
 
     def test_transition_regular_file_and_mode_requirements(self):
-        for path in (SESSION, OLD_SESSION, PAM, OLD_PAM):
+        for path in (SESSION, OLD_SESSION, PAM, FP_PAM, OLD_PAM):
             for kind in (tarfile.SYMTYPE, tarfile.DIRTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE):
                 with self.subTest(path=path, kind=kind):
                     self.reject(data=replace(self.data, path, member(path, kind=kind, target='tuna-lock')),
@@ -334,6 +336,12 @@ printf '%s\\n' 'shlibs:Depends=libc6 (>= 2.34)'
                             PAM_TEXT + 'auth sufficient pam_permit.so\n', 'account include login\nauth include login\n'):
                 with self.subTest(path=path, content=content):
                     self.reject(data=replace(self.data, path, member(path, content)), reason='transition-pam-content')
+        for content in (PAM_TEXT, 'auth required pam_fprintd.so\n', 'auth sufficient pam_fprintd.so\naccount include login\n',
+                        'auth required pam_fprintd.so\naccount include system-auth\n',
+                        FP_PAM_TEXT + 'auth sufficient pam_permit.so\n',
+                        'account include login\nauth required pam_fprintd.so\n'):
+            with self.subTest(path=FP_PAM, content=content):
+                self.reject(data=replace(self.data, FP_PAM, member(FP_PAM, content)), reason='transition-pam-content')
 
     def test_transition_text_is_bounded_and_utf8(self):
         for content in (b'', b'x' * (16 * 1024 + 1), b'\xff'):
@@ -341,11 +349,15 @@ printf '%s\\n' 'shlibs:Depends=libc6 (>= 2.34)'
                 self.reject(data=replace(self.data, OLD_PAM, member(OLD_PAM, content)),
                             reason='transition-text-bound' if content != b'\xff' else 'original archive rejected')
 
-    def test_exact_two_conffiles_and_no_maintainer_hooks(self):
+    def test_exact_conffiles_and_no_maintainer_hooks(self):
         for content in ('', '/etc/pam.d/tuna-lock\n', '/etc/pam.d/roost-lock\n',
-                        '/etc/pam.d/tuna-lock\n/etc/pam.d/tuna-lock\n', CONFFILES + '/etc/extra\n',
-                        'etc/pam.d/tuna-lock\n/etc/pam.d/roost-lock\n', CONFFILES + '\n',
-                        '/etc/pam.d/tuna-lock remove-on-upgrade\n/etc/pam.d/roost-lock\n'):
+                        '/etc/pam.d/tuna-lock\n/etc/pam.d/roost-lock\n',
+                        '/etc/pam.d/tuna-lock\n/etc/pam.d/tuna-lock-fingerprint\n',
+                        '/etc/pam.d/tuna-lock\n/etc/pam.d/tuna-lock\n/etc/pam.d/roost-lock\n',
+                        CONFFILES + '/etc/extra\n',
+                        'etc/pam.d/tuna-lock\n/etc/pam.d/tuna-lock-fingerprint\n/etc/pam.d/roost-lock\n',
+                        CONFFILES + '\n',
+                        '/etc/pam.d/tuna-lock\n/etc/pam.d/tuna-lock-fingerprint remove-on-upgrade\n/etc/pam.d/roost-lock\n'):
             with self.subTest(content=content):
                 self.reject(control=replace(self.control, 'conffiles', member('conffiles', content)),
                             reason='transition-text-bound' if not content else 'transition-conffiles')
@@ -435,20 +447,23 @@ package
             env=dict(os.environ, TUNA_LOCAL_SRC=str(ROOT), CARGO_TARGET_DIR=str(target.parent),
                      pkgdir=str(stage), srcdir=str(self.root)), text=True, capture_output=True, timeout=30, umask=0o002)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ['etc/pam.d/tuna-lock', 'etc/pam.d/roost-lock'])
+        self.assertEqual(result.stdout.splitlines(),
+                         ['etc/pam.d/tuna-lock', 'etc/pam.d/tuna-lock-fingerprint', 'etc/pam.d/roost-lock'])
         for name in ('usr', 'usr/share', 'usr/share/wayland-sessions', 'etc', 'etc/pam.d'):
             self.assertEqual((stage / name).stat().st_mode & 0o7777, 0o755, name)
         self.assertEqual({str(path.relative_to(stage)) for path in stage.rglob('*') if 'roost' in path.name.lower()},
                          {OLD_SESSION, OLD_PAM})
-        for name in (OLD_SESSION, OLD_PAM, PAM):
+        for name in (OLD_SESSION, OLD_PAM, PAM, FP_PAM):
             path = stage / name
             self.assertTrue(path.is_file())
             self.assertFalse(path.is_symlink())
             self.assertEqual(path.stat().st_mode & 0o7777, 0o644)
         self.assertEqual((stage / OLD_SESSION).read_text(), DESKTOP + 'NoDisplay=true\n')
-        for name in (OLD_PAM, PAM):
+        for name, expected in ((OLD_PAM, [['auth', 'include', 'login'], ['account', 'include', 'login']]),
+                               (PAM, [['auth', 'include', 'login'], ['account', 'include', 'login']]),
+                               (FP_PAM, [['auth', 'required', 'pam_fprintd.so'], ['account', 'include', 'login']])):
             rules = [line.split() for line in (stage / name).read_text().splitlines() if line.strip() and not line.startswith('#')]
-            self.assertEqual(rules, [['auth', 'include', 'login'], ['account', 'include', 'login']])
+            self.assertEqual(rules, expected, name)
 
     def test_arch_package_requires_helper_interpreter_and_keeps_geoclue_optional(self):
         result = subprocess.run(['bash', '-euc', '''source "$1"
