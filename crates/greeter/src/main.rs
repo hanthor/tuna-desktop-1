@@ -458,6 +458,7 @@ impl Greeter {
             let index = usize::try_from(row.index()).unwrap_or(usize::MAX);
             let user = greeter.users.borrow().get(index).cloned();
             if let Some(user) = user {
+                greeter.conflict.dismiss_notice();
                 greeter.choose_user(&user.name, Some(&user));
             }
         });

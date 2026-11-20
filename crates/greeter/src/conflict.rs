@@ -92,6 +92,9 @@ pub struct Conflict {
     force: gtk::Button,
     spinner: gtk::Spinner,
     pending: RefCell<Pending>,
+    /// "Login Attempt Timed Out", up until a user is chosen
+    /// (`_conflictingSessionNotification`).
+    notice: RefCell<Option<adw::Toast>>,
 }
 
 impl Conflict {
@@ -148,7 +151,15 @@ impl Conflict {
             force,
             spinner,
             pending: RefCell::default(),
+            notice: RefCell::default(),
         })
+    }
+
+    /// loginDialog.js `_onUserListActivated`: the timed-out notice goes.
+    pub fn dismiss_notice(&self) {
+        if let Some(toast) = self.notice.borrow_mut().take() {
+            toast.dismiss();
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -285,7 +296,8 @@ impl Greeter {
                 // `Urgency.CRITICAL`: messageTray.js never times its
                 // banner out; it stays until dismissed.
                 toast.set_timeout(0);
-                greeter.conflict.toasts.add_toast(toast);
+                greeter.conflict.toasts.add_toast(toast.clone());
+                *greeter.conflict.notice.borrow_mut() = Some(toast);
                 greeter.abandon_opened();
             },
         );

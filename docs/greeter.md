@@ -262,7 +262,7 @@ moved to `userVerifier.js` and the auth services):
   `Cancel` closes the opened session) back to the list; Force Stop calls
   `StopConflictingSession` and the session starts when logind removes the
   old one; after 60 s unanswered the dialog closes with "Login Attempt Timed
-  Out" (a toast, kept until dismissed like GNOME's critical banner) and the prompt resets
+  Out" (a toast that, like GNOME's critical notification, stays until a user is chosen) and the prompt resets
   (GDM's `Cancel`) back to the list.
 - **User switching.** The list rings users with a session (`logged-in`,
   libaccountsservice's count from logind; the row's accessible description
