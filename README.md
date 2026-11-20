@@ -1,6 +1,6 @@
 # Tuna Desktop
 
-Formerly **Roost**. Binaries, packages, crates and environment variables were renamed in [#505](https://github.com/tuna-os/tuna-desktop/issues/505); the old `roost-*` names keep working for one release (see [packaging/README.md](packaging/README.md)).  <!-- tuna-rename: keep -->
+Formerly **Roost**. Binaries, packages, crates and environment variables were renamed in [#505](https://github.com/tuna-os/tuna-desktop/issues/505); the one-release compatibility layer (`roost-*` binary symlinks and `ROOST_*` environment variables) was removed in [#775](https://github.com/tuna-os/tuna-desktop/pull/775). [packaging/README.md](packaging/README.md#upgrading-from-the-former-name) covers upgrading from the old package.  <!-- tuna-rename: keep -->
 
 A new, independent Wayland desktop session with a GNOME-inspired everyday workflow. This project is not a GNOME Shell rewrite and does not promise compatibility with GNOME Shell extensions or private Mutter APIs.
 
@@ -82,7 +82,7 @@ See [capture details](docs/walkthrough/README-media.md) for source revisions and
 
 ## Project status
 
-**Nested developer preview.** A Smithay compositor supervises a GTK4/libadwaita
+**Beta prerelease ([v1.0.0-beta.3](docs/releases/v1.0.0-beta.3.md)), not yet a daily driver.** A Smithay compositor supervises a GTK4/libadwaita
 shell with overview window previews, app grid and search, quick settings,
 notifications, calendar, keyboard navigation and AT-SPI accessibility. Tuna Desktop
 also includes its session supervisor, shell host and versioned
@@ -111,10 +111,11 @@ requirement traceability.
   toolchain; no MSRV is declared, crates use edition 2021; see the
   [API stability and MSRV policy](docs/api-stability.md)).
 - **System libraries**: libseat, libinput, libudev, GBM, libdrm,
-  libxkbcommon, GTK 4, libadwaita, PipeWire, Wayland and gtk4-layer-shell
-  development files, plus EGL (Mesa llvmpipe is enough) to run a nested
-  session. The [development guide](docs/development.md#prerequisites)
-  has the exact Ubuntu and Arch package lists CI uses.
+  libxkbcommon, GTK 4, libadwaita, libgweather 4, PipeWire, Wayland and
+  gtk4-layer-shell development files, plus EGL (Mesa llvmpipe is enough)
+  to run a nested session. The
+  [development guide](docs/development.md#prerequisites) has the exact
+  Ubuntu and Arch package lists CI uses.
 - **Spektacular CLI** is needed only for spec and plan work, not for
   building or running Tuna Desktop; see the
   [development guide](docs/development.md#spektacular-cli-planning-work-only).

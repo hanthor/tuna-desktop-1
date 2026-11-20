@@ -373,8 +373,8 @@ pub struct Session<'a> {
     switcher_thumbnails: Option<Vec<tuna_shell_control::SwitcherThumbnail>>,
     /// The shell's switcher keys, until the runtime drains them.
     switcher_keys: Option<Vec<tuna_shell_control::SwitcherKey>>,
-    /// Administrative lockdown (#357): the hub's policy at accept,
-    /// refreshed onto every session by [`ControlHub::refresh_lockdown`].
+    /// Administrative lockdown (#357): the hub's policy at accept, pushed
+    /// onto every session by [`ControlHub::set_lock_screen_disabled`].
     /// `Lock` commands consult it; a restrictive key denies them with
     /// the administrator's reason instead of engaging the lock.
     lockdown: LockdownPolicy,
@@ -386,6 +386,11 @@ pub struct Session<'a> {
     pad_osd_closed: Vec<u32>,
     /// A `CloseMenuUnanimated` arrived, drained by the hub.
     close_menu_unanimated: bool,
+    /// Close-dialog answers `(window, response)`, drained by the hub.
+    close_dialog_responses: Vec<(u64, tuna_shell_control::CloseDialogResponse)>,
+    /// The session-bus unique name the supervised shell declared over this
+    /// session (`DeclareBusName`), read by [`ControlHub::shell_bus_names`].
+    bus_name: Option<String>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -487,6 +492,8 @@ impl<'a> Session<'a> {
             pad_osd_requests: Vec::new(),
             pad_osd_closed: Vec::new(),
             close_menu_unanimated: false,
+            close_dialog_responses: Vec::new(),
+            bus_name: None,
         };
         let msg = match session.conn.read_frame() {
             Ok(msg) => msg,
@@ -572,7 +579,7 @@ impl<'a> Session<'a> {
     /// explicitly revokes authority sent earlier.
     pub fn send_native_outputs(
         &mut self,
-        outputs: &[tuna_shell_control::NativeOutputInfo],
+        outputs: &[tuna_output::NativeOutputInfo],
     ) -> Result<(), ControlError> {
         if self.peer_minor < 37 {
             return Ok(());
@@ -611,9 +618,24 @@ impl<'a> Session<'a> {
 
     /// Ask the shell to draw GNOME's window menu.
     /// Peers older than 0.42 cannot decode `ConfirmDisplayChange`, nor
-    /// older than 0.45 the tablet OSD messages, and receive nothing.
+    /// older than 0.45 the tablet OSD messages, nor older than 0.48
+    /// `WorkspaceProgress`, nor older than 0.49 `OverviewSwipe`, nor older
+    /// than 0.50 the close-dialog messages, and receive nothing.
     pub fn send_window_menu(&mut self, menu: &Message) -> Result<(), ControlError> {
         if matches!(menu, Message::ConfirmDisplayChange { .. }) && self.peer_minor < 42 {
+            return Ok(());
+        }
+        if matches!(menu, Message::WorkspaceProgress { .. }) && self.peer_minor < 48 {
+            return Ok(());
+        }
+        if matches!(menu, Message::OverviewSwipe { .. }) && self.peer_minor < 49 {
+            return Ok(());
+        }
+        if matches!(
+            menu,
+            Message::ShowCloseDialog { .. } | Message::HideCloseDialog { .. }
+        ) && self.peer_minor < 50
+        {
             return Ok(());
         }
         let tablet = matches!(
@@ -684,6 +706,16 @@ impl<'a> Session<'a> {
         }
         self.conn
             .write_frame(&Message::SeatTouchMode { touch_mode })
+    }
+
+    /// Send whether the lock screen is shown (the curtain has landed on
+    /// a locked session). Peers older than 0.51 cannot decode it and
+    /// receive nothing.
+    pub fn send_lock_screen_shown(&mut self, shown: bool) -> Result<(), ControlError> {
+        if self.peer_minor < 51 {
+            return Ok(());
+        }
+        self.conn.write_frame(&Message::LockScreenShown { shown })
     }
 
     /// Send where the overview's window previews sit.
@@ -1146,6 +1178,70 @@ impl<'a> Session<'a> {
             }
             Message::Command {
                 id,
+                kind: CommandKind::RespondCloseDialog { window, response },
+            } => {
+                if self.peer_minor < 50 {
+                    self.conn.write_frame(&Message::Error {
+                        kind: ErrorKind::UnknownCommand,
+                        message: "close dialog responses require negotiated minor 50".into(),
+                    })?;
+                    return Ok(Handled::ErrorSent {
+                        kind: ErrorKind::UnknownCommand,
+                    });
+                }
+                // The window manager carries it out (drained by the hub).
+                // No dialog shows over the lock screen, so none answers.
+                let status = if self.locked.get() {
+                    CommandStatus::Denied {
+                        reason: "session locked".into(),
+                    }
+                } else if model.windows().any(|w| w.id == window) {
+                    self.close_dialog_responses.push((window, response));
+                    CommandStatus::Applied
+                } else {
+                    CommandStatus::Denied {
+                        reason: "unknown window".into(),
+                    }
+                };
+                let applied = status == CommandStatus::Applied;
+                self.conn
+                    .write_frame(&Message::CommandResult { id, status })?;
+                Ok(Handled::CommandResult { id, applied })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::DeclareBusName { unique_name },
+            } => {
+                if self.peer_minor < 52 {
+                    self.conn.write_frame(&Message::Error {
+                        kind: ErrorKind::UnknownCommand,
+                        message: "bus name declarations require negotiated minor 52".into(),
+                    })?;
+                    return Ok(Handled::ErrorSent {
+                        kind: ErrorKind::UnknownCommand,
+                    });
+                }
+                // Only a session the hub bound to the supervised shell
+                // child (its pidfd-pinned peer) names the shell on D-Bus.
+                let status = if self.auth_owner.is_none() {
+                    CommandStatus::Denied {
+                        reason: "only the supervised shell declares its bus name".into(),
+                    }
+                } else if !is_unique_bus_name(&unique_name) {
+                    CommandStatus::Denied {
+                        reason: "not a unique bus name".into(),
+                    }
+                } else {
+                    self.bus_name = Some(unique_name);
+                    CommandStatus::Applied
+                };
+                let applied = status == CommandStatus::Applied;
+                self.conn
+                    .write_frame(&Message::CommandResult { id, status })?;
+                Ok(Handled::CommandResult { id, applied })
+            }
+            Message::Command {
+                id,
                 kind: CommandKind::WindowAction { window, action },
             } => {
                 // The window manager carries it out (drained by the hub);
@@ -1275,6 +1371,7 @@ impl<'a> Session<'a> {
             | Message::AcceleratorDeactivated { .. }
             | Message::WindowMenu { .. }
             | Message::WorkspacePopup { .. }
+            | Message::WorkspaceProgress { .. }
             | Message::PointerOutput { .. }
             | Message::ScreenReader { .. }
             | Message::KeyboardAidToggled { .. }
@@ -1290,6 +1387,10 @@ impl<'a> Session<'a> {
             | Message::PadOsdInput { .. }
             | Message::ClosePadOsd { .. }
             | Message::SeatTouchMode { .. }
+            | Message::OverviewSwipe { .. }
+            | Message::ShowCloseDialog { .. }
+            | Message::HideCloseDialog { .. }
+            | Message::LockScreenShown { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
                     kind: ErrorKind::UnknownCommand,
@@ -1334,6 +1435,7 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::AcceleratorDeactivated { .. } => "AcceleratorDeactivated",
         Message::WindowMenu { .. } => "WindowMenu",
         Message::WorkspacePopup { .. } => "WorkspacePopup",
+        Message::WorkspaceProgress { .. } => "WorkspaceProgress",
         Message::PointerOutput { .. } => "PointerOutput",
         Message::ShortcutConsent { .. } => "ShortcutConsent",
         Message::ConfirmDisplayChange { .. } => "ConfirmDisplayChange",
@@ -1349,6 +1451,10 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::PadOsdInput { .. } => "PadOsdInput",
         Message::ClosePadOsd { .. } => "ClosePadOsd",
         Message::SeatTouchMode { .. } => "SeatTouchMode",
+        Message::OverviewSwipe { .. } => "OverviewSwipe",
+        Message::ShowCloseDialog { .. } => "ShowCloseDialog",
+        Message::HideCloseDialog { .. } => "HideCloseDialog",
+        Message::LockScreenShown { .. } => "LockScreenShown",
     }
 }
 
@@ -1526,6 +1632,8 @@ fn apply_command(
         | CommandKind::RequestPadOsd { .. }
         | CommandKind::PadOsdClosed { .. }
         | CommandKind::CloseMenuUnanimated
+        | CommandKind::RespondCloseDialog { .. }
+        | CommandKind::DeclareBusName { .. }
         | CommandKind::SwitchInputSource { .. }
         | CommandKind::SetWindowIconGeometries { .. }
         | CommandKind::SetWellbeingEffects { .. }
@@ -1605,6 +1713,8 @@ pub struct PollOutcome {
     pub pad_osd_closed: Vec<u32>,
     /// The shell closed a panel menu unanimated (its button was hidden).
     pub close_menu_unanimated: bool,
+    /// Close-dialog answers `(window, response)`, in order (#1035).
+    pub close_dialog_responses: Vec<(u64, tuna_shell_control::CloseDialogResponse)>,
     /// Input-source switches to make (`true` backward), in order.
     pub input_source_switches: Vec<bool>,
     /// New switcher thumbnail frames, if the shell sent any.
@@ -1613,6 +1723,9 @@ pub struct PollOutcome {
     pub switcher_keys: Option<Vec<tuna_shell_control::SwitcherKey>>,
     /// On-screen keyboard input to type, in order (#349).
     pub osk_inputs: Vec<tuna_shell_control::OskInput>,
+    /// Something arrived on the hub's sockets this round: a peer, a frame
+    /// or a hang-up. The runtime's idle tick draws only then (#503).
+    pub received: bool,
 }
 
 /// What GNOME's on-screen keyboard follows, as broadcast to the shell
@@ -1632,13 +1745,28 @@ pub struct OskBroadcast {
 pub const MAX_PENDING_PEERS: usize = 8;
 
 /// Kernel-reported credentials of a connected control peer
-/// (`SO_PEERCRED`): what the peer *is*, not what it claims.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// (`SO_PEERCRED`, plus `SO_PEERPIDFD`): what the peer *is*, not what it
+/// claims.
+#[derive(Clone, Debug)]
 pub struct PeerCred {
     /// Peer process id at connect time.
     pub pid: u32,
     /// Peer effective user id.
     pub uid: u32,
+    /// Descriptor pinned to the process that connected (`SO_PEERPIDFD`);
+    /// `None` on a kernel without it (before 6.5).
+    pub pidfd: Option<std::sync::Arc<std::os::fd::OwnedFd>>,
+}
+
+impl PeerCred {
+    /// `pid` while the pinned process that connected is still alive. A
+    /// numeric PID without a pin, or the pin of an exited process, is no
+    /// identity: that number may since have been recycled.
+    pub fn pinned_pid(&self) -> Option<u32> {
+        use std::os::fd::AsFd;
+        let pidfd = self.pidfd.as_deref()?;
+        crate::capture_security::pidfd_live(pidfd.as_fd()).then_some(self.pid)
+    }
 }
 
 /// Who may hold a control session (#30).
@@ -1651,7 +1779,8 @@ pub struct PeerCred {
 pub enum PeerGate {
     /// Any peer running as our user (tests, unsupervised development).
     SameUser,
-    /// Only the supervised shell process with this pid, as our user.
+    /// Only the supervised shell process with this pid, as our user,
+    /// pinned by `SO_PEERPIDFD`.
     Pid(u32),
     /// Nobody: no shell is running (between restarts, or none spawned).
     Closed,
@@ -1659,8 +1788,11 @@ pub enum PeerGate {
 
 impl PeerGate {
     /// Whether a peer with `peer` credentials may hold a session.
-    /// Unknown credentials are refused: fail closed.
-    pub fn admits(self, peer: Option<PeerCred>, our_uid: u32) -> bool {
+    /// Unknown credentials are refused: fail closed. The shell's gate
+    /// matches only the live pinned process, so a connection made under a
+    /// PID that was later recycled onto the shell is refused, and so is
+    /// every peer on a kernel without `SO_PEERPIDFD`.
+    pub fn admits(self, peer: Option<&PeerCred>, our_uid: u32) -> bool {
         let Some(peer) = peer else {
             return false;
         };
@@ -1669,7 +1801,7 @@ impl PeerGate {
         }
         match self {
             Self::SameUser => true,
-            Self::Pid(pid) => peer.pid == pid,
+            Self::Pid(pid) => peer.pinned_pid() == Some(pid),
             Self::Closed => false,
         }
     }
@@ -1681,7 +1813,14 @@ pub fn peer_cred(stream: &UnixStream) -> Option<PeerCred> {
     Some(PeerCred {
         pid: u32::try_from(cred.pid.as_raw_nonzero().get()).ok()?,
         uid: cred.uid.as_raw(),
+        pidfd: crate::capture_security::socket_pidfd(stream).map(std::sync::Arc::new),
     })
+}
+
+/// Whether `name` is a connection's unique bus name (`:1.N`), the only
+/// kind the bus never hands to another connection.
+fn is_unique_bus_name(name: &str) -> bool {
+    name.starts_with(':') && zbus::names::UniqueName::try_from(name).is_ok()
 }
 
 /// Our effective uid, for [`PeerGate::admits`].
@@ -1697,13 +1836,6 @@ pub fn is_private_dir(dir: &std::path::Path) -> bool {
         .map(|meta| meta.is_dir() && meta.uid() == our_uid() && meta.mode() & 0o077 == 0)
         .unwrap_or(false)
 }
-
-/// Bound on concurrent background lockdown readers (#357 fd3): one slow
-/// backend may overlap one fresh poll, but a hung backend never stacks a
-/// thread per tick. Production ticks 2 s apart with a 500 ms reader bound,
-/// so steady state holds one; the headroom keeps a slow poll from
-/// suppressing its successor.
-const LOCKDOWN_MAX_READERS: usize = 2;
 
 /// Live control-plane driver: accepts shell connections, handshakes them
 /// into [`Session`]s against one [`TokenStore`], emits deltas, and applies
@@ -1738,25 +1870,14 @@ pub struct ControlHub {
     /// the runtime (idle timeout) or `Lock` commands, shared with every
     /// live session so snapshots carry it; the shell never owns it.
     locked: std::rc::Rc<std::cell::Cell<bool>>,
-    /// Administrative lockdown (#357): read live at bind, refreshed by
-    /// [`ControlHub::refresh_lockdown`], pushed onto every session so
-    /// `Lock` commands deny under a restrictive key. Only the lock key
-    /// is live here; the shell owns the rest of the surface.
+    /// Administrative lockdown (#357): read live at bind, then followed
+    /// through [`ControlHub::set_lock_screen_disabled`], pushed onto
+    /// every session so `Lock` commands deny under a restrictive key.
+    /// Only the lock key is live here; the shell owns the rest of the
+    /// surface.
     lockdown: LockdownPolicy,
     /// Pads (id, device node) the shell's `RequestPadOsd` may name.
     pad_targets: std::rc::Rc<Vec<(u32, String)>>,
-    /// Background policy reads (#357 follow-up): each refresh spawns
-    /// one reader thread reporting here (up to
-    /// [`LOCKDOWN_MAX_READERS`] concurrent); the tick drains
-    /// completed results without waiting, so a hung backend never
-    /// stalls it.
-    lockdown_tx: std::sync::mpsc::Sender<Option<bool>>,
-    lockdown_rx: std::sync::mpsc::Receiver<Option<bool>>,
-    /// Readers currently running (#357 fd3): refreshes while this many
-    /// run skip spawning (single-flight bound), so a hung backend
-    /// cannot stack a thread per tick; the drain still applies every
-    /// landed result with last-valid-wins.
-    lockdown_inflight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Alt-Tab drive events awaiting broadcast. Unlike the overview
     /// intent (level), steps are discrete events: each one is sent to
     /// every live session exactly once, retained until all sends land.
@@ -1769,6 +1890,9 @@ pub struct ControlHub {
     accelerator_queue: Vec<(u32, u32, u32, bool)>,
     /// Window-menu requests waiting for the next poll.
     menu_queue: Vec<Message>,
+    /// The close dialogs shown now (their latest `ShowCloseDialog`), so a
+    /// shell (re)connecting mid-hang gets them with its snapshot.
+    close_dialogs: std::collections::BTreeMap<u64, Message>,
     /// What the on-screen keyboard follows, as last set by the runtime,
     /// and the value every live session holds (#349).
     osk: OskBroadcast,
@@ -1777,17 +1901,21 @@ pub struct ControlHub {
     /// value every live session holds (#502).
     touch_mode: bool,
     touch_mode_sent: Option<bool>,
+    /// Whether the lock screen is shown, as last set by the runtime, and
+    /// the value every live session holds.
+    lock_shown: bool,
+    lock_shown_sent: Option<bool>,
     /// Output inventory last handed to [`set_outputs`](Self::set_outputs)
     /// (multi-monitor): the runtime refreshes this every tick from the
     /// compositor's tracking, and [`poll`](Self::poll) broadcasts it
     /// whenever it differs from `outputs_sent`.
     outputs: Vec<OutputInfo>,
-    native_outputs: Vec<tuna_shell_control::NativeOutputInfo>,
+    native_outputs: Vec<tuna_output::NativeOutputInfo>,
     pointer_output: Option<String>,
     /// Inventory value every live session holds; a mismatch means a
     /// broadcast is still owed (or a newcomer joined mid-state).
     outputs_sent: Vec<OutputInfo>,
-    native_outputs_sent: Vec<tuna_shell_control::NativeOutputInfo>,
+    native_outputs_sent: Vec<tuna_output::NativeOutputInfo>,
     /// Session environment for launched apps (#59), and the last value
     /// every live session holds.
     environment: Vec<(String, String)>,
@@ -1851,8 +1979,6 @@ impl ControlHub {
                 None
             }
         });
-        let (lockdown_tx, lockdown_rx) = std::sync::mpsc::channel();
-        let lockdown_inflight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         Ok(Self {
             listener,
             readiness,
@@ -1866,13 +1992,11 @@ impl ControlHub {
             locked: std::rc::Rc::new(std::cell::Cell::new(false)),
             lockdown,
             pad_targets: std::rc::Rc::default(),
-            lockdown_tx,
-            lockdown_rx,
-            lockdown_inflight,
             switcher_queue: Vec::new(),
             switcher_thumbnails_owner: None,
             accelerator_queue: Vec::new(),
             menu_queue: Vec::new(),
+            close_dialogs: std::collections::BTreeMap::new(),
             osk: OskBroadcast::default(),
             // No focus and no auto-show is what a shell assumes before
             // any message: only a change is owed.
@@ -1880,6 +2004,8 @@ impl ControlHub {
             // No touch-mode is what a shell assumes before any message.
             touch_mode: false,
             touch_mode_sent: Some(false),
+            lock_shown: false,
+            lock_shown_sent: Some(false),
             outputs: Vec::new(),
             native_outputs: Vec::new(),
             pointer_output: None,
@@ -1964,8 +2090,11 @@ impl ControlHub {
                 session.connection_id == lease.origin.connection
                     && session.auth_lease == Some(lease)
                     && session.auth_owner == Some(lease.owner)
-                    && PeerGate::Pid(lease.owner.pid).admits(self.session_peers[index], our_uid())
-                    && self.gate.admits(self.session_peers[index], our_uid())
+                    && PeerGate::Pid(lease.owner.pid)
+                        .admits(self.session_peers[index].as_ref(), our_uid())
+                    && self
+                        .gate
+                        .admits(self.session_peers[index].as_ref(), our_uid())
                     && session.conn.peer_live()
             })
     }
@@ -2007,6 +2136,30 @@ impl ControlHub {
         self.gate
     }
 
+    /// The session-bus unique names the supervised shell declared over its
+    /// live control sessions: bound to the current shell child, whose
+    /// `SO_PEERPIDFD`-pinned peer is still that child, and still connected.
+    /// Empty between restarts, under any other gate, and once the
+    /// declaring session or process ended. The bus never reuses a unique
+    /// name, so this identity cannot pass to another process.
+    pub fn shell_bus_names(&self) -> impl Iterator<Item = &str> + Clone {
+        let uid = our_uid();
+        let owner = self.auth_owner;
+        let gate = self.gate;
+        self.sessions
+            .iter()
+            .zip(&self.session_peers)
+            .filter(move |(session, peer)| {
+                owner.is_some_and(|owner| {
+                    session.auth_owner == Some(owner)
+                        && PeerGate::Pid(owner.pid).admits(peer.as_ref(), uid)
+                        && gate.admits(peer.as_ref(), uid)
+                        && session.conn.peer_live()
+                })
+            })
+            .filter_map(|(session, _)| session.bus_name.as_deref())
+    }
+
     /// Connections refused so far (gate or pending cap).
     pub fn refused_count(&self) -> u64 {
         self.refused
@@ -2028,6 +2181,7 @@ impl ControlHub {
             || !self.switcher_queue.is_empty()
             || self.osk_sent != Some(self.osk)
             || self.touch_mode_sent != Some(self.touch_mode)
+            || self.lock_shown_sent != Some(self.lock_shown)
             || !self.accelerator_queue.is_empty()
             || !self.menu_queue.is_empty()
             || self.sessions.iter().any(|s| s.owes_deltas(model));
@@ -2075,7 +2229,7 @@ impl ControlHub {
     /// [`poll`](Self::poll) broadcasts a change as
     /// [`Message::NativeOutputInventory`] (empty revokes it). Nested
     /// sessions always set an empty inventory.
-    pub fn set_native_outputs(&mut self, outputs: Vec<tuna_shell_control::NativeOutputInfo>) {
+    pub fn set_native_outputs(&mut self, outputs: Vec<tuna_output::NativeOutputInfo>) {
         self.native_outputs = outputs;
     }
 
@@ -2099,6 +2253,12 @@ impl ControlHub {
         self.touch_mode = touch_mode;
     }
 
+    /// Refresh whether the lock screen is shown (the curtain landed on a
+    /// locked session); the next [`poll`](Self::poll) broadcasts a change.
+    pub fn set_lock_screen_shown(&mut self, shown: bool) {
+        self.lock_shown = shown;
+    }
+
     /// Set the session environment (#59); the next [`poll`](Self::poll)
     /// broadcasts it when it differs from the last broadcast, and every
     /// newcomer gets it right after the handshake.
@@ -2118,11 +2278,12 @@ impl ControlHub {
         self.sessions.iter().enumerate().any(|(i, session)| {
             session.connection_id == origin.connection
                 && session.owes_auth(origin.request)
-                && self.gate.admits(self.session_peers[i], our_uid())
+                && self.gate.admits(self.session_peers[i].as_ref(), our_uid())
                 && (!self.auth_owner_configured
                     || self.auth_owner.is_some_and(|owner| {
                         session.auth_owner == Some(owner)
-                            && PeerGate::Pid(owner.pid).admits(self.session_peers[i], our_uid())
+                            && PeerGate::Pid(owner.pid)
+                                .admits(self.session_peers[i].as_ref(), our_uid())
                     }))
                 && session.conn.peer_live()
         })
@@ -2217,52 +2378,22 @@ impl ControlHub {
         }
     }
 
-    /// Poll the live `disable-lock-screen` key without blocking: drain
-    /// completed background reads (last valid wins; unreadable keeps the
-    /// cached value, never resets) and spawn the next reader unless
-    /// enough already run. The runtime calls this on a slow tick; a hung
-    /// backend never stalls it, and the shell enforces its own surface
-    /// immediately, so this backstop's lag fails safe.
-    pub fn refresh_lockdown(&mut self) {
-        self.refresh_lockdown_with(crate::lockdown::read_lock_screen_key);
+    /// Apply a live read of `disable-lock-screen` (#357): the hub's policy
+    /// and every session's follow it, the other keys keep their values.
+    /// The runtime calls this with each value its settings watch delivers
+    /// (`lockdown_settings`); an unreadable key delivers nothing, so the
+    /// cached policy holds and never resets. The shell enforces its own
+    /// surface immediately, so this backstop fails safe.
+    pub fn set_lock_screen_disabled(&mut self, disabled: bool) {
+        self.set_lockdown_policy(LockdownPolicy {
+            disable_lock_screen: disabled,
+            ..self.lockdown
+        });
     }
 
-    /// [`refresh_lockdown`](Self::refresh_lockdown) with an injectable
-    /// reader. Tests pass a hung double to prove the tick stays bounded;
-    /// production reads the live key on the background thread.
-    pub fn refresh_lockdown_with(
-        &mut self,
-        reader: impl FnOnce() -> Option<bool> + Send + 'static,
-    ) {
-        // Last-valid-wins: overlapping readers land delayed results as one
-        // batch, and a trailing unreadable result must not wipe the live
-        // restriction (or restoration) the batch's valid result carries.
-        if let Some(value) = self.lockdown_rx.try_iter().flatten().last() {
-            self.lockdown
-                .refresh(&|key| (key == crate::lockdown::KEY_DISABLE_LOCK_SCREEN).then_some(value));
-            for session in &mut self.sessions {
-                session.set_lockdown_policy(self.lockdown);
-            }
-        }
-        // Single-flight bound: skip spawning while enough readers run, so
-        // a hung backend cannot stack a thread per tick. The drain above
-        // still runs, so landed results always apply.
-        if self
-            .lockdown_inflight
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            >= LOCKDOWN_MAX_READERS
-        {
-            self.lockdown_inflight
-                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            return;
-        }
-        let tx = self.lockdown_tx.clone();
-        let inflight = self.lockdown_inflight.clone();
-        std::thread::spawn(move || {
-            let result = reader();
-            let _ = tx.send(result);
-            inflight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        });
+    /// The hub's lockdown policy, as its sessions hold it.
+    pub fn lockdown_policy(&self) -> LockdownPolicy {
+        self.lockdown
     }
 
     /// The pads a `RequestPadOsd` may name: id and device node.
@@ -2296,6 +2427,15 @@ impl ControlHub {
     }
 
     pub fn queue_message(&mut self, message: Message) {
+        match &message {
+            Message::ShowCloseDialog { window, .. } => {
+                self.close_dialogs.insert(*window, message.clone());
+            }
+            Message::HideCloseDialog { window } => {
+                self.close_dialogs.remove(window);
+            }
+            _ => {}
+        }
         self.menu_queue.push(message);
     }
 
@@ -2341,9 +2481,11 @@ impl ControlHub {
     pub fn poll(&mut self, model: &mut StateModel) -> PollOutcome {
         let locked_before = self.locked.get();
         let uid = our_uid();
+        let mut received = false;
         while let Ok((stream, _)) = self.listener.accept() {
+            received = true;
             let cred = peer_cred(&stream);
-            if !self.gate.admits(cred, uid) || self.pending_count() >= MAX_PENDING_PEERS {
+            if !self.gate.admits(cred.as_ref(), uid) || self.pending_count() >= MAX_PENDING_PEERS {
                 // Dropping the stream closes it: the peer sees EOF
                 // before any state crosses the socket.
                 self.refused += 1;
@@ -2365,13 +2507,14 @@ impl ControlHub {
         // A narrowed gate evicts sessions it no longer admits.
         let mut i = 0;
         while i < self.sessions.len() {
-            if self.gate.admits(self.session_peers[i], uid) {
+            if self.gate.admits(self.session_peers[i].as_ref(), uid) {
                 i += 1;
             } else {
                 self.sessions.swap_remove(i);
                 self.session_peers.swap_remove(i);
             }
         }
+        received |= !self.pending.is_empty();
         self.advance_pending(model);
         self.pending = std::mem::take(&mut self.fresh);
         self.pending_peers = std::mem::take(&mut self.fresh_peers);
@@ -2385,7 +2528,10 @@ impl ControlHub {
                 let deltas_ok = session.emit_deltas(model).is_ok();
                 session.pad_targets = self.pad_targets.clone();
                 let cmd_ok = match session.handle_next(model) {
-                    Ok(_) => true,
+                    Ok(_) => {
+                        received = true;
+                        true
+                    }
                     Err(ControlError::WouldBlock) => true,
                     Err(_) => false,
                 };
@@ -2422,6 +2568,9 @@ impl ControlHub {
                         .extend(std::mem::take(&mut session.pad_osd_closed));
                     outcome.close_menu_unanimated |=
                         std::mem::take(&mut session.close_menu_unanimated);
+                    outcome
+                        .close_dialog_responses
+                        .extend(std::mem::take(&mut session.close_dialog_responses));
                     outcome
                         .input_source_switches
                         .extend(std::mem::take(&mut session.input_source_switches));
@@ -2509,6 +2658,7 @@ impl ControlHub {
             if alive {
                 i += 1;
             } else {
+                received = true;
                 self.sessions.swap_remove(i);
                 self.session_peers.swap_remove(i);
             }
@@ -2528,6 +2678,7 @@ impl ControlHub {
             self.cancel_pending_accelerators();
         }
         self.broadcast();
+        outcome.received = received;
         outcome
     }
 
@@ -2626,6 +2777,17 @@ impl ControlHub {
                 self.touch_mode_sent = Some(self.touch_mode);
             }
         }
+        if self.lock_shown_sent != Some(self.lock_shown) {
+            let mut all_sent = true;
+            for session in &mut self.sessions {
+                if session.send_lock_screen_shown(self.lock_shown).is_err() {
+                    all_sent = false;
+                }
+            }
+            if all_sent {
+                self.lock_shown_sent = Some(self.lock_shown);
+            }
+        }
         if self.outputs != self.outputs_sent {
             let mut all_sent = true;
             for session in &mut self.sessions {
@@ -2685,7 +2847,7 @@ impl ControlHub {
         let uid = our_uid();
         for (stream, peer) in pending.into_iter().zip(peers) {
             // The gate may have narrowed since accept (shell restart).
-            if !self.gate.admits(peer, uid) {
+            if !self.gate.admits(peer.as_ref(), uid) {
                 self.refused += 1;
                 continue;
             }
@@ -2739,10 +2901,16 @@ impl ControlHub {
                 if self.touch_mode {
                     let _ = session.send_seat_touch_mode(true);
                 }
+                if self.lock_shown {
+                    let _ = session.send_lock_screen_shown(true);
+                }
                 if self.pointer_output.is_some() {
                     let _ = session.send_window_menu(&Message::PointerOutput {
                         name: self.pointer_output.clone(),
                     });
+                }
+                for shown in self.close_dialogs.values() {
+                    let _ = session.send_window_menu(shown);
                 }
                 session.connection_id = connection_id;
                 session.auth_owner = self.auth_owner;

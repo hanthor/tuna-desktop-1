@@ -112,7 +112,7 @@ tuna-compositor --backend winit --socket tuna-test --shell-bin tuna-shell-gtk
 ## Stopping a session
 
 - **Log Out** in the shell's power menu sends `SIGTERM` to the compositor
-  (`crates/shell-gtk/src/power.rs:196-211`).
+  (`crates/shell-gtk/src/power.rs:273-285`).
 - The compositor shuts down cleanly on `SIGTERM`, `SIGINT` and `SIGHUP`: it
   stops the shell and its other children, stops `tuna-session.target`, starts
   `gnome-session-shutdown.target` and releases the leader FIFO, then logs
@@ -131,7 +131,18 @@ tuna-compositor --backend winit --socket tuna-test --shell-bin tuna-shell-gtk
 Power Off, Restart and Suspend in the power menu go to logind. They are only
 offered in a hardware session: in a nested one (`TUNA_SESSION_KIND` other than
 `hardware`) they would act on your host machine
-(`crates/shell-gtk/src/power.rs:169-172`, `:209-216`).
+(`crates/shell-gtk/src/power.rs:158-170`, `:202-205`).
+
+**Switch User…** sits under Log Out in a hardware session's power menu, as in
+GNOME 51. It shows only when AccountsService reports more than one user
+(`HasMultipleUsers`), your graphical session's logind seat can hold several
+sessions (`CanMultiSession`), the session is not locked, and
+`org.gnome.desktop.lockdown disable-user-switching` is off. Choosing it locks
+the screen (unless `disable-lock-screen` is set, as in GNOME), then, as libgdm
+does, activates GDM's login screen already on the seat or, on `seat0`, asks GDM
+for a new one (`CreateTransientDisplay`). If that fails, the shell logs
+`switch user failed` and you stay in your session, still locked
+(`crates/shell-gtk/src/user_switch.rs`).
 
 ## Logs
 
@@ -215,7 +226,9 @@ The session locks after five minutes without input, on Super+L, on
 password with the PAM service `tuna-lock`, installed as `/etc/pam.d/tuna-lock`
 (`share/pam.d/tuna-lock`), which includes your distribution's `login` stack.
 Fingerprint unlock goes through fprintd when a reader and an enrolled finger
-are present.
+are present, with its own PAM service `tuna-lock-fingerprint`, installed as
+`/etc/pam.d/tuna-lock-fingerprint`: `pam_fprintd` plus the `login` account
+stack, like GDM's `gdm-fingerprint`.
 
 ### When the password is not accepted
 
@@ -231,13 +244,22 @@ are present.
 2. The lock screen authenticates `$LOGNAME` (else `$USER`) from the
    compositor's environment (`crates/compositor/src/unlock.rs:70-77`).
 3. Each attempt has 10 seconds; a PAM stack that hangs longer is treated as a
-   failure (`crates/compositor/src/pam.rs:24-25`).
+   failure (`crates/compositor/src/pam.rs:31-32`).
 4. For more detail, reproduce with `TUNA_LOCK_TRACE=1` in the compositor's
    environment. It logs each authentication attempt's lifecycle, never the
    password.
 
 To test a different PAM stack without touching `tuna-lock`, set
 `TUNA_PAM_SERVICE` to another service name.
+
+### When the fingerprint is not accepted
+
+Check `/etc/pam.d/tuna-lock-fingerprint` exists (a source install copies it
+from `share/pam.d/tuna-lock-fingerprint`) and that `pam_fprintd.so` is
+installed (`libpam-fprintd` on Debian and Ubuntu, `fprintd` on Arch). Without
+either, the finger is refused and the password still unlocks.
+`TUNA_PAM_FINGERPRINT_SERVICE` names a different service for fingerprint
+unlock.
 
 ### Getting out of a stuck lock screen
 
@@ -286,7 +308,7 @@ For measurements:
 - `frame_cost` in the `TUNA_COMPOSITOR_STATE` snapshot reports what the last
   frame drew and culled ([frame cost](testing.md#frame-cost)).
 - `scripts/tuna-stress` runs the bounded nested stress workload and records
-  memory and file descriptor growth ([bounded nested stress](testing.md#bounded-nested-stress)).
+  memory and file descriptor growth ([nested stress and torture suite](testing.md#nested-stress-and-torture-suite)).
 - [Actual guest endurance evidence](soak.md) describes the long-running VM
   soak.
 

@@ -33,6 +33,8 @@ if [ -z "${TUNA_PROOF_PRIVATE_BUS:-}" ] && command -v dbus-run-session >/dev/nul
 fi
 unset CDPATH
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+# shellcheck source=scripts/lib/tuna-state-snapshot.sh
+. "$ROOT/scripts/lib/tuna-state-snapshot.sh"
 DISPLAY_ARG=""
 ARTIFACTS="$ROOT/magnifier-artifacts"
 WIDTH=1280
@@ -413,8 +415,9 @@ set -- $rect2
 PX=$1 PY0=$2 PW=$3 PH=$4
 for _ in $(seq 1 50); do grep -q '"bounds"' "$PROBE_LOG" && break; sleep 0.2; done
 bounds() {
-    jq -rs "map(select(.bounds)) | last | .bounds.$1 | @tsv" "$PROBE_LOG"
+    jq -ers "map(select(.bounds and .generation == ${2:-null})) | last | .bounds.$1 | select(. != null) | @tsv" "$PROBE_LOG"
 }
+bounds area >/dev/null || fail M-ATSPI-FOCUS "the probe never reported allocated widget bounds"
 # shellcheck disable=SC2046
 set -- $(bounds area); AX=$((PX + $1)) AY=$((PY0 + $2)) AW=$3 AH=$4
 [ -n "$AH" ] || fail M-ATSPI-FOCUS "the probe never reported widget bounds"
@@ -441,7 +444,7 @@ focus_widget() {
         [ "$(cat "$PROBE_REQ.ack" 2>/dev/null)" = "$generation" ] && return 0
         sleep 0.1
     done
-    fail M-ATSPI-FOCUS "probe never acknowledged $1"
+    fail M-ATSPI-FOCUS "probe never acknowledged allocated, focused bounds for $1"
 }
 centered_on() {
     cstate "$REGION.center as \$c | ((\$c[0] - $1) | fabs) <= 2 and ((\$c[1] - $2) | fabs) <= 2" 20
@@ -457,9 +460,12 @@ atspi_focus_centre() {
         \"\(.[0] * 2 + .[2] + $((2 * PX))) \(.[1] * 2 + .[3] + $((2 * PY0)))\"" "$ARTIFACTS/a11y-$1.json" |
         awk '{ printf "%d %d\n", $1 / 2, $2 / 2 }'
 }
-# focus_gate REQUEST NAME GTK_X GTK_Y GTK_W GTK_H (window coordinates)
+# focus_gate REQUEST NAME; sample GTK bounds only after this generation's
+# focus and allocation acknowledgement, never from the initial map sample.
 focus_gate() {
     focus_widget "$1"
+    # shellcheck disable=SC2046
+    set -- "$@" $(bounds "$2" "$generation")
     sleep 0.5
     centre="$(atspi_focus_centre "$2")"
     [ -n "$centre" ] || fail M-ATSPI-FOCUS "no focused accessible after $1"
@@ -472,14 +478,12 @@ focus_gate() {
     fi
     centered_on "$7" "$8" ||
         fail M-ATSPI-FOCUS "focusing the $2 did not center the view on its AT-SPI centre ($7, $8); window centre is ($WCX, $WCY)"
-    cp "$CSTATE" "$ARTIFACTS/atspi-$2-state.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/atspi-$2-state.json"
     FOCUS_SEEN="$FOCUS_SEEN $2 ($7,$8)"
 }
 FOCUS_SEEN=""
-# shellcheck disable=SC2046
-focus_gate focus-entry entry $(bounds entry)
-# shellcheck disable=SC2046
-focus_gate focus-button button $(bounds button)
+focus_gate focus-entry entry
+focus_gate focus-button button
 pass M-ATSPI-FOCUS "AT-SPI focus centers the view on the${FOCUS_SEEN}, not the window centre ($WCX,$WCY)"
 
 # M-LIVE: factor 2, centered mouse tracking, pointer on the boundary
@@ -655,7 +659,7 @@ if [ "$greens" -ne 0 ] || [ "$oranges" -ne 0 ]; then
 fi
 pass M-LOCK "the magnified locked frame holds no window pixels"
 
-cp "$CSTATE" "$ARTIFACTS/final-state.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/final-state.json"
 grep -qi panicked "$LOG" && fail M-NOPANIC "panic in nested log"
 echo "M-NOPANIC pass no panic in nested log" >>"$ASSERTIONS"
 echo "tuna-magnifier-proof: OK, artifacts in $ARTIFACTS"

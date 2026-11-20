@@ -47,7 +47,10 @@ use smithay::{
         },
         shell::{
             wlr_layer::WlrLayerShellState,
-            xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
+            xdg::{
+                PopupSurface, PositionerState, ShellClient, ToplevelSurface, XdgShellHandler,
+                XdgShellState,
+            },
         },
         shm::{ShmHandler, ShmState},
     },
@@ -84,7 +87,10 @@ pub mod animation;
 pub mod animation_clock;
 mod auth_owner;
 mod bell;
+pub mod buffer_upload;
 pub mod capture_security;
+mod client_listener;
+pub mod clipboard_manager;
 pub mod color_manager;
 mod constraint_motion;
 pub mod control;
@@ -103,14 +109,17 @@ pub mod fprintd;
 pub mod frame_timing;
 pub mod icc;
 pub mod idle_monitor;
+mod idle_notify;
 pub mod ime;
 pub mod input_aids;
 pub mod introspect;
 pub mod layer;
 pub mod lock;
 pub mod lockdown;
+pub(crate) mod lockdown_settings;
 mod logind_session;
 pub mod magnifier;
+pub mod malloc;
 pub mod menu_close;
 pub mod minimize;
 pub mod modal_dim;
@@ -118,10 +127,10 @@ pub mod monitors;
 pub mod motion_coalesce;
 pub mod mutter;
 pub mod native_output;
-#[cfg(feature = "drm")]
 mod native_repaint;
 pub mod night_light;
 pub(crate) mod night_light_settings;
+pub mod nofile;
 pub mod numlock;
 mod occlusion;
 pub mod orca;
@@ -150,6 +159,7 @@ mod sandbox_identity;
 pub mod screencast;
 pub mod screenshot;
 pub mod screenshot_flash;
+pub mod security_listener;
 pub mod session_lock;
 pub mod session_manager;
 pub mod session_services;
@@ -161,12 +171,15 @@ pub mod spring;
 pub mod state;
 mod state_snapshot;
 pub mod supervise;
+mod suspend;
 pub mod tablet;
 pub mod tablet_actions;
 pub(crate) mod tablet_settings;
+pub mod touchpad_swipe;
 mod transient_family;
 pub mod transitions;
 pub mod unlock;
+pub mod unresponsive;
 pub mod user_upgrade;
 mod wake;
 pub mod wallpaper;
@@ -211,6 +224,9 @@ pub(crate) struct OutputEntry {
 pub struct State {
     /// Surface commits/destruction invalidate the pointer's scene pick.
     pub(crate) pointer_scene_dirty: bool,
+    /// Surface commits applied so far, whatever applied them: a client
+    /// request, or a refresh cycle releasing a held-back one.
+    pub(crate) commit_count: u64,
     pub(crate) window_icons: window_icons::WindowIcons,
     compositor_state: CompositorState,
     shm_state: ShmState,
@@ -256,6 +272,9 @@ pub struct State {
     /// RemoteDesktop sessions with the clipboard enabled, and who owns
     /// the clipboard as they see it (mutter's MetaClipboardSession).
     pub(crate) remote_clipboard: crate::mutter::remote_clipboard::Registry,
+    /// The saved copy of the clipboard, served once its owner is gone
+    /// (mutter's MetaClipboardManager).
+    pub(crate) clipboard_manager: clipboard_manager::ClipboardManager,
     pub(crate) panel_surfaces: Vec<layer::PanelSurface>,
     /// Ids of `wl_surface`s whose layer-shell role was destroyed.
     /// Smithay 0.7 keeps validating them on commit against reset
@@ -265,6 +284,8 @@ pub struct State {
     /// (and through it the SHM pool mapping and fd) for every banner,
     /// overview toggle and other short-lived layer surface (#307).
     pub(crate) dead_layer_surfaces: std::collections::HashSet<ObjectId>,
+    /// Surfaces whose commits await their upload ([`buffer_upload`]).
+    pub(crate) committed: buffer_upload::Committed,
     /// Popup trees per parent surface (#88).
     pub(crate) popups: smithay::desktop::PopupManager,
     /// Popups holding an explicit grab, oldest first: an outside click
@@ -294,10 +315,17 @@ pub struct State {
     /// Client window-state requests awaiting the manager's next
     /// `reconcile` drain (002 window actions).
     pub(crate) window_requests: Vec<(wl_surface::WlSurface, WindowRequest)>,
+    /// Serial of the latest pointer button press sent to a client: Mutter's
+    /// `grab_serial`, which xdg_toplevel.show_window_menu must name.
+    pub(crate) pointer_press_serial: Option<Serial>,
     /// Exact native parent at role destruction, consumed on the next reconcile.
     /// Smithay clears role data immediately after `toplevel_destroyed` returns.
     pub(crate) closed_toplevel_parents:
         std::collections::HashMap<wl_surface::WlSurface, wl_surface::WlSurface>,
+    /// xdg_wm_base clients whose pong answered their pending ping, for
+    /// the window manager's alive checks (mutter's
+    /// `meta_display_pong_for_serial`, see [`unresponsive`]).
+    pub(crate) pongs: Vec<ShellClient>,
     /// dmabuf, activation, viewporter and the other #89 protocols.
     pub(crate) protocols: protocols::Protocols,
     /// presentation-time, fifo and commit-timing (#89).
@@ -328,6 +356,11 @@ pub(crate) struct ClientState {
     /// one client allowed a virtual keyboard (to hand back the keys
     /// IBus does not take).
     pub(crate) ime_bridge: bool,
+    /// The supervised shell's own connection: the one client offered
+    /// `zwlr_layer_shell_v1` (#1048) and the only one whose session lock
+    /// is considered. Set at accept time only when the `SO_PEERPIDFD`-pinned
+    /// peer is the shell child the runtime holds (`layer::is_shell_peer`).
+    pub(crate) supervised_shell: bool,
     /// Optional tag applied to windows of a D-Bus-created ordinary client.
     pub(crate) connection_window_tag: Option<String>,
     /// Optional liveness marker for an ordinary service-channel connection.
@@ -337,6 +370,14 @@ pub(crate) struct ClientState {
     /// Original bus or accepted-socket peer credentials, with a process pin.
     original_credentials: Option<Arc<zbus::fdo::ConnectionCredentials>>,
     sandboxed_app_id: Arc<std::sync::OnceLock<Option<String>>>,
+    /// The `wp_security_context_v1` this client connected through, when it
+    /// came in on a sandbox engine's listener rather than the session
+    /// socket (#1046). Such a client passes no privileged global's filter
+    /// ([`ClientState::privileged`]) and cannot create a nested context.
+    /// The context's app id is the creator's claim and stays here; the
+    /// published `sandboxed-app-id` remains the one discovered from the
+    /// live peer (`sandbox_identity.rs`).
+    security_context: Option<smithay::wayland::security_context::SecurityContext>,
 }
 
 impl ClientState {
@@ -368,6 +409,69 @@ impl ClientState {
             ..Self::default()
         }
     }
+    /// State for the supervised shell's connection (layer-shell admitted),
+    /// pinned to the process at the other end of `socket`.
+    pub(crate) fn supervised_shell(socket: &UnixStream) -> Self {
+        Self {
+            supervised_shell: true,
+            original_credentials: crate::capture_security::socket_credentials(socket),
+            ..Self::default()
+        }
+    }
+    /// Admit an accepted native connection as the supervised shell when its
+    /// peer, pinned by `SO_PEERPIDFD` at accept, is the shell child
+    /// `shell_pid` the runtime still holds. Without a pin (a kernel before
+    /// 6.5, or a peer that already exited) there is no identity and the
+    /// connection stays ordinary: a numeric `SO_PEERCRED` PID was recorded
+    /// at connect time and may since have been recycled onto the shell.
+    pub(crate) fn admit_supervised_shell(&mut self, shell_pid: Option<u32>) {
+        let peer = self
+            .original_credentials
+            .as_deref()
+            .and_then(crate::capture_security::pinned_process_id);
+        self.supervised_shell = crate::layer::is_shell_peer(peer, shell_pid);
+    }
+    /// The live pinned PID of `client` when it holds the supervised-shell
+    /// flag outside any security context; `None` for every other client,
+    /// and for the shell's connection once the process that opened it exited.
+    pub(crate) fn pinned_shell_pid(client: &Client) -> Option<u32> {
+        client.get_data::<ClientState>()?.shell_pid()
+    }
+    /// [`ClientState::pinned_shell_pid`] of this client's state.
+    pub(crate) fn shell_pid(&self) -> Option<u32> {
+        if !self.supervised_shell || self.security_context.is_some() {
+            return None;
+        }
+        crate::capture_security::pinned_process_id(self.original_credentials.as_deref()?)
+    }
+    /// State for a client accepted on a security-context listener: an
+    /// ordinary native connection (peer credentials, sandbox discovery)
+    /// tagged with the context, and no capability flag.
+    pub(crate) fn security_context(
+        socket: &UnixStream,
+        context: smithay::wayland::security_context::SecurityContext,
+    ) -> Self {
+        Self {
+            security_context: Some(context),
+            ..Self::native_connection(socket)
+        }
+    }
+    /// Whether `client` connected through a `wp_security_context_v1`
+    /// listener.
+    pub(crate) fn sandboxed(client: &Client) -> bool {
+        client
+            .get_data::<ClientState>()
+            .is_some_and(|data| data.security_context.is_some())
+    }
+    /// The filter of every privileged global: `capability` of a client
+    /// outside any security context. A client inside one fails whatever
+    /// its other state says, as `wp_security_context_v1` asks of
+    /// privileged protocols (sway's `filter_global` is the same shape).
+    pub(crate) fn privileged(client: &Client, capability: impl FnOnce(&Self) -> bool) -> bool {
+        client
+            .get_data::<ClientState>()
+            .is_some_and(|data| data.security_context.is_none() && capability(data))
+    }
 }
 
 /// Client-initiated window state request (002 window actions).
@@ -375,14 +479,15 @@ impl ClientState {
 /// manager drains and applies them once per tick in `reconcile`, so
 /// protocol input and scene mutation stay on one call path for live
 /// events and tests.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum WindowRequest {
     /// Client asked to be maximized.
     Maximize,
     /// Client asked to leave maximized.
     Unmaximize,
-    /// Client asked to cover the output.
-    Fullscreen,
+    /// Client asked to cover an output: the named one it passed to
+    /// `xdg_toplevel.set_fullscreen`, else the one it is on.
+    Fullscreen(Option<String>),
     /// Client asked to leave fullscreen.
     Unfullscreen,
     /// Client started an interactive move (header-bar drag, #58).
@@ -495,6 +600,12 @@ impl XdgShellHandler for State {
         }
     }
 
+    /// A pong matching the client's pending ping (Smithay checks the
+    /// serial): the manager's next alive check marks its windows alive.
+    fn client_pong(&mut self, client: ShellClient) {
+        self.pongs.push(client);
+    }
+
     fn parent_changed(&mut self, surface: ToplevelSurface) {
         self.refresh_initial_surface_scale(surface.wl_surface());
     }
@@ -593,14 +704,21 @@ impl XdgShellHandler for State {
             .push((surface.wl_surface().clone(), WindowRequest::Unmaximize));
     }
 
-    /// Queue a client fullscreen request for the manager drain.
+    /// Queue a client fullscreen request, with the output it named, for
+    /// the manager drain.
     fn fullscreen_request(
         &mut self,
         surface: ToplevelSurface,
-        _output: Option<wl_output::WlOutput>,
+        output: Option<wl_output::WlOutput>,
     ) {
-        self.window_requests
-            .push((surface.wl_surface().clone(), WindowRequest::Fullscreen));
+        let output = output
+            .as_ref()
+            .and_then(Output::from_resource)
+            .map(|output| output.name());
+        self.window_requests.push((
+            surface.wl_surface().clone(),
+            WindowRequest::Fullscreen(output),
+        ));
     }
 
     /// Queue a client unfullscreen request for the manager drain.
@@ -617,13 +735,32 @@ impl XdgShellHandler for State {
 
     /// Queue a window-menu request (header-bar right click) for the
     /// manager drain; the shell draws GNOME's window menu there.
+    ///
+    /// Mutter (xdg_toplevel_show_window_menu) shows the menu only for the
+    /// serial of the latest press, with the pointer still on this surface
+    /// or one of its subsurfaces (meta_wayland_pointer_get_grab_info, not
+    /// requiring the button to be held: GTK asks on press and the release
+    /// may already be in). Anything else, such as a client with no input
+    /// at all, is ignored instead of opening a modal menu.
     fn show_window_menu(
         &mut self,
         surface: ToplevelSurface,
-        _seat: wl_seat::WlSeat,
-        _serial: Serial,
+        seat: wl_seat::WlSeat,
+        serial: Serial,
         location: smithay::utils::Point<i32, smithay::utils::Logical>,
     ) {
+        if !self.seat.owns(&seat) || self.pointer_press_serial != Some(serial) {
+            return;
+        }
+        let Some(mut focus) = self.seat.get_pointer().and_then(|p| p.current_focus()) else {
+            return;
+        };
+        while focus != *surface.wl_surface() {
+            let Some(parent) = smithay::wayland::compositor::get_parent(&focus) else {
+                return;
+            };
+            focus = parent;
+        }
         self.window_requests.push((
             surface.wl_surface().clone(),
             WindowRequest::Menu(location.x, location.y),
@@ -700,7 +837,9 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &wl_surface::WlSurface) {
         self.pointer_scene_dirty = true;
+        self.commit_count = self.commit_count.wrapping_add(1);
         on_commit_buffer_handler::<State>(surface);
+        self.committed.push(surface);
         self.window_icons.commit(surface);
         self.popups.commit(surface);
         if let Some(smithay::desktop::PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
@@ -724,12 +863,13 @@ impl OutputHandler for State {}
 /// Clipboard/drag-and-drop: advertised so toolkit clients accept the
 /// display. Client copy/paste and primary selection round-trip
 /// through the smithay selection state; both focuses mirror keyboard
-/// focus (see [`State::sync_selection_focus`]). The only
-/// compositor-provided selection is a RemoteDesktop session's
-/// (SetSelection); its user data is the session id. Drag-and-drop
-/// pointer grabs are not served yet.
+/// focus (see [`State::sync_selection_focus`]). Compositor-provided
+/// clipboard selections are a RemoteDesktop session's (SetSelection)
+/// and the clipboard manager's retained copy of a gone client's
+/// selection; [`clipboard_manager::CompositorSelection`] tells them
+/// apart. Drag-and-drop pointer grabs are not served yet.
 impl SelectionHandler for State {
-    type SelectionUserData = u64;
+    type SelectionUserData = clipboard_manager::CompositorSelection;
 
     fn new_selection(
         &mut self,
@@ -738,23 +878,37 @@ impl SelectionHandler for State {
         _seat: Seat<Self>,
     ) {
         if ty == smithay::wayland::selection::SelectionTarget::Clipboard {
-            self.remote_clipboard
-                .client_selection(source.map(|source| source.mime_types()));
+            // A cleared clipboard reaches the remote sessions from
+            // `retain_clipboard`, which may take it over first.
+            if let Some(source) = &source {
+                self.remote_clipboard
+                    .client_selection(Some(source.mime_types()));
+            }
+            self.clipboard_manager.client_selection(source);
         }
     }
 
-    /// A client pastes a remote session's selection: mutter's
-    /// `meta_selection_source_remote_read_async`.
+    /// A client pastes a remote session's selection (mutter's
+    /// `meta_selection_source_remote_read_async`) or the retained copy
+    /// (`meta_selection_source_memory_read_async`).
     fn send_selection(
         &mut self,
         ty: smithay::wayland::selection::SelectionTarget,
         mime_type: String,
         fd: std::os::fd::OwnedFd,
         _seat: Seat<Self>,
-        session_id: &u64,
+        user_data: &clipboard_manager::CompositorSelection,
     ) {
-        if ty == smithay::wayland::selection::SelectionTarget::Clipboard {
-            self.remote_clipboard.transfer(*session_id, &mime_type, fd);
+        if ty != smithay::wayland::selection::SelectionTarget::Clipboard {
+            return;
+        }
+        match *user_data {
+            clipboard_manager::CompositorSelection::Remote(session_id) => {
+                self.remote_clipboard.transfer(session_id, &mime_type, fd)
+            }
+            clipboard_manager::CompositorSelection::Retained(generation) => {
+                self.clipboard_manager.serve(generation, &mime_type, fd);
+            }
         }
     }
 }
@@ -929,6 +1083,31 @@ impl State {
         true
     }
 
+    /// The session locks: GNOME closes its own shell menus (the date
+    /// menu, quick settings), so `popup_done` goes to each grabbed popup
+    /// of the supervised shell, newest first (a GTK popover holding its
+    /// toolkit grab would otherwise keep the lock screen's keys in the
+    /// same client). An application's grab is kept: GNOME's modal stage
+    /// grab revokes Mutter's Wayland popup grab without dismissing it,
+    /// so the lock holds the keyboard meanwhile and `unlock_input`
+    /// hands it back to that popup. Nothing is handed the keyboard back
+    /// here. Returns whether a shell grab was dismissed.
+    pub fn dismiss_shell_popup_grab_for_lock(&mut self) -> bool {
+        let (shell, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.popup_grab)
+            .into_iter()
+            .partition(|popup| {
+                popup.wl_surface().client().is_some_and(|client| {
+                    ClientState::privileged(&client, |data| data.supervised_shell)
+                })
+            });
+        self.popup_grab = kept;
+        for popup in shell.iter().rev() {
+            popup.send_popup_done();
+        }
+        self.popup_refocus = false;
+        !shell.is_empty()
+    }
+
     /// Take the "hand keyboard focus back" flag (see `popup_refocus`).
     pub(crate) fn take_popup_refocus(&mut self) -> bool {
         std::mem::take(&mut self.popup_refocus)
@@ -947,6 +1126,11 @@ impl State {
     /// Whether an explicit popup grab is active.
     pub fn popup_grab_active(&self) -> bool {
         !self.popup_grab.is_empty()
+    }
+
+    /// Keyboard owner at the deepest surviving level of an explicit grab.
+    pub(crate) fn popup_grab_surface(&self) -> Option<&wl_surface::WlSurface> {
+        self.popup_grab.last().map(|popup| popup.wl_surface())
     }
 
     /// Whether `surface` is a popup holding (part of) the explicit grab.
@@ -1040,11 +1224,24 @@ delegate_shm!(State);
 delegate_seat!(State);
 delegate_output!(State);
 
-/// A manually-driven compositor for tests: no calloop loop, no backend.
+/// A manually-driven compositor for tests: no backend, and no event loop
+/// beyond the one holding security-context listeners, which [`pump`]
+/// polls without blocking.
+///
+/// [`pump`]: TestCompositor::pump
 pub struct TestCompositor {
     pub display: Display<State>,
     pub state: State,
+    security_listeners: calloop::EventLoop<'static, SecurityListenerData>,
+    /// Clients accepted on security-context listeners, in accept order.
+    security_clients: Vec<Client>,
+    /// Accept attempts on security-context listeners that failed.
+    security_accept_failures: u32,
 }
+
+/// What a test's security-context listener needs to admit a client, and
+/// its count of failed accepts.
+type SecurityListenerData = (DisplayHandle, Vec<Client>, u32);
 
 impl Default for TestCompositor {
     fn default() -> Self {
@@ -1070,7 +1267,13 @@ impl State {
             seat_state,
             seat,
             dh: dh.clone(),
-            layer_shell_state: WlrLayerShellState::new::<State>(dh),
+            // Only the supervised shell may place layer surfaces (#1048):
+            // GNOME has no client-placed shell layers at all, and Mutter
+            // hides privileged globals from clients that lack the
+            // capability (meta-wayland-x11-interop.c `x11_interop_filter`).
+            layer_shell_state: WlrLayerShellState::new_with_filter::<State, _>(dh, |client| {
+                ClientState::privileged(client, |data| data.supervised_shell)
+            }),
             data_device_state: DataDeviceState::new::<State>(dh),
             dnd_icon: None,
             cursor_image: smithay::input::pointer::CursorImageStatus::default_named(),
@@ -1079,18 +1282,23 @@ impl State {
             tablet_pads: Vec::new(),
             primary_selection_state: PrimarySelectionState::new::<State>(dh),
             remote_clipboard: Default::default(),
+            clipboard_manager: Default::default(),
             panel_surfaces: Vec::new(),
             dead_layer_surfaces: std::collections::HashSet::new(),
+            committed: Default::default(),
             popups: smithay::desktop::PopupManager::default(),
             popup_grab: Vec::new(),
             popup_refocus: false,
             window_origins: std::collections::HashMap::new(),
             pointer_scene_dirty: true,
+            commit_count: 0,
             initial_outputs: std::collections::HashMap::new(),
             outputs: Vec::new(),
             retired_output_globals: Vec::new(),
             window_requests: Vec::new(),
+            pointer_press_serial: None,
             closed_toplevel_parents: std::collections::HashMap::new(),
+            pongs: Vec::new(),
             protocols: protocols::Protocols::new(dh),
             frame_timing: frame_timing::FrameTiming::new(dh),
             lock_protocol: session_lock::LockProtocol::new(dh),
@@ -1476,7 +1684,13 @@ impl TestCompositor {
         let display: Display<State> = Display::new().unwrap();
         let dh = display.handle();
         let state = State::new(&dh);
-        Self { display, state }
+        Self {
+            display,
+            state,
+            security_listeners: calloop::EventLoop::try_new().unwrap(),
+            security_clients: Vec::new(),
+            security_accept_failures: 0,
+        }
     }
 
     /// Attach a client connected through `stream`.
@@ -1497,12 +1711,95 @@ impl TestCompositor {
             .unwrap()
     }
 
-    /// Dispatch pending client requests and flush replies. Drives the
-    /// display without an event loop; tests interleave this with client
-    /// actions instead of blocking on either side.
+    /// Attach the supervised shell's connection in native protocol
+    /// fixtures: the one client offered layer-shell, pinned like the
+    /// runtime's to the process at the other end (this test process). The
+    /// runtime grants this only to the shell child's own pinned pid; public
+    /// clients use `add_client`.
+    pub fn add_shell_client(&mut self, stream: UnixStream) -> Client {
+        let data = ClientState::supervised_shell(&stream);
+        self.display
+            .handle()
+            .insert_client(stream, Arc::new(data))
+            .unwrap()
+    }
+
+    /// Dispatch pending client requests, run the clipboard manager and
+    /// accept connections waiting on security-context listeners (as the
+    /// runtime's loop does), and flush replies. Drives the display without
+    /// blocking; tests interleave this with client actions instead of
+    /// blocking on either side.
     pub fn pump(&mut self) {
         self.display.dispatch_clients(&mut self.state).unwrap();
+        self.state.retain_clipboard();
+        let listeners = self.security_listeners.handle();
+        for (source, context) in self.state.take_security_contexts() {
+            listeners
+                .insert_source(
+                    security_listener::RestingListener::new(source),
+                    move |accept, _, (dh, accepted, failures): &mut SecurityListenerData| {
+                        match accept {
+                            security_listener::Accept::Client(stream) => {
+                                let data = ClientState::security_context(&stream, context.clone());
+                                accepted.push(dh.insert_client(stream, Arc::new(data)).unwrap());
+                            }
+                            security_listener::Accept::Failed { .. } => *failures += 1,
+                        }
+                    },
+                )
+                .map_err(|error| error.error)
+                .unwrap();
+        }
+        let mut data = (
+            self.display.handle(),
+            std::mem::take(&mut self.security_clients),
+            self.security_accept_failures,
+        );
+        self.security_listeners
+            .dispatch(std::time::Duration::ZERO, &mut data)
+            .unwrap();
+        (_, self.security_clients, self.security_accept_failures) = data;
         self.display.flush_clients().unwrap();
+    }
+
+    /// Whether the clipboard manager finished copying the current client
+    /// selection, so the copying client may go away (socketpair tests wait
+    /// for the copy thread instead of racing it).
+    pub fn clipboard_copy_saved(&self) -> bool {
+        self.state.clipboard_manager.finished().is_some()
+    }
+
+    /// The security context each client accepted on a
+    /// `wp_security_context_v1` listener carries, in accept order.
+    pub fn security_context_clients(
+        &self,
+    ) -> Vec<smithay::wayland::security_context::SecurityContext> {
+        self.security_clients
+            .iter()
+            .filter_map(|client| client.get_data::<ClientState>()?.security_context.clone())
+            .collect()
+    }
+
+    /// How many accept attempts on security-context listeners have failed
+    /// so far. Each one rests its listener for
+    /// [`security_listener::REST`] (#1071).
+    pub fn security_accept_failures(&self) -> u32 {
+        self.security_accept_failures
+    }
+
+    /// Seat input at `now`, as the runtime's input path reports it to
+    /// ext-idle-notify beside org.gnome.Mutter.IdleMonitor.
+    pub fn idle_activity(&mut self, now: std::time::Instant) {
+        self.state.protocols.idle_notifier.activity(now);
+    }
+
+    /// The runtime's idle tick at `now`: ext-idle-notify notifications
+    /// due by then fire, held back by idle inhibitors on surfaces
+    /// `manager` shows.
+    pub fn idle_tick(&mut self, manager: &windows::WindowManager, now: std::time::Instant) {
+        let shown = crate::frame_timing::drawn_roots(&self.state, manager, false);
+        let inhibited = self.state.idle_inhibited(&shown);
+        self.state.protocols.idle_notifier.tick(now, inhibited);
     }
 
     /// Seat capability handles for native protocol fixtures.

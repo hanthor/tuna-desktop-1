@@ -35,6 +35,18 @@ The phases and roles are listed in the
 Memory (PSS/RSS) is sampled but not yet budgeted. #315 tracks memory and
 growth budgets.
 
+`scripts/tuna-shell-memory-profile --display :5N --artifacts DIR` replays the
+gate's workload in a nested session with real X input and records, for the
+shell and the compositor after every phase, `Pss`, `Pss_Anon`, `Pss_File`,
+`Pss_Shmem`, `Private_Dirty` and `AnonHugePages` plus heap, arena and anonymous
+totals from `smaps` (`--summarize DIR --against DIR` compares two runs). Read
+`Pss_Anon` and `Pss_Shmem`: `Pss_File` moves with whatever else on the host
+maps the same libraries. `--thp collapsed` gives the session transparent huge
+pages as `transparent_hugepage/enabled=always` does on the perf image (most
+development hosts keep `madvise`), which is where a sparse heap shows as
+resident memory; `--trim` reports how much of the shell's heap is freed but
+retained.
+
 ## Local CPU profiling
 
 ### Build with symbols and frame pointers
@@ -127,13 +139,16 @@ drawn frame (`FrameCost` in `crates/compositor/src/occlusion.rs`):
 | `rendered` | Scene elements repainted in that frame |
 | `culled` | Elements skipped because they are wholly under opaque elements |
 | `damage_rects`, `damage_area` | Number and total area (physical pixels) of damaged rectangles |
+| `damage_bounds` | `[x, y, w, h]` box around the damaged rectangles (output pixels, before rotation), or `null` |
 | `output_area` | The output's area, for the damage ratio |
 | `drawn_windows` | Window ids with any element showing on the output, repainted or not |
 | `culled_windows` | Window ids entirely hidden behind opaque surfaces |
 
 `throttled_windows` sits next to it. It lists windows whose frame callbacks
-run at the hidden rate (about 1 Hz). [docs/testing.md](testing.md#frame-cost)
-covers both fields and the `G-OCCLUSION-CULL` proof that checks them.
+run at the hidden rate (about 1 Hz), or not at all once `suspended_windows`
+lists them and their client was told ([protocols](protocols.md#suspended-windows)).
+[docs/testing.md](testing.md#frame-cost) covers both fields and the
+`G-OCCLUSION-CULL` proof that checks them.
 
 ```bash
 TUNA_COMPOSITOR_STATE="$PWD/state.json" target/release/tuna-compositor \
@@ -187,9 +202,10 @@ settle phase against idle within one run. Long-run soak lanes live in
 The comparison runs in the `Marlin performance samples` workflow
 (`.github/workflows/performance-baseline.yml`):
 
-1. It builds one Marlin image upgraded to GNOME Shell 51.0 from a pinned
-   Arch Linux Archive snapshot (`packaging/marlin/perf/Containerfile.baseline`),
-   then installs a Tuna Desktop package from a trusted main CI run on top.
+1. It builds one image from a pinned Marlin platform digest, synced to GNOME
+   Shell 51.0 from a pinned Arch Linux Archive snapshot
+   (`packaging/marlin/perf/Containerfile.baseline`), then installs a Tuna
+   Desktop package from a trusted main CI run on top.
 2. `scripts/tuna-perf-profile-pairs diagnostic`, then `stock`, run three
    alternating GNOME/Tuna pairs per profile. Each session uses
    `scripts/tuna-vm-perf` in the same QEMU/KVM profile (6 GiB, four vCPUs,

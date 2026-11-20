@@ -56,10 +56,11 @@ Every compositor service has the same shape; `screenshot.rs:255-294` is
 the smallest complete example, and `mutter.rs:1211-1405` the largest.
 
 1. **Own thread, own connection.** `start()` spawns a named thread. The
-   thread builds a `zbus::blocking` session connection and serves each
-   object with `serve_at`.
+   thread builds a session connection with `zbus::block_on` (zbus 6 has
+   no blocking API; its runtime keeps serving the connection after
+   `block_on` returns) and serves each object with `serve_at`.
 2. **Claim the name without queueing.** The thread calls
-   `request_name_with_flags(NAME, DoNotQueue)`. On anything but
+   `request_name_with_flags(NAME, DO_NOT_QUEUE)`. On anything but
    `PrimaryOwner` it logs `<name> is taken; … off` and the service stays
    down. Nested inside a real GNOME session, GNOME already owns these
    names, so Tuna Desktop's copies stay off and the host keeps working.
@@ -112,6 +113,16 @@ answers only NetworkManager's current unique owner.
 
 Search providers additionally cancel a query when a newer one starts
 (`providers.rs:1-13`).
+
+**Thunderbolt (`thunderbolt.rs`).** Like GNOME Shell's
+`status/thunderbolt.js`, the shell depends on boltd
+(`org.freedesktop.bolt` on the system bus, normally started by udev with
+`bolt.service`) for Thunderbolt devices. It enrols a newly connected
+device with `EnrollDevice(uid, "default", "none")` only when the session
+is unlocked and polkit already allows `org.freedesktop.bolt.enroll`;
+otherwise it posts GNOME's "Unknown" or "Unauthorized Thunderbolt
+device" notice. Without boltd the proxy has no owner, so nothing is
+enrolled, shown or logged.
 
 **Shared zbus edges (`shell-host`).** `NotificationBus` and `LockdownBus`
 expose `ensure()`, which tries to connect and own the name, and `poll()`.

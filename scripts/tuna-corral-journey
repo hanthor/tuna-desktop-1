@@ -23,7 +23,10 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import os
+import shutil
 import re
+import secrets
 import shlex
 import subprocess
 import sys
@@ -34,6 +37,7 @@ from PIL import Image, ImageChops
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'lib'))
 from corral_identity import Identity, save_identity
+import corral_upgrade as upgrade
 
 USER, PASSWORD = 'tuna-test', 'tuna'  # public fixture account, as in packaging/marlin/vm-lane
 WIDTH, HEIGHT = 1280, 800
@@ -48,15 +52,31 @@ POINTS = {
     'dialog-log-out': (731, 457),       # end-session dialog "Log Out"
     'gdm-user': (640, 349),             # GDM user list, the only row
 }
-CROSSCHECK = {'greeter-user-list', 'session-is-tuna', 'lock'}
+# desktop and portal-screencast: the overview-exit frame (06) that noVNC shows
+# frozen mid-transition; both VNC views and the guest scanout are compared.
+CROSSCHECK = {'greeter-user-list', 'session-is-tuna', 'desktop', 'portal-screencast', 'lock'}
+# The guest's own scanout, read from KMS as root: the primary plane of each
+# card, XRGB8888 (bgr0) or ARGB8888 (bgra), printed base64 after "@@ok CARD FMT".
+SCANOUT = (
+    'command -v ffmpeg >/dev/null || { echo "@@skip ffmpeg is not on the image"; exit 0; }; '
+    'for card in /dev/dri/card*; do for fmt in bgra bgr0; do '
+    'if ffmpeg -hide_banner -loglevel error -device "$card" -f kmsgrab -i - -frames:v 1 '
+    '-vf "hwdownload,format=$fmt" -f image2 -c:v png -y /run/tuna-scanout.png 2>/run/tuna-scanout.err; then '
+    'echo "@@ok $card $fmt"; base64 -w0 /run/tuna-scanout.png; echo; rm -f /run/tuna-scanout.png /run/tuna-scanout.err; exit 0; fi; '
+    'echo "@@try $card $fmt $(tail -c 300 /run/tuna-scanout.err | tr "\\n" " ")"; done; done; '
+    'rm -f /run/tuna-scanout.png /run/tuna-scanout.err; exit 3')
 QUALIFICATION_CORE = {
     'greeter-user-list', 'greeter-password', 'session-is-tuna', 'portal-availability', 'portal-screenshot',
     'portal-screencast',
     'desktop', 'lock', 'unlock-refused', 'unlock', 'power-menu', 'logout-dialog', 'logout',
 }
 # Ready means: boot finished, GDM active, its greeter session on seat0, and
-# something painted on the console.
-GREETER = 'loginctl list-sessions --no-legend | awk \'$6=="greeter" && $4=="seat0"\' | grep -q .'
+# something painted on the console. The greeter is found by its Class
+# property: `loginctl list-sessions` has a CLASS column only from systemd 256
+# (255, as on Ubuntu 24.04, prints TTY STATE IDLE SINCE after SEAT).
+GREETER_SID = ('for s in $(loginctl list-sessions --no-legend | awk \'$4=="seat0"{print $1}\'); do '
+               '[ "$(loginctl show-session "$s" -p Class --value)" != greeter ] || echo "$s"; done')
+GREETER = f'{GREETER_SID} | grep -q .'
 
 
 class NotExercised(Exception):
@@ -79,6 +99,91 @@ def corral_json(argv, timeout=120, check=True, input=None):
     """Run `corral --json ARGV` and parse what it prints on stdout."""
     r = run(['corral', '--json', *argv], timeout=timeout, check=check, input=input)
     return json.loads(r.stdout) if r.stdout.strip() else None
+
+
+def compare_frames(frame, other):
+    """Pixel comparison of two captures: identical, or the bounding box and
+    share of pixels that differ in any channel."""
+    a, b = Image.open(frame).convert('RGB'), Image.open(other).convert('RGB')
+    if a.size != b.size:
+        return {'identical': False, 'sizes': [list(a.size), list(b.size)]}
+    diff = ImageChops.difference(a, b)
+    box = diff.getbbox()
+    if box is None:
+        return {'identical': True}
+    red, green, blue = diff.split()
+    changed = a.width * a.height - ImageChops.lighter(ImageChops.lighter(red, green), blue).histogram()[0]
+    return {'identical': False, 'diff_bbox': box, 'diff_fraction': round(changed / (a.width * a.height), 5)}
+
+
+def bootc_plugin():
+    """The corral-bootc plugin `corral bootc create` runs, resolved as Corral
+    resolves it (CORRAL_PLUGIN_DIR, else the XDG plugin dir, else PATH). It,
+    not the corral binary, writes the disk and provisions the account."""
+    plugins = os.environ.get('CORRAL_PLUGIN_DIR') or str(
+        Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local' / 'share') / 'corral' / 'plugins')
+    path = Path(plugins) / 'corral-bootc'
+    if not os.access(path, os.X_OK):
+        found = shutil.which('corral-bootc')
+        path = Path(found) if found else None
+    if path is None:
+        return {'path': None}
+    return {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def qemu_version(identity, vm):
+    """The QEMU in the VM's virt-launcher pod, which serves its VNC."""
+    kubectl = ['kubectl', '--context', identity.scope['kubernetes_context'], '-n', identity.scope['namespace']]
+    pods = run(kubectl + ['get', 'pods', '-l', f'vm.kubevirt.io/name={vm}', '-o', 'name'], check=False)
+    pod = pods.stdout.split()[0] if pods.stdout.split() else None
+    if pod is None:
+        return {'pod': None, 'exit': pods.returncode, 'stderr': pods.stderr.strip()}
+    r = run(kubectl + ['exec', pod, '-c', 'compute', '--', 'sh', '-c',
+                       'for q in /usr/libexec/qemu-kvm /usr/bin/qemu-system-x86_64; do '
+                       '[ -x "$q" ] && exec "$q" --version; done; exit 3'], check=False)
+    return {'pod': pod, 'exit': r.returncode,
+            'version': r.stdout.strip().splitlines()[0] if r.stdout.strip() else None, 'stderr': r.stderr.strip()}
+
+
+def ini_values(text, section, key):
+    """Every `key=` value inside `[section]` of a GDM/AccountsService key file."""
+    values, current = [], None
+    for line in (text or '').splitlines():
+        line = line.strip()
+        if line.startswith('['):
+            current = line
+        elif current == f'[{section}]' and line.startswith(key + '='):
+            values.append(line[len(key) + 1:])
+    return values
+
+
+def fresh_account_session(sections):
+    """Which session a fresh account's first GDM login starts (tunaOS#4055).
+
+    A non-empty AccountsService template `[User] Session` wins. Otherwise
+    GDM 51 and later start `[daemon] FallbackSession`; older GDM picks its own
+    preference (GNOME), which no configuration here makes Tuna."""
+    version = re.search(r'(\d+)\.\d+', sections.get('version', ''))
+    major = int(version.group(1)) if version else None
+    fallback = ini_values(sections.get('custom.conf'), 'daemon', 'FallbackSession')
+    result = {'gdm_version': sections.get('version', '').strip(), 'gdm_major': major,
+              'gdm_config': (sections.get('custom.conf-path') or '').strip() or None,
+              'fallback_session': fallback, 'templates': {}}
+    for kind in ('standard', 'administrator'):
+        text = sections.get(f'template-{kind}')
+        session = (ini_values(text, 'User', 'Session') or [''])[-1]
+        if session:
+            effective = session
+        elif major is not None and major >= 51 and len(fallback) == 1:
+            effective = fallback[0]
+        else:
+            effective = None
+        result['templates'][kind] = {'path': (sections.get(f'template-{kind}-path') or '').strip() or None,
+                                     'session': session, 'effective': effective}
+    record = sections.get('user')
+    result['saved'] = {'record': record is not None,
+                       'session': (ini_values(record, 'User', 'Session') or [''])[-1] if record is not None else None}
+    return result
 
 
 class Guest:
@@ -117,7 +222,30 @@ class Guest:
         return dict(line.split('=', 1) for line in props.splitlines())
 
     def greeter_session(self):
-        return self.out("loginctl list-sessions --no-legend | awk '$6==\"greeter\" && $4==\"seat0\"{print $1}'")
+        return self.out(GREETER_SID)
+
+    def session_defaults(self):
+        """GDM's version and `[daemon]`, the AccountsService templates and the
+        test account's own record, read in one exchange. GDM reads one
+        compiled-in config file: Debian's gdm3 /etc/gdm3/daemon.conf (it never
+        reads custom.conf there), Ubuntu's /etc/gdm3/custom.conf, others
+        /etc/gdm/custom.conf."""
+        raw = self.out(
+            'gdm=$(command -v gdm || command -v gdm3); echo "@@version"; "$gdm" --version 2>&1 || true; '
+            'for f in /etc/gdm3/daemon.conf /etc/gdm3/custom.conf /etc/gdm/custom.conf; do if [ -f "$f" ]; then '
+            'echo "@@custom.conf-path"; echo "$f"; echo "@@custom.conf"; cat "$f"; break; fi; done; '
+            f'if [ -f /var/lib/AccountsService/users/{USER} ]; then echo "@@user"; cat /var/lib/AccountsService/users/{USER}; fi; '
+            'for t in standard administrator; do for d in /run /etc /usr/local/share /usr/share; do '
+            'f=$d/accountsservice/user-templates/$t; if [ -f "$f" ]; then echo "@@template-$t-path"; echo "$f"; '
+            'echo "@@template-$t"; cat "$f"; break; fi; done; done')
+        sections, name = {}, None
+        for line in raw.splitlines():
+            if line.startswith('@@'):
+                name = line[2:]
+                sections[name] = ''
+            elif name is not None:
+                sections[name] += line + '\n'
+        return fresh_account_session(sections)
 
     def cursor(self):
         return self.out('journalctl -b -n0 --show-cursor --no-pager | sed -n "s/^-- cursor: //p"')
@@ -127,6 +255,26 @@ class Guest:
                          ' | grep -E "^tuna-" | grep -v "modifier super" || true').splitlines()
         return lines[-limit:]
 
+    def diagnostics(self, cursor, limit=600):
+        """A failed step's whole journal since the step began, the user's
+        processes with their cgroups, each user session's state and process
+        tree, and crashes, so the cause survives VM deletion."""
+        code, out, err = self.sh(
+            f'echo "@@journal"; journalctl -b --after-cursor={shlex.quote(cursor)} -o short-monotonic --no-pager'
+            f' | tail -n {limit}; echo "@@sessions"; loginctl list-sessions --no-legend; '
+            f'echo "@@session-status"; for s in $(loginctl list-sessions --no-legend | awk \'$3=="{USER}"{{print $1}}\'); do '
+            'loginctl session-status "$s" --no-pager --lines=0; done; '
+            f'echo "@@processes"; ps -u {USER} -o pid=,etimes=,comm=,cgroup= 2>/dev/null; '
+            'echo "@@coredumps"; coredumpctl list --no-pager --no-legend 2>/dev/null | tail -n 10', timeout=180)
+        sections, name = {'exit': code, 'stderr': err[-400:]}, None
+        for line in out.splitlines():
+            if line.startswith('@@'):
+                name = line[2:]
+                sections[name] = []
+            elif name is not None:
+                sections[name].append(line)
+        return sections
+
 
 class Console:
     """The VM's own console page from `corral console`, driven by Playwright.
@@ -134,9 +282,9 @@ class Console:
     The page shows only the VM's noVNC canvas at 1:1, so page pixels map onto
     guest pixels, and it reconnects by itself after the VNC session drops."""
 
-    def __init__(self, playwright, url):
-        self.browser = playwright.chromium.launch()
-        self.page = self.browser.new_page(viewport={'width': WIDTH + 40, 'height': HEIGHT + 40})
+    def __init__(self, playwright, url, *, browser=None, page=None):
+        self.browser = browser if browser is not None else playwright.chromium.launch()
+        self.page = page if page is not None else self.browser.new_page(viewport={'width': WIDTH + 40, 'height': HEIGHT + 40})
         self.url = url
 
     def open(self):
@@ -271,14 +419,15 @@ def provision(args, guest, receipt, identity):
                 '--context', identity.scope['corral_context_alias'],
                 '--user', USER, '--password-stdin', '--tag', 'purpose=tuna-corral-journey']
         argv += ['--node', args.node] if args.node else []
+        plugin = bootc_plugin()
         try:
             result = run(argv, timeout=3600, input=PASSWORD + '\n', check=False)
         except subprocess.TimeoutExpired as error:
-            receipt['provision'] = {'argv': argv, 'timeout': 3600,
+            receipt['provision'] = {'argv': argv, 'bootc_plugin': plugin, 'timeout': 3600,
                                     'stdout': error.stdout.decode() if isinstance(error.stdout, bytes) else error.stdout,
                                     'stderr': error.stderr.decode() if isinstance(error.stderr, bytes) else error.stderr}
             raise
-        receipt['provision'] = {'argv': argv, 'exit': result.returncode,
+        receipt['provision'] = {'argv': argv, 'bootc_plugin': plugin, 'exit': result.returncode,
                                 'stdout': result.stdout, 'stderr': result.stderr}
         # Resolve immediately after create, including failures which left a VM.
         # Never replace failed resolution with a bare-name selector.
@@ -314,6 +463,7 @@ def provision(args, guest, receipt, identity):
         raise RuntimeError(f'post-wait VM identity/placement mismatch: {json.dumps(info)}')
     receipt['vm'].update({k: info.get(k) for k in ('node', 'cpu', 'memory', 'firmware', 'inputs', 'disks',
                                                    'tagValues', 'image')})
+    receipt['vm']['qemu'] = qemu_version(identity, args.vm)
     if not any(i.get('type') == 'tablet' for i in info.get('inputs') or []):
         raise RuntimeError(f"no absolute pointer on the VM (inputs: {info.get('inputs')})")
     booted = json.loads(guest.out('bootc status --format json'))['status']['booted']['image']
@@ -323,7 +473,12 @@ def provision(args, guest, receipt, identity):
         raise RuntimeError(f"booted {booted['image']['image']}, not {args.image}")
     receipt['guest'] = {
         'packages': guest.out(
-            'if command -v pacman >/dev/null; then pacman -Q tuna-desktop gdm gnome-shell gnome-control-center nautilus; '
+            # Gentoo (guppy): the VDB lists installed CPVs and their source repository.
+            'if [ -f /etc/gentoo-release ]; then cd /var/db/pkg && for a in gui-wm/tuna-desktop gnome-base/gdm '
+            'gnome-base/gnome-shell gnome-base/gnome-control-center gnome-base/nautilus; do '
+            'm=$(ls -d "$a"-[0-9]* 2>/dev/null); [ -n "$m" ] || { echo "package $a is not installed" >&2; exit 1; }; '
+            'for p in $m; do echo "$p::$(cat "$p/repository")"; done; done; '
+            'elif command -v pacman >/dev/null; then pacman -Q tuna-desktop gdm gnome-shell gnome-control-center nautilus; '
             'elif command -v rpm >/dev/null; then rpm -q tuna-desktop gdm gnome-shell gnome-control-center nautilus; '
             'elif command -v dpkg-query >/dev/null; then dpkg-query -W tuna-desktop gdm3 gnome-shell gnome-control-center nautilus; '
             'else echo "no supported native package query" >&2; exit 1; fi').splitlines(),
@@ -380,14 +535,18 @@ class Journey:
             record['result'] = 'not-exercised'
         else:
             record['result'] = 'pass' if checks and all(c['ok'] for c in checks) else 'fail'
+        if record['result'] == 'fail':
+            record['diagnostics'] = self.guest.diagnostics(cursor)
         record['finished'] = now()
         print(f"{record['result']:4}  {sid}: {title}", flush=True)
         (self.out / 'manifest.json').write_text(json.dumps(self.receipt, indent=2) + '\n')
 
     def crosscheck(self, frame):
-        """Same frame through `corral screenshot`, independent of noVNC.
+        """Same frame through `corral screenshot` (a fresh VNC session,
+        independent of noVNC), then the guest's own KMS scanout.
 
-        The capture is kept only when its pixels differ from the frame."""
+        The corral capture is kept only when its pixels differ from the frame;
+        the scanout is always kept."""
         other = self.out / 'crosscheck' / f'{frame.stem}-corral.png'
         other.parent.mkdir(exist_ok=True)
         argv = ['corral', 'screenshot', self.guest.vm, '-o', str(other)]
@@ -395,15 +554,35 @@ class Journey:
         # KubeVirt keeps one VNC session; the screenshot's session ends the
         # page's, and the page reconnects by itself.
         self.console.connected()
+        scanout = self.scanout(frame)
         if r.returncode:
             return {'identical': False, 'argv': argv, 'exit': r.returncode,
-                    'stdout': r.stdout, 'stderr': r.stderr, 'observed': r.stderr.strip()}
+                    'stdout': r.stdout, 'stderr': r.stderr, 'observed': r.stderr.strip(), 'scanout': scanout}
         digest = hashlib.sha256(other.read_bytes()).hexdigest()
-        box = ImageChops.difference(Image.open(frame).convert('RGB'), Image.open(other).convert('RGB')).getbbox()
-        if box is None:
+        result = compare_frames(frame, other)
+        if result['identical']:
             other.unlink()
-            return {'identical': True, 'corral_png_sha256': digest}
-        return {'identical': False, 'diff_bbox': box, 'file': f'crosscheck/{other.name}'}
+            return {**result, 'corral_png_sha256': digest, 'scanout': scanout}
+        return {**result, 'file': f'crosscheck/{other.name}', 'scanout': scanout}
+
+    def scanout(self, frame):
+        """The guest's KMS scanout read as root with ffmpeg kmsgrab, past
+        QEMU's VNC, compared with the noVNC frame."""
+        code, out, err = self.guest.sh(SCANOUT, timeout=120)
+        lines = out.splitlines()
+        tries = [line[6:] for line in lines if line.startswith('@@try ')]
+        skip = next((line[7:] for line in lines if line.startswith('@@skip ')), None)
+        if skip:
+            return {'captured': False, 'skipped': skip}
+        ok = next((i for i, line in enumerate(lines) if line.startswith('@@ok ')), None)
+        if code or ok is None or ok + 1 >= len(lines):
+            return {'captured': False, 'exit': code, 'tries': tries, 'stderr': err[-400:]}
+        _, card, fmt = lines[ok].split()
+        path = self.out / 'crosscheck' / f'{frame.stem}-scanout.png'
+        path.write_bytes(base64.b64decode(lines[ok + 1]))
+        return {'captured': True, 'card': card, 'pix_fmt': fmt, 'tries': tries,
+                'file': f'crosscheck/{path.name}', 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                **compare_frames(frame, path)}
 
     def gsetting(self, schema, key):
         return self.guest.out(f'gsettings get {schema} {key}', user=True)
@@ -416,6 +595,16 @@ class Journey:
             check('console size', c.size() == [WIDTH, HEIGHT], c.size())
             check('GDM greeter session on seat0', g.greeter_session(), g.greeter_session())
             check('no user session yet', g.seat_session() is None, g.seat_session())
+            # #1050: the first login of an account that never chose a session
+            # must start Tuna through GDM's own default (tunaOS#4055).
+            fresh = g.session_defaults()
+            self.receipt['fresh_account'] = {'before_login': fresh}
+            saved = fresh['saved']['session']
+            check('fresh account has no saved session choice',
+                  saved in (None, '') or saved in {t['session'] for t in fresh['templates'].values()},
+                  fresh['saved'])
+            check('fresh-account default session is tuna (template Session or GDM FallbackSession)',
+                  all(t['effective'] == 'tuna' for t in fresh['templates'].values()), fresh)
         self.step('greeter-user-list', 'GDM shows the user list', greeter)
 
         def select_user(check):
@@ -445,6 +634,9 @@ class Journey:
             env = g.out(f'tr "\\0" "\\n" < /proc/$(pgrep -u {USER} -x tuna-compositor)/environ'
                         ' | grep -E "^XDG_(SESSION_DESKTOP|CURRENT_DESKTOP|SESSION_TYPE)="')
             check('session desktop is tuna', 'XDG_SESSION_DESKTOP=tuna' in env, env.splitlines())
+            after = g.session_defaults()['saved']
+            self.receipt.setdefault('fresh_account', {})['after_login'] = after
+            check('first login saved no other session', after['session'] in (None, '', 'tuna'), after)
         self.step('session-is-tuna', 'Password login starts Tuna Desktop (lands in the overview)', login)
 
         def portals(check):
@@ -526,6 +718,11 @@ class Journey:
         self.step('portal-screenshot', 'Request Screenshot through the actual published frontend', portal_screenshot)
 
         def portal_screencast(check):
+            if not self.args.qualification_only:
+                # The full tour comes here from the date menu. Close it first: left
+                # open, it covers the consent dialog in the prompt frame and is
+                # still open when Super+L locks.
+                c.key('Escape', wait=1500)
             record = self.receipt['portal_screencast'] = {'frame_validated': False}
             root = launch_capture('screencast', record, check)
             if root is None:
@@ -762,6 +959,405 @@ class Journey:
         self.step('logout', 'Logging out returns to GDM', logout)
 
 
+class UpgradeJourney(Journey):
+    """`--upgrade-to`: user state and session across a bootc switch, crash recovery and rollback.
+
+    The source image is the installed one. The user's state is written in a
+    real session, inventoried with nobody logged in, carried through `bootc
+    switch`, a reboot, a shell and a compositor crash in the target session,
+    `bootc rollback` and a second reboot. See docs/upgrade-recovery.md."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.upgrade = self.receipt['upgrade']
+        self.token = self.upgrade['token']
+        self.home = None
+        self.checkpoints = {}
+        self.texts = {}
+        self.locked_hint = False
+
+    def step(self, sid, title, action):
+        # Slow guest probes outlast the idle delay; real pointer motion before
+        # each step keeps the session active, as the tour does. It never unlocks.
+        def active(check):
+            self.console.activity()
+            action(check)
+        super().step(sid, title, active)
+
+    # -- guest helpers ----------------------------------------------------
+    def uid(self):
+        return self.guest.out(f'id -u {USER}')
+
+    def pid(self, pattern, exact=True):
+        flag = '-x' if exact else '-f'
+        code, out, _ = self.guest.sh(f'pgrep -u {USER} {flag} {shlex.quote(pattern)} | head -1')
+        return out if code == 0 and out else None
+
+    def alive(self, pid):
+        code, out, _ = self.guest.sh(f'sed -n "s/^State:\\s*//p" /proc/{int(pid)}/status')
+        return code == 0 and bool(out) and not out.startswith(('Z', 'X'))
+
+    def bootc(self, phase):
+        status = json.loads(self.guest.out('bootc status --format json'))
+        projection = upgrade.deployments(status)
+        self.upgrade.setdefault('bootc', {})[phase] = projection
+        return status, projection
+
+    def packages(self, phase):
+        code, out, err = self.guest.sh(
+            'if command -v pacman >/dev/null; then pacman -Q tuna-desktop; '
+            'elif command -v rpm >/dev/null; then rpm -q tuna-desktop; '
+            'else dpkg-query -W tuna-desktop; fi; '
+            'sha256sum /usr/bin/tuna-compositor /usr/bin/tuna-shell-gtk')
+        # Compositors from #849 (v1.0.0-beta.3) set logind's LockedHint; beta.2 never does.
+        self.locked_hint = self.guest.sh('grep -qa SetLockedHint /usr/bin/tuna-compositor')[0] == 0
+        self.upgrade.setdefault('packages', {})[phase] = {'exit': code, 'lines': out.splitlines(), 'stderr': err,
+                                                          'locked_hint_supported': self.locked_hint}
+        return out
+
+    def check_locked(self, check, name, locked):
+        """The shell's ScreenSaver state and, where the compositor reports it, logind's LockedHint."""
+        code, active, err = self.guest.sh('gdbus call --session --dest org.gnome.ScreenSaver --object-path '
+                                          '/org/gnome/ScreenSaver --method org.gnome.ScreenSaver.GetActive', user=True)
+        state = {'active': active if code == 0 else f'error {code}: {err[-200:]}',
+                 'locked_hint': (self.guest.seat_session() or {}).get('LockedHint'),
+                 'locked_hint_supported': self.locked_hint}
+        return check(name, upgrade.lock_matches(state, locked), state)
+
+    def user_file(self, rel):
+        code, out, _ = self.guest.sh(f'cat {shlex.quote(self.home + "/" + rel)}', timeout=60)
+        return out if code == 0 else None
+
+    def snapshot(self, name):
+        """Whole-home inventory, retained as its own file."""
+        code, out, err = self.guest.sh(upgrade.manifest_script(self.home), timeout=600)
+        if code:
+            raise RuntimeError(f'home inventory failed ({code}): {err[-400:]}')
+        manifest = json.loads(out)
+        path = self.out / f'home-{name}.json'
+        path.write_text(json.dumps(manifest, indent=1, sort_keys=True) + '\n')
+        self.checkpoints[name] = manifest
+        self.upgrade.setdefault('checkpoints', {})[name] = {
+            'file': path.name, 'entries': len(manifest['entries']),
+            'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'at': now()}
+        return manifest
+
+    def keep_texts(self, name):
+        """Persisted shell state as it stands at a checkpoint."""
+        self.texts[name] = {rel: self.user_file(rel) for rel in
+                            (upgrade.NOTIFICATIONS, upgrade.WELLBEING_HISTORY, upgrade.WINDOW_SESSIONS)}
+        self.upgrade.setdefault('stores', {})[name] = {
+            rel: None if text is None else {'bytes': len(text), 'sha256': hashlib.sha256(text.encode()).hexdigest()}
+            for rel, text in self.texts[name].items()}
+
+    def reboot(self, check, boundary):
+        """Reboot from inside the guest, as the user would, and wait for GDM on the new boot."""
+        g = self.guest
+        old = g.out('cat /proc/sys/kernel/random/boot_id')
+        code, out, err = g.sh('systemd-run --on-active=3 --unit=tuna-upgrade-proof-reboot systemctl reboot')
+        check('reboot scheduled', code == 0, {'exit': code, 'stdout': out, 'stderr': err})
+        g.identity.acquire(boundary=boundary)
+        argv = ['corral', '--json', 'wait', g.identity.target, '--boot-complete', '--unit', 'gdm.service',
+                '--exec', GREETER, '--paint', '--boot-id', old, '--timeout', '20m']
+        result = run(argv, timeout=1300, check=False)
+        ready = json.loads(result.stdout) if result.stdout.strip() else None
+        self.upgrade.setdefault('reboots', []).append(
+            {'boundary': boundary, 'argv': argv, 'exit': result.returncode, 'ready': ready,
+             'stderr': result.stderr[-2000:], 'previous_boot_id': old})
+        check('VM booted again and GDM is ready', (ready or {}).get('ready'), ready)
+        new = g.out('cat /proc/sys/kernel/random/boot_id')
+        check('a new boot', new != old, {'before': old, 'after': new})
+        self.console.connected(timeout=180000)
+
+    def login(self, check):
+        g, c = self.guest, self.console
+        check('GDM greeter on seat0, nobody logged in',
+              g.greeter_session() and g.seat_session() is None, g.greeter_session())
+        before = c.centre()
+        c.key('Enter')
+        if c.centre() == before:
+            c.click('gdm-user')
+            c.wait(1500)
+        c.type(PASSWORD, wait=300)
+        c.key('Enter', wait=1000)
+        session = wait_for(g.seat_session, 90, 'user session')
+        wait_for(lambda: self.pid('tuna-shell-gtk'), 90, 'tuna-shell-gtk')
+        c.wait(6000)
+        c.activity()
+        check('logind session via gdm-password', session.get('Service') == 'gdm-password', session)
+        procs = g.out(f'ps -u {USER} -o comm= | sort -u').split()
+        check('Tuna compositor and shell run', {'tuna-compositor', 'tuna-shell-gtk'} <= set(procs),
+              [p for p in procs if p.startswith('tuna')])
+        check('no gnome-shell for the user', 'gnome-shell' not in procs, 'gnome-shell' in procs)
+
+    def logout(self, check):
+        """End the session as logout does (SIGTERM to its processes) and wait for an idle home."""
+        g = self.guest
+        sid = g.out(f"loginctl list-sessions --no-legend | awk '$3==\"{USER}\" && $4==\"seat0\"{{print $1}}'")
+        check('a seat0 session to end', sid, sid)
+        g.out(f'loginctl terminate-session {shlex.quote(sid)}')
+        wait_for(lambda: g.seat_session() is None, 90, 'user session to end')
+        greeter = wait_for(g.greeter_session, 120, 'GDM greeter')
+        uid = self.uid()
+        manager = wait_for(lambda: (lambda s: s if s not in ('active', 'deactivating', 'reloading') else None)(
+            g.sh(f'systemctl is-active user@{uid}.service')[1]), 90, 'the user manager to stop')
+        g.out('sync')
+        check('GDM greeter back on seat0', greeter, greeter)
+        check('user manager stopped, nothing left writing the home', manager, manager)
+        self.console.connected(timeout=120000)
+
+    def gsettings_now(self):
+        observed = {}
+        for schema, key, _ in upgrade.gsettings_fixture(self.token):
+            code, out, err = self.guest.sh(f'gsettings get {shlex.quote(schema)} {key}', user=True)
+            observed[f'{schema} {key}'] = out if code == 0 else f'error {code}: {err[-200:]}'
+        return observed
+
+    def settle(self, probe, ok, timeout=30):
+        """Last value of `probe` once `ok(value)`, or after `timeout` seconds; never raises for a miss."""
+        deadline, value = time.monotonic() + timeout, None
+        while True:
+            value = probe()
+            if ok(value) or time.monotonic() >= deadline:
+                return value
+            time.sleep(3)
+
+    def state_checks(self, check, since):
+        """Settings and persisted shell state in a running session."""
+        mismatches = upgrade.gsettings_mismatches(upgrade.gsettings_fixture(self.token), self.gsettings_now())
+        check('every GSettings fixture value kept', not mismatches, mismatches)
+        text = self.settle(lambda: self.user_file(upgrade.NOTIFICATIONS), lambda t: bool(t) and self.token in t)
+        found = upgrade.notification_tokens(text, self.token)
+        check('persisted notification history still names the proof notification', found['present'], found)
+        earlier = self.texts.get(since, {}).get(upgrade.WELLBEING_HISTORY)
+        if earlier is None:
+            check('wellbeing history existed at the previous checkpoint', False,
+                  f'{upgrade.WELLBEING_HISTORY} absent at {since}')
+        else:
+            retained = upgrade.history_retained(earlier, self.user_file(upgrade.WELLBEING_HISTORY),
+                                                int(time.time()))
+            check('wellbeing history entries retained', retained['retained'], retained)
+
+    def preserved(self, check, before, after):
+        manifest = self.snapshot(after)
+        diff = upgrade.compare_manifests(self.checkpoints[before], manifest)
+        self.upgrade.setdefault('comparisons', {})[f'{before}->{after}'] = diff
+        check(f'home unchanged byte for byte from {before}', diff['preserved'],
+              {key: diff[key] for key in ('compared', 'missing', 'changed', 'added')})
+        problems = upgrade.fixture_mismatches(manifest, self.token)
+        check('file fixture intact', not problems, problems)
+
+    def restarted_shell(self, old):
+        return wait_for(lambda: (lambda pid: pid if pid and pid != old else None)(self.pid('tuna-shell-gtk')),
+                        60, 'a restarted tuna-shell-gtk', interval=2)
+
+    def shell_bus_owner(self, pid, timeout=60):
+        """PID owning org.gnome.Shell once it is `pid`, else the last owner seen."""
+        deadline, owner = time.monotonic() + timeout, None
+        while time.monotonic() < deadline:
+            owner = self.guest.sh('busctl --user status org.gnome.Shell | sed -n "s/^PID=//p"', user=True)[1]
+            if owner == pid:
+                break
+            time.sleep(2)
+        return owner
+
+    # -- the run -------------------------------------------------------------
+    def run(self):
+        g, c = self.guest, self.console
+        source, target = self.args.image, self.args.upgrade_to
+
+        def source_booted(check):
+            check('console size', c.size() == [WIDTH, HEIGHT], c.size())
+            status, projection = self.bootc('source-installed')
+            check('booted the source image', upgrade.booted_is(status, source), projection)
+            self.packages('source')
+            self.home = g.out(f'getent passwd {USER} | cut -d: -f6')
+        self.step('source-booted', 'Installed source image is booted at GDM', source_booted)
+
+        self.step('source-login', 'Log in to Tuna Desktop on the source image', self.login)
+
+        def create_state(check):
+            code, out, err = g.sh(upgrade.create_fixture_script(self.token), user=True, timeout=180)
+            check('file fixture written', code == 0 and out == 'ok', {'exit': code, 'stdout': out, 'stderr': err})
+            for schema, key, value in upgrade.gsettings_fixture(self.token):
+                code, out, err = g.sh(f'gsettings set {shlex.quote(schema)} {key} {shlex.quote(value)}', user=True)
+                check(f'gsettings set {schema} {key}', code == 0, {'exit': code, 'stderr': err})
+            mismatches = upgrade.gsettings_mismatches(upgrade.gsettings_fixture(self.token), self.gsettings_now())
+            check('GSettings fixture reads back', not mismatches, mismatches)
+            out = g.out("gdbus call --session --dest org.freedesktop.Notifications --object-path "
+                        "/org/freedesktop/Notifications --method org.freedesktop.Notifications.Notify "
+                        f"'Tuna upgrade proof' 0 dialog-information {shlex.quote('Upgrade proof ' + self.token)} "
+                        "'Must survive upgrade, crash and rollback' '[]' '{}' 0", user=True)
+            check('Notify returned an id', re.match(r'\(uint32 [1-9]', out), out)
+            text = self.settle(lambda: self.user_file(upgrade.NOTIFICATIONS), lambda t: bool(t) and self.token in t)
+            found = upgrade.notification_tokens(text, self.token)
+            check('notification persisted by the shell', found['present'], found)
+            c.key('Escape', wait=1500)
+            # Lock and unlock once so the wellbeing tracker records an inactive/active transition.
+            c.key('Meta+l', wait=4000)
+            self.check_locked(check, 'locked for the wellbeing transition', True)
+            c.type(PASSWORD, wait=300)
+            c.key('Enter', wait=4000)
+            self.check_locked(check, 'unlocked again after the wellbeing transition', False)
+            stores = {rel: g.sh(f'stat -c "%s %a %U" {shlex.quote(self.home + "/" + rel)}')[1] or None
+                      for rel in (*upgrade.SETTINGS_STORES, upgrade.WELLBEING_HISTORY, upgrade.WINDOW_SESSIONS)}
+            self.upgrade['stores_present'] = stores
+            check('a GSettings store holds the user settings', any(stores[s] for s in upgrade.SETTINGS_STORES), stores)
+        self.step('source-create-state', 'Write files, GSettings, a notification and wellbeing history', create_state)
+
+        def source_logout(check):
+            self.logout(check)
+            manifest = self.snapshot('source-logged-out')
+            problems = upgrade.fixture_mismatches(manifest, self.token)
+            check('file fixture intact', not problems, problems)
+            self.keep_texts('source-logged-out')
+            check('wellbeing history written', self.texts['source-logged-out'][upgrade.WELLBEING_HISTORY] is not None,
+                  self.upgrade['stores']['source-logged-out'])
+        self.step('source-logout', 'Log out; inventory the home with nobody logged in', source_logout)
+
+        def switch(check):
+            argv = f'bootc switch {shlex.quote(target)}'
+            code, out, err = g.sh(argv, timeout=3600)
+            self.upgrade['switch'] = {'argv': argv, 'exit': code, 'stdout': out[-4000:], 'stderr': err[-4000:]}
+            check('bootc switch exits 0', code == 0, {'exit': code, 'stderr': err[-600:]})
+            _, projection = self.bootc('after-switch')
+            check('target staged', (projection['staged'] or {}).get('ref') == target, projection['staged'])
+            check('source still booted', (projection['booted'] or {}).get('ref') == source, projection['booted'])
+        self.step('switch', 'bootc switch to the target digest', switch)
+
+        def reboot_target(check):
+            self.reboot(check, 'reboot-to-target')
+            status, projection = self.bootc('target-booted')
+            check('booted the target image', upgrade.booted_is(status, target), projection['booted'])
+            check('source kept as the rollback deployment', (projection['rollback'] or {}).get('ref') == source,
+                  projection['rollback'])
+            self.packages('target')
+        self.step('reboot-to-target', 'Reboot into the target deployment', reboot_target)
+
+        self.step('target-home-preserved', 'Home unchanged across the switch, before any login',
+                  lambda check: self.preserved(check, 'source-logged-out', 'target-greeter'))
+        self.step('target-login', 'Log in to Tuna Desktop on the target image', self.login)
+        self.step('target-state', 'Settings, notification and wellbeing history survived the upgrade',
+                  lambda check: self.state_checks(check, 'source-logged-out'))
+
+        apps = {}
+
+        def open_windows(check):
+            c.key('Escape', wait=2500)
+            for query, pattern, exact in (('files', 'nautilus', True), ('settings', '^gnome-control-center', False)):
+                c.key('Meta', wait=2000)
+                c.type(query, wait=2500)
+                c.key('Enter', wait=1000)
+                apps[pattern] = wait_for(lambda: self.pid(pattern, exact), 60, pattern)
+                c.wait(3000)
+            check('Files and Settings windows open', all(apps.values()), apps)
+            self.upgrade['apps'] = dict(apps)
+        self.step('target-open-windows', 'Open Files and Settings', open_windows)
+
+        def shell_crash(check):
+            compositor, shell = self.pid('tuna-compositor'), self.pid('tuna-shell-gtk')
+            cursor = g.cursor()
+            g.out(f'kill -KILL {int(shell)}')
+            new = self.restarted_shell(shell)
+            owner = self.shell_bus_owner(new)
+            c.wait(5000)
+            events = upgrade.supervision_events(g.journal(cursor, limit=200))
+            self.upgrade.setdefault('recovery', {})['shell'] = {
+                'compositor': compositor, 'killed_shell': shell, 'new_shell': new, 'events': events}
+            check('compositor kept running', self.pid('tuna-compositor') == compositor, compositor)
+            check('supervisor restarted the shell within its budget', upgrade.shell_restart_observed(events), events)
+            check('new shell owns org.gnome.Shell', owner == new, {'new_shell': new, 'owner': owner})
+            check('app windows stayed connected', all(self.alive(pid) for pid in apps.values()), apps)
+            self.state_checks(check, 'source-logged-out')
+        self.step('target-shell-crash', 'SIGKILL the shell: supervised restart keeps windows and state', shell_crash)
+
+        def shell_crash_locked(check):
+            c.key('Meta+l', wait=4000)
+            if not self.check_locked(check, 'locked before the crash', True):
+                return
+            shell = self.pid('tuna-shell-gtk')
+            g.out(f'kill -KILL {int(shell)}')
+            hint = (g.seat_session() or {}).get('LockedHint')
+            if self.locked_hint:
+                check('logind LockedHint stays yes with the shell killed', hint == 'yes', hint)
+            new = self.restarted_shell(shell)
+            owner = self.shell_bus_owner(new)
+            check('new shell owns org.gnome.Shell', owner == new, {'new_shell': new, 'owner': owner})
+            c.wait(4000)
+            # The new process has no lock memory: its GetActive is the compositor's
+            # lock state from the control connection, so the lock outlived the shell.
+            self.check_locked(check, 'the restarted shell reads the session locked from the compositor', True)
+            c.type(PASSWORD, wait=300)
+            c.key('Enter', wait=4000)
+            self.check_locked(check, 'the password unlocks through the restarted shell', False)
+            check('app windows stayed connected', all(self.alive(pid) for pid in apps.values()), apps)
+            self.upgrade.setdefault('recovery', {})['locked_shell'] = {'killed_shell': shell, 'new_shell': new}
+        self.step('target-shell-crash-locked', 'SIGKILL the shell while locked: stays locked, unlocks after restart',
+                  shell_crash_locked)
+
+        def compositor_crash(check):
+            compositor = self.pid('tuna-compositor')
+            # SIGABRT is a panic=abort or failed assertion. A sent SIGSEGV is not a crash:
+            # Rust's guard-page handler resets it and returns, so the process runs on.
+            g.out(f'kill -ABRT {int(compositor)}')
+            wait_for(lambda: g.seat_session() is None, 120, 'the crashed session to end')
+            greeter = wait_for(g.greeter_session, 120, 'GDM greeter')
+            uid = self.uid()
+            wait_for(lambda: g.sh(f'systemctl is-active user@{uid}.service')[1] not in
+                     ('active', 'deactivating', 'reloading'), 90, 'the user manager to stop')
+            check('GDM greeter back on seat0 after the compositor crash', greeter, greeter)
+            survivors = {pattern: pid for pattern, pid in apps.items() if self.alive(pid)}
+            dumps = g.sh('coredumpctl list --no-legend --no-pager tuna-compositor 2>&1 | tail -3')[1]
+            self.upgrade.setdefault('recovery', {})['compositor'] = {
+                'killed': compositor, 'signal': 'ABRT', 'apps_still_running': survivors,
+                'note': 'apps lose their display with the compositor (docs/session-operations.md)',
+                'coredumpctl': dumps.splitlines()}
+            self.console.connected(timeout=120000)
+        self.step('target-compositor-crash', 'SIGABRT the compositor: the session ends back at GDM', compositor_crash)
+
+        self.step('target-relogin', 'Log in again after the compositor crash', self.login)
+        self.step('target-state-after-crash', 'State survived the compositor crash',
+                  lambda check: self.state_checks(check, 'source-logged-out'))
+
+        def target_logout(check):
+            self.logout(check)
+            manifest = self.snapshot('target-logged-out')
+            problems = upgrade.fixture_mismatches(manifest, self.token)
+            check('file fixture intact', not problems, problems)
+            self.keep_texts('target-logged-out')
+        self.step('target-logout', 'Log out; inventory the home again', target_logout)
+
+        def rollback(check):
+            code, out, err = g.sh('bootc rollback', timeout=600)
+            self.upgrade['rollback'] = {'exit': code, 'stdout': out[-4000:], 'stderr': err[-4000:]}
+            check('bootc rollback exits 0', code == 0, {'exit': code, 'stderr': err[-600:]})
+            _, projection = self.bootc('after-rollback')
+            check('target still booted until reboot', (projection['booted'] or {}).get('ref') == target,
+                  projection['booted'])
+        self.step('rollback', 'bootc rollback to the source deployment', rollback)
+
+        def reboot_source(check):
+            self.reboot(check, 'reboot-to-source')
+            status, projection = self.bootc('rolled-back')
+            check('booted the source image again', upgrade.booted_is(status, source), projection['booted'])
+            check('target kept as the rollback deployment', (projection['rollback'] or {}).get('ref') == target,
+                  projection['rollback'])
+            self.packages('rolled-back')
+        self.step('reboot-to-source', 'Reboot into the source deployment', reboot_source)
+
+        self.step('source-home-preserved', 'Home unchanged across the rollback, before any login',
+                  lambda check: self.preserved(check, 'target-logged-out', 'source-greeter'))
+        self.step('rollback-login', 'Log in to Tuna Desktop after the rollback', self.login)
+        self.step('rollback-state', 'Settings, notification and wellbeing history survived the rollback',
+                  lambda check: self.state_checks(check, 'target-logged-out'))
+
+        def final_logout(check):
+            self.logout(check)
+            problems = upgrade.fixture_mismatches(self.snapshot('final'), self.token)
+            check('file fixture intact', not problems, problems)
+        self.step('rollback-logout', 'Log out after the rollback', final_logout)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--image', required=True, help='bootc image pinned by digest: REPO@sha256:...')
@@ -776,6 +1372,9 @@ def main():
     p.add_argument('--keep', action='store_true', help='leave the VM and its disk in place')
     p.add_argument('--qualification-only', action='store_true',
                    help='real GDM/session/portal availability/lock/unlock/logout only; not the full daily-driver tour')
+    p.add_argument('--upgrade-to', metavar='REPO@sha256:...',
+                   help='instead of the tour, prove user state across bootc switch to this digest, shell and '
+                        'compositor crashes, and bootc rollback (docs/upgrade-recovery.md)')
     args = p.parse_args()
     if not re.fullmatch(r'[^@\s]+@sha256:[0-9a-f]{64}', args.image):
         p.error('--image must be pinned by digest (REPO@sha256:...)')
@@ -785,19 +1384,30 @@ def main():
     # rejects label values above 63 bytes after the disk PVC already exists.
     if len(args.vm + '-bootc-builder-cloudinit') > 63:
         p.error('--vm is too long for the Corral bootc builder labels (max 39 characters)')
+    if args.upgrade_to:
+        problem = upgrade.validate_refs(args.image, args.upgrade_to)
+        if problem:
+            p.error(problem)
+        if args.reuse or args.qualification_only:
+            p.error('--upgrade-to needs a fresh install and its own steps; drop --reuse/--qualification-only')
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=False)
     from playwright.sync_api import sync_playwright
 
     receipt = {'schema': 2, 'started': now(), 'runner': 'scripts/tuna-corral-journey',
                'runner_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-               'scope': 'qualification-core' if args.qualification_only else 'daily-driver',
+               'scope': ('upgrade-recovery' if args.upgrade_to else
+                         'qualification-core' if args.qualification_only else 'daily-driver'),
                'corral': run(['corral', 'version']).stdout.strip(),
                'image': {'ref': args.image},
                'vm': {'name': args.vm, 'namespace': args.namespace, 'backend': 'kubevirt',
                       'requested': {'cpu': args.cpu, 'mem': args.mem, 'disk': args.disk, 'node': args.node}},
                'console': 'corral console page (noVNC), Playwright Chromium, 1:1; frames are the canvas pixels',
                'steps': []}
+    if args.upgrade_to:
+        receipt['upgrade'] = {'source': args.image, 'target': args.upgrade_to, 'token': secrets.token_hex(8),
+                              'logic': 'scripts/lib/corral_upgrade.py',
+                              'logic_sha256': hashlib.sha256(Path(upgrade.__file__).read_bytes()).hexdigest()}
     identity, console_proc = None, None
     identity_path = out / 'identity.json'
     # Both the normal runner and an interrupted-run driver use this same receipt.
@@ -818,7 +1428,7 @@ def main():
         with sync_playwright() as pw:
             console = Console(pw, endpoint['url'])
             console.open()
-            Journey(args, guest, console, receipt, out).run()
+            (UpgradeJourney if args.upgrade_to else Journey)(args, guest, console, receipt, out).run()
             console.close()
     except Exception as error:
         receipt['error'] = f'{type(error).__name__}: {error}'

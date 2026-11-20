@@ -11,8 +11,9 @@
 //!   shape). Valid requests focus and raise the window.
 //! - viewporter, fractional-scale v1 (preferred scale follows the target output),
 //!   single-pixel-buffer, cursor-shape v1.
-//! - idle-inhibit: a live inhibitor holds off the idle lock (video
-//!   players, presentations).
+//! - idle-inhibit: an inhibitor on a surface the user sees holds off the
+//!   idle lock (video players, presentations); an unmapped, hidden or
+//!   off-screen one holds off nothing.
 //!
 //! - text-input v3 and input-method v2 (#60): IMEs such as fcitx5 type
 //!   into GTK apps; smithay relays focus and text, candidate popups are
@@ -42,22 +43,50 @@
 //!   surface while it has pointer focus (the enter serial must match).
 //! - presentation-time, fifo and commit-timing: see [`crate::frame_timing`].
 //!
+//! Wired from Smithay 0.7 beyond Mutter 51 (#1046; docs/protocols.md,
+//! Deliberate differences):
+//!
+//! - security-context v1: a sandbox engine (Flatpak) creates a listener
+//!   whose clients join the display tagged with the context
+//!   (`State::take_security_contexts`, `ClientState::security_context`).
+//!   Such a client passes no privileged global's filter
+//!   (`ClientState::privileged`: layer-shell, the foreign toplevel list,
+//!   input-method, virtual keyboard, mutter_x11_interop) and sees neither
+//!   session-lock nor security-context itself, so it cannot nest.
+//! - ext-idle-notify v2: served on the idle clock of
+//!   org.gnome.Mutter.IdleMonitor, fed by the same input path
+//!   (`idle_notify.rs`).
+//! - content-type v1: Smithay keeps each surface's hint in its cached
+//!   state ([`surface_content_type`]); recorded for future VRR and
+//!   frame scheduling, nothing acts on it yet.
+//! - ext-foreign-toplevel-list v1: the supervised shell's alone, as
+//!   window titles and app ids are published only to the shell and the
+//!   portal picker (docs/security-model.md); the list follows the window
+//!   model (`State::sync_foreign_toplevels`).
+//! - alpha-modifier v1: Smithay's `WaylandSurfaceRenderElement`, which
+//!   every surface draw goes through, multiplies the surface's alpha.
+//!
 //! Deliberately absent, matching Mutter: xdg-decoration (GNOME is
 //! client-side decorations only).
 
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use smithay::{
     backend::allocator::{dmabuf::Dmabuf, Format},
-    delegate_cursor_shape, delegate_dmabuf, delegate_fractional_scale, delegate_idle_inhibit,
+    delegate_alpha_modifier, delegate_content_type, delegate_cursor_shape, delegate_dmabuf,
+    delegate_foreign_toplevel_list, delegate_fractional_scale, delegate_idle_inhibit,
     delegate_input_method_manager, delegate_pointer_constraints, delegate_pointer_gestures,
-    delegate_relative_pointer, delegate_single_pixel_buffer, delegate_tablet_manager,
-    delegate_viewporter, delegate_xdg_activation, delegate_xdg_dialog, delegate_xdg_foreign,
-    delegate_xdg_system_bell, delegate_xdg_toplevel_tag,
+    delegate_relative_pointer, delegate_security_context, delegate_single_pixel_buffer,
+    delegate_tablet_manager, delegate_viewporter, delegate_xdg_activation, delegate_xdg_dialog,
+    delegate_xdg_foreign, delegate_xdg_system_bell, delegate_xdg_toplevel_tag,
     input::pointer::PointerHandle,
     reexports::{
         wayland_protocols::{
-            wp::pointer_warp::v1::server::wp_pointer_warp_v1::{self, WpPointerWarpV1},
+            wp::{
+                content_type::v1::server::wp_content_type_v1,
+                pointer_warp::v1::server::wp_pointer_warp_v1::{self, WpPointerWarpV1},
+            },
             xdg::shell::server::xdg_toplevel::XdgToplevel,
         },
         wayland_server::{
@@ -67,9 +96,14 @@ use smithay::{
     },
     utils::{Logical, Point, Rectangle},
     wayland::{
+        alpha_modifier::AlphaModifierState,
         compositor::with_states,
+        content_type::{ContentTypeState, ContentTypeSurfaceCachedState},
         cursor_shape::CursorShapeManagerState,
         dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
+        foreign_toplevel_list::{
+            ForeignToplevelHandle, ForeignToplevelListHandler, ForeignToplevelListState,
+        },
         fractional_scale::{
             with_fractional_scale, FractionalScaleHandler, FractionalScaleManagerState,
         },
@@ -82,6 +116,10 @@ use smithay::{
         pointer_constraints::{PointerConstraintsHandler, PointerConstraintsState},
         pointer_gestures::PointerGesturesState,
         relative_pointer::RelativePointerManagerState,
+        security_context::{
+            SecurityContext, SecurityContextHandler, SecurityContextListenerSource,
+            SecurityContextState,
+        },
         shell::xdg::dialog::{XdgDialogHandler, XdgDialogState},
         single_pixel_buffer::SinglePixelBufferState,
         tablet_manager::{TabletManagerState, TabletSeatHandler},
@@ -147,6 +185,21 @@ pub(crate) struct Protocols {
     pub(crate) preferred_scale: f64,
     /// Every text input's committed state, for the on-screen keyboard.
     pub(crate) text_inputs: crate::osk::TextInputs,
+    /// wp_security_context_manager_v1 (#1046).
+    _security_context: SecurityContextState,
+    /// Contexts committed since the runtime last took them: each
+    /// listener goes on the event loop, its clients inside the context.
+    security_contexts: Vec<(SecurityContextListenerSource, SecurityContext)>,
+    /// ext_idle_notifier_v1, fed by the input path (#1046).
+    pub(crate) idle_notifier: crate::idle_notify::IdleNotifier,
+    _content_type: ContentTypeState,
+    _alpha_modifier: AlphaModifierState,
+    /// ext_foreign_toplevel_list_v1, the supervised shell's alone.
+    foreign_toplevels: ForeignToplevelListState,
+    /// One list handle per window-model id.
+    foreign_handles: HashMap<u64, ForeignToplevelHandle>,
+    /// Window-model revision the list last followed.
+    foreign_revision: Option<u64>,
 }
 
 impl Protocols {
@@ -165,9 +218,7 @@ impl Protocols {
             // Only the compositor-supervised connection may observe text or
             // own the seat's input method, just as for its virtual keyboard.
             _input_method: InputMethodManagerState::new::<State, _>(dh, |client| {
-                client
-                    .get_data::<crate::ClientState>()
-                    .is_some_and(|data| data.ime_bridge)
+                crate::ClientState::privileged(client, |data| data.ime_bridge)
             }),
             bridge_cursor_popup: None,
             _gestures: PointerGesturesState::new::<State>(dh),
@@ -180,9 +231,7 @@ impl Protocols {
                 State,
                 _,
             >(dh, |client| {
-                client
-                    .get_data::<crate::ClientState>()
-                    .is_some_and(|data| data.ime_bridge)
+                crate::ClientState::privileged(client, |data| data.ime_bridge)
             }),
             _dialog: XdgDialogState::new::<State>(dh),
             _system_bell: XdgSystemBellState::new::<State>(dh),
@@ -202,6 +251,24 @@ impl Protocols {
             inhibitors: Vec::new(),
             preferred_scale: 1.0,
             text_inputs: crate::osk::TextInputs::default(),
+            // Any client outside a security context may create one; a
+            // client inside one must not see it (the protocol's nesting
+            // rule, and Smithay's filter contract).
+            _security_context: SecurityContextState::new::<State, _>(dh, |client| {
+                !crate::ClientState::sandboxed(client)
+            }),
+            security_contexts: Vec::new(),
+            idle_notifier: crate::idle_notify::IdleNotifier::new(dh),
+            _content_type: ContentTypeState::new::<State>(dh),
+            _alpha_modifier: AlphaModifierState::new::<State>(dh),
+            // Window titles and app ids go to the shell and the portal
+            // picker only (docs/security-model.md), so the list is the
+            // supervised shell's, like layer-shell.
+            foreign_toplevels: ForeignToplevelListState::new_with_filter::<State>(dh, |client| {
+                crate::ClientState::privileged(client, |data| data.supervised_shell)
+            }),
+            foreign_handles: HashMap::new(),
+            foreign_revision: None,
         }
     }
 }
@@ -278,10 +345,34 @@ impl State {
         self.protocols.preferred_scale = scale;
     }
 
-    /// Whether a live, mapped surface holds an idle inhibitor.
-    pub fn idle_inhibited(&mut self) -> bool {
+    /// Whether a surface the user sees holds an idle inhibitor. The
+    /// protocol lets an inhibitor lapse while its surface is unmapped,
+    /// occluded or not visible: it counts only if the surface has a
+    /// buffer and its tree is in `shown` (what the screen draws, each
+    /// tree where it sits, as [`crate::frame_timing::drawn_roots`]
+    /// gives it) on some output.
+    pub fn idle_inhibited(&mut self, shown: &[(WlSurface, Point<i32, Logical>)]) -> bool {
         self.protocols.inhibitors.retain(|s| s.is_alive());
-        !self.protocols.inhibitors.is_empty()
+        self.protocols.inhibitors.iter().any(|surface| {
+            let mut root = surface.clone();
+            while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
+                root = parent;
+            }
+            let mapped = smithay::wayland::compositor::with_states(surface, |states| {
+                states
+                    .data_map
+                    .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>()
+                    .and_then(|data| data.lock().ok().and_then(|data| data.surface_size()))
+                    .is_some()
+            });
+            mapped
+                && shown.iter().any(|(tree, at)| {
+                    *tree == root
+                        && self.outputs.iter().any(|output| {
+                            Rectangle::new(output.loc.into(), output.size).contains(*at)
+                        })
+                })
+        })
     }
 
     /// Where `surface`'s buffer origin lands globally: a mapped
@@ -621,6 +712,96 @@ impl IdleInhibitHandler for State {
     }
 }
 delegate_idle_inhibit!(State);
+
+impl SecurityContextHandler for State {
+    fn context_created(&mut self, source: SecurityContextListenerSource, context: SecurityContext) {
+        self.protocols.security_contexts.push((source, context));
+    }
+}
+delegate_security_context!(State);
+
+impl State {
+    /// Security contexts committed since the last call. The caller puts
+    /// each listener on its event loop inside a
+    /// `security_listener::RestingListener` (a failed accept must not end
+    /// the loop, #1071) and inserts every accepted stream with
+    /// `ClientState::security_context`; the listener is dropped when its
+    /// creator closes the context's close fd.
+    pub(crate) fn take_security_contexts(
+        &mut self,
+    ) -> Vec<(SecurityContextListenerSource, SecurityContext)> {
+        std::mem::take(&mut self.protocols.security_contexts)
+    }
+
+    /// Follow the window model in ext-foreign-toplevel-list: a handle per
+    /// window with its title and app id (empty when unknown), updates
+    /// when either changes, `closed` when it leaves the model. Called by
+    /// the window manager at the end of each reconcile; an unchanged
+    /// model revision costs nothing.
+    pub(crate) fn sync_foreign_toplevels<'a>(
+        &mut self,
+        revision: u64,
+        windows: impl Iterator<Item = &'a crate::state::WindowEntry>,
+    ) {
+        let protocols = &mut self.protocols;
+        if protocols.foreign_revision == Some(revision) {
+            return;
+        }
+        protocols.foreign_revision = Some(revision);
+        let mut live = HashSet::new();
+        for window in windows {
+            live.insert(window.id);
+            let app_id = window.app_id.as_deref().unwrap_or_default();
+            match protocols.foreign_handles.get(&window.id) {
+                Some(handle) => {
+                    if handle.title() != window.title || handle.app_id() != app_id {
+                        handle.send_title(&window.title);
+                        handle.send_app_id(app_id);
+                        handle.send_done();
+                    }
+                }
+                None => {
+                    let handle = protocols
+                        .foreign_toplevels
+                        .new_toplevel::<State>(window.title.as_str(), app_id);
+                    protocols.foreign_handles.insert(window.id, handle);
+                }
+            }
+        }
+        let list = &mut protocols.foreign_toplevels;
+        protocols.foreign_handles.retain(|id, handle| {
+            let keep = live.contains(id);
+            if !keep {
+                list.remove_toplevel(handle);
+            }
+            keep
+        });
+    }
+}
+
+impl ForeignToplevelListHandler for State {
+    fn foreign_toplevel_list_state(&mut self) -> &mut ForeignToplevelListState {
+        &mut self.protocols.foreign_toplevels
+    }
+}
+delegate_foreign_toplevel_list!(State);
+
+/// The content type a surface's client last committed through
+/// wp_content_type_v1 (`None` when it never set one). Recorded for
+/// future VRR and frame scheduling; nothing reads it for behaviour yet.
+pub fn surface_content_type(surface: &WlSurface) -> wp_content_type_v1::Type {
+    with_states(surface, |states| {
+        *states
+            .cached_state
+            .get::<ContentTypeSurfaceCachedState>()
+            .current()
+            .content_type()
+    })
+}
+delegate_content_type!(State);
+
+// WaylandSurfaceRenderElement applies the committed multiplier itself.
+delegate_alpha_modifier!(State);
 
 // Keep Smithay's text-input state, but watch every request first: GNOME's
 // on-screen keyboard follows the focused field's enable, content type and

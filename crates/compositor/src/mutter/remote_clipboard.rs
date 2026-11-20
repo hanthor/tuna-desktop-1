@@ -7,8 +7,11 @@
 //! `(as)`).
 //!
 //! The Wayland side is smithay's data device: a remote selection is a
-//! compositor-provided selection whose user data is the session id, and a
-//! local client's selection is read through its source. Data never crosses
+//! compositor-provided selection whose user data is
+//! `CompositorSelection::Remote(session id)`, a local client's selection
+//! is read through its source, and the clipboard manager's retained copy
+//! of a gone client's selection (`CompositorSelection::Retained`) is read
+//! from memory (`crate::clipboard_manager`). Data never crosses
 //! the compositor loop: each transfer is a pipe pumped on its own thread,
 //! bounded in size, idle time and count, and cut off when the grant is
 //! revoked (stop, owner loss, lock) or the clipboard is disabled.
@@ -21,7 +24,8 @@ use std::time::{Duration, Instant};
 
 use zbus::fdo;
 use zbus::object_server::SignalEmitter;
-use zbus::zvariant::{OwnedValue, StructureBuilder, Value};
+use zbus::wire::StructureBuilder;
+use zbus::{OwnedVariant, Variant};
 
 /// Mime types one selection may offer.
 pub(crate) const MAX_MIME_TYPES: usize = 64;
@@ -120,12 +124,12 @@ impl Shared {
 /// The `mime-types` option of EnableClipboard and SetSelection: absent,
 /// or a non-empty bounded list of printable names.
 pub(crate) fn mime_types(
-    options: &HashMap<String, OwnedValue>,
+    options: &HashMap<String, OwnedVariant>,
 ) -> fdo::Result<Option<Vec<String>>> {
     let Some(value) = options.get("mime-types") else {
         return Ok(None);
     };
-    let Value::Array(array) = &**value else {
+    let Variant::Array(array) = &**value else {
         return Err(fdo::Error::InvalidArgs(
             "mime-types must be a string array".into(),
         ));
@@ -141,7 +145,7 @@ pub(crate) fn mime_types(
     array
         .iter()
         .map(|value| match value {
-            Value::Str(name) => valid_mime_type(name.as_str()).map(str::to_owned),
+            Variant::Str(name) => valid_mime_type(name.as_str()).map(str::to_owned),
             _ => Err(fdo::Error::InvalidArgs(
                 "mime-types must be a string array".into(),
             )),
@@ -164,7 +168,7 @@ pub(crate) fn valid_mime_type(name: &str) -> fdo::Result<&str> {
 /// `session-is-owner`, or nothing when the selection has no owner.
 pub(crate) fn owner_changed_options(
     owner: Option<(&[String], bool)>,
-) -> HashMap<String, OwnedValue> {
+) -> HashMap<String, OwnedVariant> {
     let mut options = HashMap::new();
     let Some((mime_types, is_owner)) = owner else {
         return options;
@@ -173,11 +177,11 @@ pub(crate) fn owner_changed_options(
         .add_field(mime_types.to_vec())
         .build()
     {
-        if let Ok(value) = OwnedValue::try_from(Value::Structure(tuple)) {
+        if let Ok(value) = OwnedVariant::try_from(Variant::Structure(tuple)) {
             options.insert("mime-types".into(), value);
         }
     }
-    options.insert("session-is-owner".into(), OwnedValue::from(is_owner));
+    options.insert("session-is-owner".into(), OwnedVariant::from(is_owner));
     options
 }
 
@@ -192,12 +196,14 @@ pub(crate) enum PumpEnd {
     Failed,
 }
 
-fn nonblocking(fd: &OwnedFd) -> rustix::io::Result<()> {
+pub(crate) fn nonblocking(fd: &OwnedFd) -> rustix::io::Result<()> {
     let flags = rustix::fs::fcntl_getfl(fd)?;
     rustix::fs::fcntl_setfl(fd, flags | rustix::fs::OFlags::NONBLOCK)
 }
 
-fn ready(
+/// Wait until `fd` is ready for `flags`, polling `stop` every 100 ms;
+/// `Idle` once `deadline` passes.
+pub(crate) fn ready(
     fd: &OwnedFd,
     flags: rustix::event::PollFlags,
     stop: &dyn Fn() -> bool,
@@ -458,7 +464,7 @@ impl Registry {
             .filter(|g| g.shared.enabled() && !g.stopped.load(Ordering::SeqCst))
     }
 
-    fn options_for(&self, session_id: u64) -> HashMap<String, OwnedValue> {
+    fn options_for(&self, session_id: u64) -> HashMap<String, OwnedVariant> {
         owner_changed_options(match &self.owner {
             None => None,
             Some(Owner::Client(types)) => Some((types, false)),
@@ -670,22 +676,45 @@ impl crate::State {
     }
 
     fn apply_remote_clipboard(&mut self, effect: Effect) {
+        use crate::clipboard_manager::CompositorSelection;
         use smithay::wayland::selection::data_device::{
-            clear_data_device_selection, request_data_device_client_selection,
-            set_data_device_selection, SelectionRequestError,
+            clear_data_device_selection, current_data_device_selection_userdata,
+            request_data_device_client_selection, set_data_device_selection, SelectionRequestError,
         };
         match effect {
             Effect::None => {}
             Effect::Own {
                 session_id,
                 mime_types,
-            } => set_data_device_selection(&self.dh, &self.seat, mime_types, session_id),
+            } => {
+                // A remote selection is not copied (see clipboard_manager).
+                self.clipboard_manager.forget();
+                set_data_device_selection(
+                    &self.dh,
+                    &self.seat,
+                    mime_types,
+                    CompositorSelection::Remote(session_id),
+                )
+            }
             Effect::Clear => clear_data_device_selection(&self.dh, &self.seat),
             Effect::Read {
                 mime_type,
                 fd,
                 reply,
             } => {
+                let current = current_data_device_selection_userdata(&self.seat).map(|data| *data);
+                if let Some(CompositorSelection::Retained(generation)) = current {
+                    // The compositor holds a gone client's copy: serve it.
+                    let result = if self.clipboard_manager.serve(generation, &mime_type, fd) {
+                        Ok(())
+                    } else {
+                        Err(fdo::Error::Failed(
+                            "The selection does not offer this mime type".into(),
+                        ))
+                    };
+                    let _ = reply.send(result);
+                    return;
+                }
                 let result = request_data_device_client_selection(&self.seat, mime_type, fd)
                     .map_err(|error| {
                         fdo::Error::Failed(
@@ -714,32 +743,35 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
-    fn options(value: Value<'_>) -> HashMap<String, OwnedValue> {
+    fn options(value: Variant<'_>) -> HashMap<String, OwnedVariant> {
         HashMap::from([(
             "mime-types".to_owned(),
-            OwnedValue::try_from(value).unwrap(),
+            OwnedVariant::try_from(value).unwrap(),
         )])
     }
 
     #[test]
     fn mime_type_options_are_bounded_and_typed() {
         assert_eq!(mime_types(&HashMap::new()).unwrap(), None);
-        let ok = options(Value::from(vec!["text/plain;charset=utf-8", "UTF8_STRING"]));
+        let ok = options(Variant::from(vec![
+            "text/plain;charset=utf-8",
+            "UTF8_STRING",
+        ]));
         assert_eq!(
             mime_types(&ok).unwrap().unwrap(),
             vec!["text/plain;charset=utf-8", "UTF8_STRING"]
         );
         // Garbage: wrong type, empty list, empty/oversized/control names,
         // too many entries.
-        assert!(mime_types(&options(Value::from(7u32))).is_err());
-        assert!(mime_types(&options(Value::from(Vec::<String>::new()))).is_err());
-        assert!(mime_types(&options(Value::from(vec![""]))).is_err());
-        assert!(mime_types(&options(Value::from(vec!["a\nb"]))).is_err());
-        assert!(mime_types(&options(Value::from(vec!["x".repeat(MAX_MIME_LEN + 1)]))).is_err());
-        assert!(mime_types(&options(Value::from(vec![1u32, 2]))).is_err());
+        assert!(mime_types(&options(Variant::from(7u32))).is_err());
+        assert!(mime_types(&options(Variant::from(Vec::<String>::new()))).is_err());
+        assert!(mime_types(&options(Variant::from(vec![""]))).is_err());
+        assert!(mime_types(&options(Variant::from(vec!["a\nb"]))).is_err());
+        assert!(mime_types(&options(Variant::from(vec!["x".repeat(MAX_MIME_LEN + 1)]))).is_err());
+        assert!(mime_types(&options(Variant::from(vec![1u32, 2]))).is_err());
         let many: Vec<String> = (0..=MAX_MIME_TYPES).map(|i| format!("a/{i}")).collect();
         assert!(matches!(
-            mime_types(&options(Value::from(many))),
+            mime_types(&options(Variant::from(many))),
             Err(fdo::Error::LimitsExceeded(_))
         ));
     }

@@ -19,9 +19,14 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use zbus::object_server::{InterfaceRef, SignalEmitter};
-use zbus::zvariant::{DeserializeDict, OwnedObjectPath, OwnedValue, Type, Value};
-use zbus::{fdo, interface, ObjectServer};
+use zbus::{
+    fdo, interface, DeserializeDict, ObjectServer, OwnedObjectPath, OwnedVariant, Type, Variant,
+};
 
+mod capture_eis;
+pub(crate) mod input_capture;
+#[cfg(test)]
+mod input_capture_bus_tests;
 #[cfg(test)]
 mod remote_bus_tests;
 pub mod remote_clipboard;
@@ -193,6 +198,12 @@ pub enum ToLoop {
     /// A RemoteDesktop session's clipboard request (mutter's
     /// MetaClipboardSession); the loop owns the seat's selection.
     RemoteClipboard(remote_clipboard::Request),
+    /// An InputCapture session's `Release` with `cursor_position`: warp
+    /// the pointer there (mutter's `clutter_seat_warp_pointer`).
+    InputCaptureWarp {
+        x: f64,
+        y: f64,
+    },
     StartCast {
         session_id: u64,
         stream_id: u64,
@@ -248,7 +259,7 @@ struct ServiceConnection {
     typed: bool,
 }
 
-fn connection_window_tag(options: &HashMap<String, OwnedValue>) -> fdo::Result<Option<String>> {
+fn connection_window_tag(options: &HashMap<String, OwnedVariant>) -> fdo::Result<Option<String>> {
     // Mutter ignores unknown options and window-tag values of the wrong type.
     let tag = options
         .get("window-tag")
@@ -268,7 +279,7 @@ impl ServiceChannel {
         typed: bool,
         window_tag: Option<String>,
         credentials: Option<Arc<fdo::ConnectionCredentials>>,
-    ) -> fdo::Result<zbus::zvariant::OwnedFd> {
+    ) -> fdo::Result<zbus::OwnedFd> {
         self.clients.retain(|_, connections| {
             connections.retain(|connection| connection.alive.load(Ordering::SeqCst));
             !connections.is_empty()
@@ -312,7 +323,7 @@ impl ServiceChannel {
         service_client_type: u32,
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
-    ) -> fdo::Result<zbus::zvariant::OwnedFd> {
+    ) -> fdo::Result<zbus::OwnedFd> {
         let role = crate::capture_security::ServiceClient::from_wire(service_client_type)?;
         let caller = self
             .authority
@@ -322,10 +333,10 @@ impl ServiceChannel {
     }
     async fn open_wayland_connection(
         &mut self,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
-    ) -> fdo::Result<zbus::zvariant::OwnedFd> {
+    ) -> fdo::Result<zbus::OwnedFd> {
         let caller = self.authority.admit_connection(conn, &header).await?;
         let tag = connection_window_tag(&options)?;
         self.open_connection(caller.owner, false, tag, Some(caller.credentials))
@@ -339,7 +350,7 @@ impl ServiceChannel {
 struct Monitor {
     names: (String, String, String, String),
     modes: Vec<Mode>,
-    properties: HashMap<String, OwnedValue>,
+    properties: HashMap<String, OwnedVariant>,
 }
 
 /// `(siiddada{sv})`: one of its modes.
@@ -351,7 +362,7 @@ struct Mode {
     refresh_rate: f64,
     preferred_scale: f64,
     supported_scales: Vec<f64>,
-    properties: HashMap<String, OwnedValue>,
+    properties: HashMap<String, OwnedVariant>,
 }
 
 /// `(iiduba(ssss)a{sv})`: one logical monitor.
@@ -363,7 +374,7 @@ struct LogicalMonitor {
     transform: u32,
     is_primary: bool,
     monitors: Vec<(String, String, String, String)>,
-    properties: HashMap<String, OwnedValue>,
+    properties: HashMap<String, OwnedVariant>,
 }
 
 /// `(iiduba(ssa{sv}))`: one requested logical monitor.
@@ -374,7 +385,7 @@ struct LogicalMonitorConfiguration {
     scale: f64,
     transform: u32,
     is_primary: bool,
-    monitors: Vec<(String, String, HashMap<String, OwnedValue>)>,
+    monitors: Vec<(String, String, HashMap<String, OwnedVariant>)>,
 }
 
 impl LogicalMonitorConfiguration {
@@ -442,10 +453,10 @@ fn current_state(
     u32,
     Vec<Monitor>,
     Vec<LogicalMonitor>,
-    HashMap<String, OwnedValue>,
+    HashMap<String, OwnedVariant>,
 ) {
     use crate::display_config::{should_be_advertised, supported_scales};
-    let flag = |name: &str| (name.to_owned(), OwnedValue::from(true));
+    let flag = |name: &str| (name.to_owned(), OwnedVariant::from(true));
     let monitors = state
         .monitors
         .iter()
@@ -482,18 +493,18 @@ fn current_state(
                 })
                 .collect();
             let mut properties = HashMap::from([
-                ("is-builtin".to_owned(), OwnedValue::from(monitor.builtin)),
+                ("is-builtin".to_owned(), OwnedVariant::from(monitor.builtin)),
                 (
                     "display-name".to_owned(),
-                    OwnedValue::try_from(Value::from(monitor.display_name.clone()))
+                    OwnedVariant::try_from(Variant::from(monitor.display_name.clone()))
                         .expect("string value"),
                 ),
-                ("is-for-lease".to_owned(), OwnedValue::from(false)),
+                ("is-for-lease".to_owned(), OwnedVariant::from(false)),
                 // SDR only: HDR colour modes are P-DS-03.
-                ("color-mode".to_owned(), OwnedValue::from(0u32)),
+                ("color-mode".to_owned(), OwnedVariant::from(0u32)),
                 (
                     "supported-color-modes".to_owned(),
-                    OwnedValue::try_from(Value::from(vec![0u32])).expect("array value"),
+                    OwnedVariant::try_from(Variant::from(vec![0u32])).expect("array value"),
                 ),
             ]);
             // Mutter's `(bb)`: enabled, hardware-locked; absent without
@@ -501,7 +512,7 @@ fn current_state(
             if let Some(privacy) = monitor.privacy_screen {
                 properties.insert(
                     "privacy-screen-state".to_owned(),
-                    OwnedValue::try_from(Value::from(zbus::zvariant::Structure::from((
+                    OwnedVariant::try_from(Variant::from(zbus::Structure::from((
                         privacy.enabled,
                         privacy.locked,
                     ))))
@@ -535,7 +546,7 @@ fn current_state(
     let properties = HashMap::from([(
         "layout-mode".to_owned(),
         // 1: logical layout (Mutter 51's native default and only mode here).
-        OwnedValue::from(1u32),
+        OwnedVariant::from(1u32),
     )]);
     (state.serial, monitors, logical, properties)
 }
@@ -659,14 +670,16 @@ impl NightLightColor {
 /// sends for one change (`Temperature` as `roundf`'s `u`).
 fn color_change_property(
     change: crate::night_light::ColorChange,
-) -> (&'static str, Value<'static>) {
+) -> (&'static str, Variant<'static>) {
     use crate::night_light::ColorChange;
     match change {
-        ColorChange::NightLightActive(value) => ("NightLightActive", Value::from(value)),
-        ColorChange::Temperature(kelvin) => ("Temperature", Value::from(kelvin)),
-        ColorChange::DisabledUntilTomorrow(value) => ("DisabledUntilTomorrow", Value::from(value)),
-        ColorChange::Sunrise(hours) => ("Sunrise", Value::from(hours)),
-        ColorChange::Sunset(hours) => ("Sunset", Value::from(hours)),
+        ColorChange::NightLightActive(value) => ("NightLightActive", Variant::from(value)),
+        ColorChange::Temperature(kelvin) => ("Temperature", Variant::from(kelvin)),
+        ColorChange::DisabledUntilTomorrow(value) => {
+            ("DisabledUntilTomorrow", Variant::from(value))
+        }
+        ColorChange::Sunrise(hours) => ("Sunrise", Variant::from(hours)),
+        ColorChange::Sunset(hours) => ("Sunset", Variant::from(hours)),
     }
 }
 
@@ -706,23 +719,27 @@ mod color_signal_tests {
     /// writes and `Temperature` property writes send nothing.
     #[test]
     fn share_changes_reach_the_wire_as_gsd_properties_changed() {
+        use futures_lite::StreamExt as _;
         let (server_end, client_end) = std::os::unix::net::UnixStream::pair().unwrap();
         let server = std::thread::spawn(move || {
-            zbus::blocking::connection::Builder::async_io_unix_stream(server_end)
-                .server(zbus::Guid::generate())
-                .unwrap()
-                .p2p()
-                .build()
-                .unwrap()
+            zbus::block_on(
+                zbus::connection::Builder::unix_stream(server_end)
+                    .server(zbus::Guid::generate())
+                    .p2p()
+                    .build(),
+            )
+            .unwrap()
         });
-        let client = zbus::blocking::connection::Builder::async_io_unix_stream(client_end)
-            .p2p()
-            .build()
-            .unwrap();
+        let client = zbus::block_on(
+            zbus::connection::Builder::unix_stream(client_end)
+                .p2p()
+                .build(),
+        )
+        .unwrap();
         let server = server.join().unwrap();
         let share = Arc::new(NightLightShare::default());
-        spawn_color_signals(server.inner().clone(), share.subscribe_changes());
-        let mut messages = zbus::blocking::MessageIterator::from(&client);
+        spawn_color_signals(server.clone(), share.subscribe_changes());
+        let mut messages = zbus::MessageStream::from(&client);
 
         share.set_disabled_until_tmw(Some(1));
         share.set_disabled_until_tmw(Some(2)); // still set: no signal
@@ -733,7 +750,7 @@ mod color_signal_tests {
 
         let mut seen = Vec::new();
         while seen.len() < 3 {
-            let message = messages.next().unwrap().unwrap();
+            let message = zbus::block_on(messages.next()).unwrap().unwrap();
             let header = message.header();
             assert_eq!(
                 header.interface().map(|i| i.as_str()),
@@ -749,7 +766,7 @@ mod color_signal_tests {
             );
             let (interface, changed, invalidated): (
                 String,
-                HashMap<String, OwnedValue>,
+                HashMap<String, OwnedVariant>,
                 Vec<String>,
             ) = message.body().deserialize().unwrap();
             assert_eq!(interface, "org.gnome.SettingsDaemon.Color");
@@ -772,19 +789,19 @@ mod color_signal_tests {
     fn every_change_maps_to_its_gsd_property_and_type() {
         assert_eq!(
             color_change_property(ColorChange::Temperature(2700)),
-            ("Temperature", Value::U32(2700))
+            ("Temperature", Variant::U32(2700))
         );
         assert_eq!(
             color_change_property(ColorChange::Sunrise(6.5)),
-            ("Sunrise", Value::F64(6.5))
+            ("Sunrise", Variant::F64(6.5))
         );
         assert_eq!(
             color_change_property(ColorChange::Sunset(19.25)),
-            ("Sunset", Value::F64(19.25))
+            ("Sunset", Variant::F64(19.25))
         );
         assert_eq!(
             color_change_property(ColorChange::NightLightActive(false)),
-            ("NightLightActive", Value::Bool(false))
+            ("NightLightActive", Variant::Bool(false))
         );
     }
 }
@@ -798,7 +815,7 @@ impl DisplayConfig {
         u32,
         Vec<Monitor>,
         Vec<LogicalMonitor>,
-        HashMap<String, OwnedValue>,
+        HashMap<String, OwnedVariant>,
     )> {
         Ok(current_state(&self.display.snapshot()))
     }
@@ -813,7 +830,7 @@ impl DisplayConfig {
         serial: u32,
         method: u32,
         logical_monitor_configs: Vec<LogicalMonitorConfiguration>,
-        properties: HashMap<String, OwnedValue>,
+        properties: HashMap<String, OwnedVariant>,
     ) -> fdo::Result<()> {
         let method = crate::display_config::Method::from_dbus(method).map_err(apply_error)?;
         let layout_mode = properties
@@ -908,6 +925,7 @@ struct ScreenCast {
     to_loop: calloop::channel::Sender<ToLoop>,
     signals: crate::dbus_signals::SignalQueue,
     next_id: Arc<AtomicU64>,
+    scan: Arc<ScanWake>,
 }
 
 /// A session's streams with their D-Bus interface handles.
@@ -1003,22 +1021,22 @@ fn session_owner(
 }
 
 #[derive(Debug, DeserializeDict, Type)]
-#[zvariant(signature = "dict")]
+#[zbus(signature = "dict")]
 struct RecordWindowProperties {
-    #[zvariant(rename = "window-id")]
+    #[zbus(rename = "window-id")]
     window_id: Option<u64>,
-    #[zvariant(rename = "cursor-mode")]
+    #[zbus(rename = "cursor-mode")]
     _cursor_mode: Option<u32>,
-    #[zvariant(rename = "is-recording")]
+    #[zbus(rename = "is-recording")]
     _is_recording: Option<bool>,
 }
 
 #[derive(Debug, DeserializeDict, Type)]
-#[zvariant(signature = "dict")]
+#[zbus(signature = "dict")]
 struct RecordMonitorProperties {
-    #[zvariant(rename = "cursor-mode")]
+    #[zbus(rename = "cursor-mode")]
     _cursor_mode: Option<u32>,
-    #[zvariant(rename = "is-recording")]
+    #[zbus(rename = "is-recording")]
     _is_recording: Option<bool>,
 }
 
@@ -1044,7 +1062,7 @@ impl ScreenCast {
     async fn create_session(
         &mut self,
         #[zbus(object_server)] server: &ObjectServer,
-        properties: HashMap<String, OwnedValue>,
+        properties: HashMap<String, OwnedVariant>,
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<OwnedObjectPath> {
@@ -1095,6 +1113,7 @@ impl ScreenCast {
             .lock()
             .map_err(|_| fdo::Error::Failed("session registry unavailable".into()))?
             .push((session, path.clone()));
+        self.scan.notify();
         Ok(path)
     }
 
@@ -1190,7 +1209,7 @@ impl Session {
     async fn stop(
         &self,
         #[zbus(object_server)] server: &ObjectServer,
-        #[zbus(signal_context)] ctxt: SignalEmitter<'_>,
+        #[zbus(signal_emitter)] ctxt: SignalEmitter<'_>,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<()> {
         self.check_owner(&header)?;
@@ -1346,7 +1365,7 @@ impl Stream {
     /// starts a stream recorded after its session became active.
     async fn start(
         &self,
-        #[zbus(signal_context)] ctxt: SignalEmitter<'_>,
+        #[zbus(signal_emitter)] ctxt: SignalEmitter<'_>,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<()> {
         session_owner(&self.owner, &self.stopped, &header)?;
@@ -1366,7 +1385,7 @@ impl Stream {
     async fn stop(
         &self,
         #[zbus(object_server)] server: &ObjectServer,
-        #[zbus(signal_context)] ctxt: SignalEmitter<'_>,
+        #[zbus(signal_emitter)] ctxt: SignalEmitter<'_>,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<()> {
         session_owner(&self.owner, &self.stopped, &header)?;
@@ -1397,7 +1416,7 @@ impl Stream {
     /// Mutter's `Parameters`: position and size, plus `mapping-id` on
     /// streams of a session linked to a RemoteDesktop grant.
     #[zbus(property)]
-    fn parameters(&self) -> HashMap<String, OwnedValue> {
+    fn parameters(&self) -> HashMap<String, OwnedVariant> {
         self.source.parameters()
     }
 }
@@ -1439,16 +1458,16 @@ impl Stream {
 }
 
 impl StreamSource {
-    fn parameters(&self) -> HashMap<String, OwnedValue> {
+    fn parameters(&self) -> HashMap<String, OwnedVariant> {
         let geometry = self.geometry();
         let mut parameters = HashMap::new();
         for (key, value) in [("position", geometry.position), ("size", geometry.size)] {
-            if let Ok(value) = OwnedValue::try_from(Value::from(value)) {
+            if let Ok(value) = OwnedVariant::try_from(Variant::from(value)) {
                 parameters.insert(key.to_owned(), value);
             }
         }
         if let StreamSource::Monitor(_, Some(mapping_id)) = self {
-            if let Ok(value) = OwnedValue::try_from(Value::from(mapping_id.as_str())) {
+            if let Ok(value) = OwnedVariant::try_from(Variant::from(mapping_id.as_str())) {
                 parameters.insert("mapping-id".to_owned(), value);
             }
         }
@@ -1516,28 +1535,79 @@ impl CastSignals {
 /// (fail closed) rather than stalling every other revocation (#657).
 const OWNER_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The revocation scan's period while any session, grant or capture
+/// exists.
+const SCAN_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Ends the revocation scan's wait (#503): a session, grant or capture
+/// was created (the scan then runs every [`SCAN_PERIOD`] until none is
+/// left), or the orientation sensor client has something to read. A
+/// notify before the wait is kept, so none is lost to the check before it.
+#[derive(Default)]
+pub(crate) struct ScanWake {
+    pending: Mutex<bool>,
+    ready: std::sync::Condvar,
+}
+
+impl ScanWake {
+    pub(crate) fn notify(&self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = true;
+            self.ready.notify_one();
+        }
+    }
+
+    /// Wait for a notify, or until `deadline` when there is one.
+    fn wait_until(&self, deadline: Option<std::time::Instant>) {
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
+        while !*pending {
+            pending = match deadline {
+                None => match self.ready.wait(pending) {
+                    Ok(pending) => pending,
+                    Err(_) => return,
+                },
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    if left.is_zero() {
+                        return;
+                    }
+                    match self.ready.wait_timeout(pending, left) {
+                        Ok((pending, _)) => pending,
+                        Err(_) => return,
+                    }
+                }
+            };
+        }
+        *pending = false;
+    }
+}
+
 /// Whether each of `owners` is still an admitted capture owner, asked
-/// concurrently on the connection's executor and bounded by `timeout`
-/// overall. An unanswered check counts as gone. The checks themselves
-/// are not cancelled: dropping a send mid-write would corrupt the link.
+/// concurrently on detached tasks of zbus's runtime and bounded by
+/// `timeout` overall. An unanswered check counts as gone. The checks
+/// themselves are not cancelled: dropping a send mid-write would corrupt
+/// the link.
 fn owners_alive(
     authority: &crate::capture_security::Authority,
     conn: &zbus::Connection,
     owners: &[String],
     timeout: std::time::Duration,
 ) -> Vec<bool> {
+    // No runtime to run the checks on: every owner counts as gone.
+    let Ok(runtime) = zruntime::SharedRuntime::current() else {
+        return vec![false; owners.len()];
+    };
     let pending: Vec<_> = owners
         .iter()
         .map(|owner| {
             let (reply, answer) = std::sync::mpsc::sync_channel(1);
             let (authority, task_conn, owner) = (authority.clone(), conn.clone(), owner.clone());
-            conn.executor()
-                .spawn(
-                    async move {
-                        let _ = reply.send(authority.owner_alive(&task_conn, &owner).await);
-                    },
-                    "tuna-capture-owner-check",
-                )
+            runtime
+                .spawn("tuna-capture-owner-check", async move {
+                    let _ = reply.send(authority.owner_alive(&task_conn, &owner).await);
+                })
                 .detach();
             answer
         })
@@ -1556,7 +1626,7 @@ fn owners_alive(
 /// Serve DisplayConfig and ScreenCast on the session bus from a thread.
 /// Returns the channel the event loop reads cast requests from.
 #[allow(clippy::too_many_arguments)] // one share per service the thread serves
-pub fn start(
+pub(crate) fn start(
     outputs: Outputs,
     windows: Windows,
     authority: crate::capture_security::Authority,
@@ -1566,6 +1636,7 @@ pub fn start(
     power_save: std::sync::Arc<crate::power_save::PowerSaveShare>,
     display_state: Arc<crate::display_config::DisplayShare>,
     color: Arc<crate::color_manager::ColorShare>,
+    input_capture: input_capture::CaptureSessions,
 ) -> calloop::channel::Channel<ToLoop> {
     let (to_loop, from_dbus) = calloop::channel::channel();
     let _ = std::thread::Builder::new()
@@ -1577,9 +1648,19 @@ pub fn start(
                 orientation: orientation.clone(),
                 power_save: power_save.clone(),
             };
-            // Accelerometer for sensor-driven orientation (#345): polled
-            // with the admission scan, reported to the loop on change.
-            let mut sensor = crate::orientation::SensorPoller::new();
+            // Wakes the revocation scan below; see `ScanWake`.
+            let scan = Arc::new(ScanWake::default());
+            // Accelerometer for sensor-driven orientation (#345): read by
+            // the scan after a sensor signal or a change of the flags that
+            // inhibit tracking, reported to the loop on change.
+            let mut sensor = {
+                let scan = scan.clone();
+                crate::orientation::SensorPoller::new(move || scan.notify())
+            };
+            for hook in [&orientation.changed, &power_save.changed] {
+                let scan = scan.clone();
+                hook.set(move || scan.notify());
+            }
             let sessions: Sessions = Default::default();
             let remote: remote_desktop::RemoteSessions = Default::default();
             let next_id = Arc::new(AtomicU64::new(1));
@@ -1595,6 +1676,7 @@ pub fn start(
                 to_loop: to_loop.clone(),
                 signals: signals.clone(),
                 next_id: next_id.clone(),
+                scan: scan.clone(),
             };
             let remote_desktop = remote_desktop::RemoteDesktop {
                 authority: authority.clone(),
@@ -1603,6 +1685,16 @@ pub fn start(
                 outputs: outputs.clone(),
                 to_loop: to_loop.clone(),
                 next_id,
+                scan: scan.clone(),
+            };
+            let input_capture_service = input_capture::InputCapture {
+                authority: authority.clone(),
+                sessions: input_capture.clone(),
+                outputs: outputs.clone(),
+                to_loop: to_loop.clone(),
+                signals: signals.clone(),
+                next_id: Arc::new(AtomicU64::new(1)),
+                scan: scan.clone(),
             };
             let service_channel = ServiceChannel {
                 display,
@@ -1612,32 +1704,34 @@ pub fn start(
             let night_light_color = NightLightColor {
                 share: night_light.clone(),
             };
-            let conn = match zbus::blocking::connection::Builder::session()
-                .and_then(|b| b.serve_at("/org/gnome/Mutter/ScreenCast", screencast))
-                .and_then(|b| b.serve_at("/org/gnome/Mutter/DisplayConfig", display_config))
-                .and_then(|b| b.serve_at("/org/gnome/Mutter/RemoteDesktop", remote_desktop))
-                .and_then(|b| b.serve_at("/org/gnome/Mutter/ServiceChannel", service_channel))
-                .and_then(|b| b.serve_at("/org/gnome/SettingsDaemon/Color", night_light_color))
-                .and_then(|b| {
-                    b.serve_at(
+            let conn = match zbus::block_on(
+                zbus::connection::Builder::session()
+                    .serve_at("/org/gnome/Mutter/ScreenCast", screencast)
+                    .serve_at("/org/gnome/Mutter/DisplayConfig", display_config)
+                    .serve_at("/org/gnome/Mutter/RemoteDesktop", remote_desktop)
+                    .serve_at("/org/gnome/Mutter/InputCapture", input_capture_service)
+                    .serve_at("/org/gnome/Mutter/ServiceChannel", service_channel)
+                    .serve_at("/org/gnome/SettingsDaemon/Color", night_light_color)
+                    .serve_at(
                         "/org/gnome/Mutter/ColorManager",
                         crate::color_manager::MutterColorManager {
                             share: color.clone(),
                         },
                     )
-                })
-                .and_then(|b| b.build())
-            {
+                    .build(),
+            ) {
                 Ok(conn) => conn,
                 Err(e) => {
                     eprintln!("tuna-compositor: mutter D-Bus: no session bus: {e}");
                     return;
                 }
             };
-            let flags = zbus::fdo::RequestNameFlags::DoNotQueue.into();
+            let flags = zbus::fdo::RequestNameFlags::DO_NOT_QUEUE;
+            let request_name =
+                |name: &str| zbus::block_on(conn.request_name_with_flags(name, flags));
             // GNOME Settings' calibration (P-DS-03): independent of the
             // portal names below.
-            match conn.request_name_with_flags("org.gnome.Mutter.ColorManager", flags) {
+            match request_name("org.gnome.Mutter.ColorManager") {
                 Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => {
                     eprintln!("tuna-compositor: serving org.gnome.Mutter.ColorManager");
                 }
@@ -1649,9 +1743,10 @@ pub fn start(
                 "org.gnome.Mutter.DisplayConfig",
                 "org.gnome.Mutter.ScreenCast",
                 "org.gnome.Mutter.RemoteDesktop",
+                "org.gnome.Mutter.InputCapture",
                 "org.gnome.Mutter.ServiceChannel",
             ] {
-                match conn.request_name_with_flags(name, flags) {
+                match request_name(name) {
                     Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => {
                         eprintln!("tuna-compositor: serving {name}");
                     }
@@ -1663,34 +1758,44 @@ pub fn start(
             }
             // Every published configuration change, as Mutter emits
             // MonitorsChanged from its monitor manager.
-            spawn_monitors_changed(conn.inner().clone(), display_state.subscribe_changes());
+            spawn_monitors_changed(conn.clone(), display_state.subscribe_changes());
             // Night Light properties (#339): independent of the
             // portal names above. When a real settings daemon owns
             // this name its temp-disable wins and ours stays
             // local-only; the tint still follows the settings keys.
-            let color_owned =
-                match conn.request_name_with_flags("org.gnome.SettingsDaemon.Color", flags) {
-                    Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => {
-                        eprintln!("tuna-compositor: serving org.gnome.SettingsDaemon.Color");
-                        true
-                    }
-                    _ => {
-                        eprintln!(
-                            "tuna-compositor: org.gnome.SettingsDaemon.Color is taken; \
+            let color_owned = match request_name("org.gnome.SettingsDaemon.Color") {
+                Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => {
+                    eprintln!("tuna-compositor: serving org.gnome.SettingsDaemon.Color");
+                    true
+                }
+                _ => {
+                    eprintln!(
+                        "tuna-compositor: org.gnome.SettingsDaemon.Color is taken; \
                          night light D-Bus properties off"
-                        );
-                        false
-                    }
-                };
+                    );
+                    false
+                }
+            };
             if color_owned {
-                spawn_color_signals(conn.inner().clone(), night_light.subscribe_changes());
+                spawn_color_signals(conn.clone(), night_light.subscribe_changes());
             }
             // Revoke on lock, unique-name disconnect or loss of the trusted
-            // service identity. 100ms admission scan plus one compositor tick
-            // bounds stream teardown; frames additionally fail closed on lock.
-            // A bus that stops answering revokes within OWNER_CHECK_TIMEOUT.
+            // service identity. While any session, grant or capture exists,
+            // a 100ms admission scan plus one compositor tick bounds stream
+            // teardown; frames additionally fail closed on lock. A bus that
+            // stops answering revokes within OWNER_CHECK_TIMEOUT. With none
+            // the scan has nothing to revoke and waits for one to be
+            // created, or for the sensor client (#503).
             loop {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                let watching = remote.lock().is_ok_and(|s| !s.is_empty())
+                    || sessions.lock().is_ok_and(|s| !s.is_empty())
+                    || input_capture.lock().is_ok_and(|s| !s.is_empty());
+                let deadline = if watching {
+                    Some(std::time::Instant::now() + SCAN_PERIOD)
+                } else {
+                    sensor.next_due()
+                };
+                scan.wait_until(deadline);
                 let remote_snapshot: Vec<_> = remote
                     .lock()
                     .map(|s| s.clone())
@@ -1701,7 +1806,7 @@ pub fn start(
                     .iter()
                     .map(|(_, grant)| grant.owner.clone())
                     .collect();
-                let alive = owners_alive(&authority, conn.inner(), &owners, OWNER_CHECK_TIMEOUT);
+                let alive = owners_alive(&authority, &conn, &owners, OWNER_CHECK_TIMEOUT);
                 for ((remote_id, grant), alive) in remote_snapshot.into_iter().zip(alive) {
                     if alive && !grant.stopped.load(Ordering::SeqCst) {
                         continue;
@@ -1711,14 +1816,15 @@ pub fn start(
                         session_id: grant.id,
                     });
                     let path = format!("/org/gnome/Mutter/RemoteDesktop/Session/u{}", grant.id);
-                    if let Ok(signal) = SignalEmitter::new(conn.inner(), path.clone()) {
+                    if let Ok(signal) = SignalEmitter::new(&conn, path.clone()) {
                         signals.emit(async move {
                             remote_desktop::RemoteSession::closed(&signal).await
                         });
                     }
-                    let _ = conn
-                        .object_server()
-                        .remove::<remote_desktop::RemoteSession, _>(path.as_str());
+                    let _ = zbus::block_on(
+                        conn.object_server()
+                            .remove::<remote_desktop::RemoteSession, _>(path.as_str()),
+                    );
                     if let Ok(mut remote) = remote.lock() {
                         remote.remove(&remote_id);
                     }
@@ -1728,7 +1834,7 @@ pub fn start(
                     .iter()
                     .map(|(session, _)| session.owner.clone())
                     .collect();
-                let alive = owners_alive(&authority, conn.inner(), &owners, OWNER_CHECK_TIMEOUT);
+                let alive = owners_alive(&authority, &conn, &owners, OWNER_CHECK_TIMEOUT);
                 for ((session, path), alive) in snapshot.into_iter().zip(alive) {
                     if alive && !session.stopped.load(Ordering::SeqCst) {
                         continue;
@@ -1738,7 +1844,7 @@ pub fn start(
                         session_id: session.id,
                     });
                     if !session.closed.swap(true, Ordering::SeqCst) {
-                        if let Ok(signal) = SignalEmitter::new(conn.inner(), path.clone()) {
+                        if let Ok(signal) = SignalEmitter::new(&conn, path.clone()) {
                             signals.emit(async move { Session::closed(&signal).await });
                         }
                     }
@@ -1748,13 +1854,48 @@ pub fn start(
                         .map(|mut s| std::mem::take(&mut *s))
                         .unwrap_or_default();
                     for (_, iface) in streams {
-                        let _ = conn
-                            .object_server()
-                            .remove::<Stream, _>(iface.signal_emitter().path());
+                        let _ = zbus::block_on(
+                            conn.object_server()
+                                .remove::<Stream, _>(iface.signal_emitter().path()),
+                        );
                     }
-                    let _ = conn.object_server().remove::<Session, _>(&path);
+                    let _ = zbus::block_on(conn.object_server().remove::<Session, _>(&path));
                     if let Ok(mut sessions) = sessions.lock() {
                         sessions.retain(|(s, _)| s.id != session.id);
+                    }
+                }
+                // InputCapture sessions: revoked as the grants above (a
+                // session the loop closed on lock goes the same way),
+                // and told when the monitor layout changes (mutter's
+                // on_monitors_changed).
+                let captures: Vec<_> = input_capture
+                    .lock()
+                    .map(|s| s.values().cloned().collect())
+                    .unwrap_or_default();
+                let owners: Vec<String> = captures.iter().map(|s| s.owner.clone()).collect();
+                let alive = owners_alive(&authority, &conn, &owners, OWNER_CHECK_TIMEOUT);
+                let zones = if captures.is_empty() {
+                    input_capture::Zones::default()
+                } else {
+                    outputs
+                        .lock()
+                        .map(|o| input_capture::Zones::from_outputs(&o))
+                        .unwrap_or_default()
+                };
+                for (session, alive) in captures.into_iter().zip(alive) {
+                    if alive && !session.is_closed() {
+                        session.sync_zones(zones.clone());
+                        continue;
+                    }
+                    session.close();
+                    let _ = zbus::block_on(
+                        conn.object_server()
+                            .remove::<input_capture::CaptureSession, _>(
+                                input_capture::session_path(session.id).as_str(),
+                            ),
+                    );
+                    if let Ok(mut sessions) = input_capture.lock() {
+                        sessions.remove(&session.id);
                     }
                 }
                 // Mutter inhibits orientation tracking while the display
@@ -1775,31 +1916,67 @@ pub fn start(
 mod tests {
     use super::*;
 
-    /// The bus daemon's half of the owner check, answering every PID
-    /// query with one process.
-    struct AnsweringBus(u32);
+    /// #503: with nothing to revoke the scan sleeps until a session is
+    /// created or the sensor client calls (it used to wake every 100 ms):
+    /// a wait without a deadline ends only on a notify, a notify that came
+    /// before the wait is kept, and a deadline ends a wait on its own.
+    #[test]
+    fn the_scan_waits_for_a_notify_or_its_deadline() {
+        use std::time::{Duration, Instant};
+        let scan = Arc::new(ScanWake::default());
+        scan.notify();
+        let started = Instant::now();
+        scan.wait_until(None);
+        assert!(started.elapsed() < Duration::from_secs(1), "a kept notify");
+
+        let started = Instant::now();
+        scan.wait_until(Some(started + Duration::from_millis(200)));
+        assert!(
+            started.elapsed() >= Duration::from_millis(200),
+            "the deadline"
+        );
+
+        let remote = scan.clone();
+        let creator = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            remote.notify();
+        });
+        let started = Instant::now();
+        scan.wait_until(None);
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(250) && waited < Duration::from_secs(5),
+            "woken by the notify alone: {waited:?}"
+        );
+        creator.join().unwrap();
+    }
+
+    /// The bus daemon's half of the owner check: these unique names are
+    /// still connected.
+    struct AnsweringBus(Vec<&'static str>);
 
     #[zbus::interface(name = "org.freedesktop.DBus")]
     impl AnsweringBus {
-        #[zbus(name = "GetConnectionUnixProcessID")]
-        fn get_connection_unix_process_id(&self, _name: String) -> u32 {
-            self.0
+        #[zbus(name = "NameHasOwner")]
+        fn name_has_owner(&self, name: String) -> bool {
+            self.0.contains(&name.as_str())
         }
     }
 
     /// #657: a bus that stops answering revokes every capture owner
     /// within one bound, checked concurrently rather than one blocked
-    /// call after another; an answering bus still vouches for the shell.
+    /// call after another; an answering bus still vouches for the shell,
+    /// which is tracked by the unique names it declared, not by a PID.
     #[test]
     fn owner_checks_are_bounded_and_fail_closed_on_a_wedged_bus() {
         let authority = crate::capture_security::Authority::default();
-        authority.publish(false, Some(4242));
+        authority.publish(false, [":1.7", ":1.8", ":1.9"]);
         let owners: Vec<String> = [":1.7", ":1.8", ":1.9"].map(String::from).to_vec();
         let timeout = std::time::Duration::from_millis(400);
 
         let (wedged, _peer) = crate::dbus_signals::wedged_link();
         let started = std::time::Instant::now();
-        let alive = owners_alive(&authority, wedged.inner(), &owners, timeout);
+        let alive = owners_alive(&authority, &wedged, &owners, timeout);
         let elapsed = started.elapsed();
         assert_eq!(
             alive,
@@ -1817,35 +1994,49 @@ mod tests {
 
         let (server_end, client_end) = std::os::unix::net::UnixStream::pair().unwrap();
         let bus = std::thread::spawn(move || {
-            zbus::blocking::connection::Builder::async_io_unix_stream(server_end)
-                .server(zbus::Guid::generate())
-                .unwrap()
-                .p2p()
-                .serve_at("/org/freedesktop/DBus", AnsweringBus(4242))
-                .unwrap()
-                .build()
-                .unwrap()
+            zbus::block_on(
+                zbus::connection::Builder::unix_stream(server_end)
+                    .server(zbus::Guid::generate())
+                    .p2p()
+                    .serve_at("/org/freedesktop/DBus", AnsweringBus(vec![":1.7", ":1.8"]))
+                    .build(),
+            )
+            .unwrap()
         });
-        let caller = zbus::blocking::connection::Builder::async_io_unix_stream(client_end)
-            .p2p()
-            .build()
-            .unwrap();
+        let caller = zbus::block_on(
+            zbus::connection::Builder::unix_stream(client_end)
+                .p2p()
+                .build(),
+        )
+        .unwrap();
         let _bus = bus.join().unwrap();
         let alive = owners_alive(
             &authority,
-            caller.inner(),
+            &caller,
             &owners,
             std::time::Duration::from_secs(10),
         );
         assert_eq!(
             alive,
-            [true, true, true],
-            "the shell's own sessions survive"
+            [true, true, false],
+            "the shell's own sessions survive while their names are connected"
         );
-        authority.publish(true, Some(4242));
+        authority.publish(false, [":1.7"]);
         let alive = owners_alive(
             &authority,
-            caller.inner(),
+            &caller,
+            &owners,
+            std::time::Duration::from_secs(10),
+        );
+        assert_eq!(
+            alive,
+            [true, false, false],
+            "a name the shell no longer declares is revoked"
+        );
+        authority.publish(true, [":1.7"]);
+        let alive = owners_alive(
+            &authority,
+            &caller,
             &owners,
             std::time::Duration::from_secs(10),
         );
@@ -1931,8 +2122,8 @@ mod tests {
                 connector.into(),
                 "1920x1080@60.000".into(),
                 HashMap::from([
-                    ("color-mode".to_owned(), OwnedValue::from(0u32)),
-                    ("underscanning".to_owned(), OwnedValue::from(false)),
+                    ("color-mode".to_owned(), OwnedVariant::from(0u32)),
+                    ("underscanning".to_owned(), OwnedVariant::from(false)),
                 ]),
             )],
         }
@@ -2117,7 +2308,7 @@ mod tests {
         let mut typed = logical("eDP-1", 1.0);
         typed.monitors[0].2.insert(
             "color-mode".into(),
-            OwnedValue::try_from(Value::from("bt2100")).unwrap(),
+            OwnedVariant::try_from(Variant::from("bt2100")).unwrap(),
         );
         assert_eq!(
             check(&state, &[typed]),
@@ -2126,7 +2317,7 @@ mod tests {
         let mut underscan = logical("eDP-1", 1.0);
         underscan.monitors[0]
             .2
-            .insert("underscanning".into(), OwnedValue::from(true));
+            .insert("underscanning".into(), OwnedVariant::from(true));
         assert_eq!(
             check(&state, &[underscan]),
             Err(fdo::Error::InvalidArgs(
@@ -2249,10 +2440,10 @@ mod tests {
         let read = |m: &Monitor| {
             let value = &m.properties["privacy-screen-state"];
             assert_eq!(value.value_signature().to_string(), "(bb)");
-            let Value::Structure(fields) = &**value else {
+            let Variant::Structure(fields) = &**value else {
                 panic!("privacy-screen-state is not a structure");
             };
-            let [Value::Bool(enabled), Value::Bool(locked)] = fields.fields() else {
+            let [Variant::Bool(enabled), Variant::Bool(locked)] = fields.fields() else {
                 panic!("privacy-screen-state is not (bb)");
             };
             (*enabled, *locked)
@@ -2378,11 +2569,8 @@ mod tests {
         BufReader::new(daemon.0.stdout.take().unwrap())
             .read_line(&mut address)
             .unwrap();
-        let connect = |builder: zbus::blocking::connection::Builder<'static>| {
-            builder
-                .method_timeout(Duration::from_secs(5))
-                .build()
-                .unwrap()
+        let connect = |builder: zbus::connection::Builder<'static>| {
+            zbus::block_on(builder.method_timeout(Duration::from_secs(5)).build()).unwrap()
         };
 
         // The loop side: apply each write and publish what was applied.
@@ -2426,60 +2614,62 @@ mod tests {
             power_save: share.clone(),
         };
         let _server = connect(
-            zbus::blocking::connection::Builder::address(address.trim())
-                .unwrap()
+            zbus::connection::Builder::address(address.trim())
                 .serve_at("/org/gnome/Mutter/DisplayConfig", display_config)
-                .unwrap()
-                .name("org.gnome.Mutter.DisplayConfig")
-                .unwrap(),
+                .name("org.gnome.Mutter.DisplayConfig"),
         );
-        let client = connect(zbus::blocking::connection::Builder::address(address.trim()).unwrap());
-        let properties = zbus::blocking::fdo::PropertiesProxy::builder(&client)
-            .destination("org.gnome.Mutter.DisplayConfig")
-            .unwrap()
-            .path("/org/gnome/Mutter/DisplayConfig")
-            .unwrap()
-            .build()
-            .unwrap();
+        let client = connect(zbus::connection::Builder::address(address.trim()));
+        let properties = zbus::block_on(
+            zbus::fdo::PropertiesProxy::builder(&client)
+                .destination("org.gnome.Mutter.DisplayConfig")
+                .path("/org/gnome/Mutter/DisplayConfig")
+                .build(),
+        )
+        .unwrap();
         let interface =
             zbus::names::InterfaceName::from_static_str("org.gnome.Mutter.DisplayConfig").unwrap();
 
         // Mutter's introspection: a read-write int32.
-        let xml: String = client
-            .call_method(
-                Some("org.gnome.Mutter.DisplayConfig"),
-                "/org/gnome/Mutter/DisplayConfig",
-                Some("org.freedesktop.DBus.Introspectable"),
-                "Introspect",
-                &(),
-            )
-            .unwrap()
-            .body()
-            .deserialize()
-            .unwrap();
+        let xml: String = zbus::block_on(client.call_method(
+            Some("org.gnome.Mutter.DisplayConfig"),
+            "/org/gnome/Mutter/DisplayConfig",
+            Some("org.freedesktop.DBus.Introspectable"),
+            "Introspect",
+            &(),
+        ))
+        .unwrap()
+        .body()
+        .deserialize()
+        .unwrap();
         assert!(
             xml.contains(r#"<property name="PowerSaveMode" type="i" access="readwrite"/>"#),
             "{xml}"
         );
 
         let (changed_tx, changed) = std::sync::mpsc::channel();
-        let signals = properties.receive_properties_changed().unwrap();
+        let mut signals = zbus::block_on(properties.receive_properties_changed()).unwrap();
         std::thread::spawn(move || {
-            for signal in signals {
-                let args = signal.args().unwrap();
-                if let Some(value) = args.changed_properties().get("PowerSaveMode") {
-                    let mode = i32::try_from(value).unwrap();
-                    if changed_tx.send(mode).is_err() {
-                        return;
+            use futures_lite::StreamExt as _;
+            zbus::block_on(async {
+                while let Some(signal) = signals.next().await {
+                    let args = signal.args().unwrap();
+                    if let Some(value) = args.changed_properties().get("PowerSaveMode") {
+                        let mode = i32::try_from(value).unwrap();
+                        if changed_tx.send(mode).is_err() {
+                            return;
+                        }
                     }
                 }
-            }
+            })
         });
-        let get =
-            || i32::try_from(properties.get(interface.clone(), "PowerSaveMode").unwrap()).unwrap();
+        let get = || {
+            i32::try_from(
+                zbus::block_on(properties.get(interface.clone(), "PowerSaveMode")).unwrap(),
+            )
+            .unwrap()
+        };
         let set = |mode: i32| {
-            properties
-                .set(interface.clone(), "PowerSaveMode", mode.into())
+            zbus::block_on(properties.set(interface.clone(), "PowerSaveMode", &Variant::from(mode)))
                 .unwrap()
         };
         let signal = || changed.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -2538,11 +2728,8 @@ mod tests {
         BufReader::new(daemon.0.stdout.take().unwrap())
             .read_line(&mut address)
             .unwrap();
-        let connect = |builder: zbus::blocking::connection::Builder<'static>| {
-            builder
-                .method_timeout(Duration::from_secs(5))
-                .build()
-                .unwrap()
+        let connect = |builder: zbus::connection::Builder<'static>| {
+            zbus::block_on(builder.method_timeout(Duration::from_secs(5)).build()).unwrap()
         };
         const DEST: &str = "org.gnome.Mutter.DisplayConfig";
         const PATH: &str = "/org/gnome/Mutter/DisplayConfig";
@@ -2593,28 +2780,24 @@ mod tests {
             power_save: Default::default(),
         };
         let server = connect(
-            zbus::blocking::connection::Builder::address(address.trim())
-                .unwrap()
+            zbus::connection::Builder::address(address.trim())
                 .serve_at(PATH, display_config)
-                .unwrap()
-                .name(DEST)
-                .unwrap(),
+                .name(DEST),
         );
-        spawn_monitors_changed(server.inner().clone(), share.subscribe_changes());
-        let client = connect(zbus::blocking::connection::Builder::address(address.trim()).unwrap());
+        spawn_monitors_changed(server.clone(), share.subscribe_changes());
+        let client = connect(zbus::connection::Builder::address(address.trim()));
 
-        let xml: String = client
-            .call_method(
-                Some(DEST),
-                PATH,
-                Some("org.freedesktop.DBus.Introspectable"),
-                "Introspect",
-                &(),
-            )
-            .unwrap()
-            .body()
-            .deserialize()
-            .unwrap();
+        let xml: String = zbus::block_on(client.call_method(
+            Some(DEST),
+            PATH,
+            Some("org.freedesktop.DBus.Introspectable"),
+            "Introspect",
+            &(),
+        ))
+        .unwrap()
+        .body()
+        .deserialize()
+        .unwrap();
         for signature in [
             "a((ssss)a(siiddada{sv})a{sv})",
             "a(iiduba(ssss)a{sv})",
@@ -2631,12 +2814,12 @@ mod tests {
             f64,
             f64,
             Vec<f64>,
-            HashMap<String, OwnedValue>,
+            HashMap<String, OwnedVariant>,
         );
         type MonitorOut = (
             (String, String, String, String),
             Vec<ModeOut>,
-            HashMap<String, OwnedValue>,
+            HashMap<String, OwnedVariant>,
         );
         type LogicalOut = (
             i32,
@@ -2645,17 +2828,16 @@ mod tests {
             u32,
             bool,
             Vec<(String, String, String, String)>,
-            HashMap<String, OwnedValue>,
+            HashMap<String, OwnedVariant>,
         );
         type StateOut = (
             u32,
             Vec<MonitorOut>,
             Vec<LogicalOut>,
-            HashMap<String, OwnedValue>,
+            HashMap<String, OwnedVariant>,
         );
         let get_state = || -> StateOut {
-            client
-                .call_method(Some(DEST), PATH, Some(DEST), "GetCurrentState", &())
+            zbus::block_on(client.call_method(Some(DEST), PATH, Some(DEST), "GetCurrentState", &()))
                 .unwrap()
                 .body()
                 .deserialize()
@@ -2675,25 +2857,31 @@ mod tests {
         assert_eq!(state.2.len(), 2);
         assert_eq!(current(&state), ["1920x1080@60.000"]);
 
-        let signals = zbus::blocking::Proxy::new(&client, DEST, PATH, DEST)
-            .unwrap()
-            .receive_signal("MonitorsChanged")
-            .unwrap();
+        let mut signals = zbus::block_on(async {
+            zbus::Proxy::new(&client, DEST, PATH, DEST)
+                .await?
+                .receive_signal("MonitorsChanged")
+                .await
+        })
+        .unwrap();
         let (changed_tx, changed) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            for _ in signals {
-                if changed_tx.send(()).is_err() {
-                    return;
+            use futures_lite::StreamExt as _;
+            zbus::block_on(async {
+                while signals.next().await.is_some() {
+                    if changed_tx.send(()).is_err() {
+                        return;
+                    }
                 }
-            }
+            })
         });
         let apply = |serial: u32, method: u32, mode_id: &str| {
             let monitors = vec![(
                 "eDP-1".to_owned(),
                 mode_id.to_owned(),
-                HashMap::<String, OwnedValue>::new(),
+                HashMap::<String, OwnedVariant>::new(),
             )];
-            client.call_method(
+            zbus::block_on(client.call_method(
                 Some(DEST),
                 PATH,
                 Some(DEST),
@@ -2702,12 +2890,14 @@ mod tests {
                     serial,
                     method,
                     vec![(0i32, 0i32, 1.0f64, 0u32, true, monitors)],
-                    HashMap::<String, OwnedValue>::new(),
+                    HashMap::<String, OwnedVariant>::new(),
                 ),
-            )
+            ))
         };
+        // zbus 6 reports fdo-named error replies as `Error::FDO`.
         let error_name = |result: zbus::Result<zbus::message::Message>| match result {
             Err(zbus::Error::MethodError(name, _, _)) => name.to_string(),
+            Err(zbus::Error::FDO(error)) => zbus::DBusError::name(&*error).to_string(),
             other => panic!("expected a D-Bus error, got {other:?}"),
         };
         assert_eq!(
@@ -2783,23 +2973,26 @@ mod tests {
     fn monitor_casts_stop_when_their_monitor_is_unplugged() {
         let (server_end, client_end) = std::os::unix::net::UnixStream::pair().unwrap();
         let server = std::thread::spawn(move || {
-            zbus::blocking::connection::Builder::async_io_unix_stream(server_end)
-                .server(zbus::Guid::generate())
-                .unwrap()
-                .p2p()
-                .build()
-                .unwrap()
+            zbus::block_on(
+                zbus::connection::Builder::unix_stream(server_end)
+                    .server(zbus::Guid::generate())
+                    .p2p()
+                    .build(),
+            )
+            .unwrap()
         });
-        let client = zbus::blocking::connection::Builder::async_io_unix_stream(client_end)
-            .p2p()
-            .build()
-            .unwrap();
+        let client = zbus::block_on(
+            zbus::connection::Builder::unix_stream(client_end)
+                .p2p()
+                .build(),
+        )
+        .unwrap();
         let server = server.join().unwrap();
-        let mut messages = zbus::blocking::MessageIterator::from(&client);
+        let mut messages = zbus::MessageStream::from(&client);
         let queue = crate::dbus_signals::SignalQueue::new("cast-test-signals");
         let signals = |stream: u64| CastSignals {
             stream: SignalEmitter::new(
-                server.inner(),
+                &server,
                 format!("/org/gnome/Mutter/ScreenCast/Stream/u{stream}"),
             )
             .unwrap(),
@@ -2882,7 +3075,10 @@ mod tests {
 
         let mut seen: Vec<(String, String)> = Vec::new();
         while seen.last().map(|(member, _)| member.as_str()) != Some("PipeWireStreamAdded") {
-            let message = messages.next().unwrap().unwrap();
+            let message = {
+                use futures_lite::StreamExt as _;
+                zbus::block_on(messages.next()).unwrap().unwrap()
+            };
             let header = message.header();
             seen.push((
                 header.member().unwrap().to_string(),

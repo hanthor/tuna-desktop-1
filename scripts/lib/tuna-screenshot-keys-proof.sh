@@ -48,7 +48,7 @@ while IFS='|' read -r shot_keys shot_dims shot_position shot_label shot_pointer;
     # far below a pixel; the visible host cursor is checked separately.
     cstate "((.pointer_position[0] - ${shot_pointer%,*}) | fabs) < 0.000001 and ((.pointer_position[1] - ${shot_pointer#*,}) | fabs) < 0.000001" "screenshot keyboard pointer feedback" ||
         fail G-SCREENSHOT-KEYS "$shot_label cursor did not follow the selected edge or area centre"
-    cp "$CSTATE" "$ARTIFACTS/shot-keys-$shot_label-compositor.json"
+    snapshot_state "$CSTATE" "$ARTIFACTS/shot-keys-$shot_label-compositor.json"
     # Observe the visible nested host cursor too. Seat state alone can
     # change without moving Winit's actual pointer on the screen.
     "$PY" - "$WID" "$shot_pointer" "$WIDTH" "$HEIGHT" "$ARTIFACTS/shot-keys-$shot_label-host-cursor.json" <<'HOST_CURSOR' ||
@@ -123,7 +123,50 @@ done
 sleep 0.3 # Let the compositor publish the processed keyboard sequence.
 cstate ".pointer_position == $pointer_before and .active_workspace == $workspace_before and (.overview_open | not)" "screen-mode navigation negative control" ||
     fail G-SCREENSHOT-KEYS "modified Screen-mode keys moved the pointer or leaked desktop shortcuts"
-cp "$CSTATE" "$ARTIFACTS/shot-screen-negative-control.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/shot-screen-negative-control.json"
 pass G-SCREENSHOT-KEYS-SCREEN "modified Screen navigation leaves pointer and workspace unchanged; Escape dismisses"
+
+# GNOME's binding pool matches modifiers exactly: Ctrl+C captures (C
+# alone picks Screen), while Shift+C, Ctrl+S and arrows with Ctrl+Shift
+# have no binding and change nothing.
+sleep 1.1 # GNOME filenames have one-second resolution.
+marker="$ARTIFACTS/shot-keys-bindings.marker"
+touch "$marker"
+xdotool key Print
+cstate 'any(.layers[]; .namespace == "tuna-screenshot-ui")' "binding overlay mapped" ||
+    fail G-SCREENSHOT-KEYS-BINDINGS "Print did not map the overlay"
+end=$(($(date +%s) + 20))
+until "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-shot-bindings.json" 5 >/dev/null 2>&1 &&
+    showing "$ARTIFACTS/a11y-shot-bindings.json" "Capture" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+xdotool key --clearmodifiers s r
+sleep 0.5
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-shot-bindings-before.json" 5 >/dev/null 2>&1 ||
+    fail G-SCREENSHOT-KEYS-BINDINGS "accessibility dump failed"
+area_before="$(jq -r '[.[] | select(.name | startswith("Selected area"))][0].name' "$ARTIFACTS/a11y-shot-bindings-before.json")"
+[ "$area_before" != null ] || fail G-SCREENSHOT-KEYS-BINDINGS "the selection is not exposed"
+xdotool key --clearmodifiers shift+c ctrl+s ctrl+shift+Left alt+ctrl+shift+Right
+sleep 1
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-shot-bindings-after.json" 5 >/dev/null 2>&1 ||
+    fail G-SCREENSHOT-KEYS-BINDINGS "accessibility dump failed"
+jq -e 'any(.[]; .name == "Selection" and .checked)' "$ARTIFACTS/a11y-shot-bindings-after.json" >/dev/null ||
+    fail G-SCREENSHOT-KEYS-BINDINGS "Shift+C or Ctrl+S changed the mode"
+area_after="$(jq -r '[.[] | select(.name | startswith("Selected area"))][0].name' "$ARTIFACTS/a11y-shot-bindings-after.json")"
+[ "$area_after" = "$area_before" ] ||
+    fail G-SCREENSHOT-KEYS-BINDINGS "unbound modifier arrows changed the area ($area_before -> $area_after)"
+xdotool key --clearmodifiers ctrl+c
+end=$(($(date +%s) + 15))
+newest=""
+while [ "$(date +%s)" -le "$end" ]; do
+    newest="$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' -newer "$marker" 2>/dev/null | head -1)"
+    [ -n "$newest" ] && break
+    sleep 0.3
+done
+[ -n "$newest" ] || fail G-SCREENSHOT-KEYS-BINDINGS "Ctrl+C captured nothing"
+dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$newest")"
+[ "$dims" = "$((WIDTH / 4)),$((HEIGHT / 4))" ] || fail G-SCREENSHOT-KEYS-BINDINGS "Ctrl+C saved $dims, not the selection"
+cp "$newest" "$ARTIFACTS/shot-keys-ctrl-c.png"
+cstate 'all(.layers[]; .namespace != "tuna-screenshot-ui")' "ctrl+c overlay unmapped" ||
+    fail G-SCREENSHOT-KEYS-BINDINGS "Ctrl+C did not close the UI"
+pass G-SCREENSHOT-KEYS-BINDINGS "Ctrl+C captures the selection; Shift+C, Ctrl+S and Ctrl+Shift arrows have no binding"
 
 }
