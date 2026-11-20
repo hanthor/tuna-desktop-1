@@ -21,7 +21,7 @@ cstate '(first(.layers[] | select(.namespace == "tuna-panel") | .rect[3]) // 0) 
     | $b != null and $b[1] + $b[3] <= $bar and .damage_area > 1 and .damage_area * 50 <= .output_area)' \
     "clock tick repaints the clock" 10 ||
     fail G-CLOCK-DAMAGE "a clock tick repainted more than the clock (frame_cost above)"
-cp "$CSTATE" "$ARTIFACTS/clock-damage-state.json"
+snapshot_state "$CSTATE" "$ARTIFACTS/clock-damage-state.json"
 gsettings reset org.gnome.desktop.interface clock-show-seconds
 pass G-CLOCK-DAMAGE "a clock tick repaints the clock's rectangle in the bar, under 2% of the output"
 }
