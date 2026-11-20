@@ -1019,6 +1019,15 @@ jobs:
         env:
           TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
         run: scripts/tuna-gtk-shell-proof --window-leak-only --artifacts gtk-shell-artifacts/window-leak
+      # A client's drag through the overview (#1189): real GTK drags open it
+      # from the hot corner and the Activities button, activate a window
+      # preview after 750 ms, and return to the starting workspace.
+      - name: Client drags through the overview
+        if: ${{ !cancelled() }}
+        timeout-minutes: 8
+        env:
+          TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
+        run: scripts/tuna-gtk-shell-proof --dnd-overview-only --artifacts gtk-shell-artifacts/dnd-overview
       # Initial DnD target focus must not wait for another physical motion.
       # Run the unchanged shared hover/reorder assertions independently of
       # unrelated full-suite assertions, using this job's just-built binaries.

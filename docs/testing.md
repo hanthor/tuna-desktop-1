@@ -217,6 +217,34 @@ subsurface, a grabbing popup and uploaded shm buffers, closed by destroying
 every object or by disconnecting, must drop every surface's server-side
 data, and the window manager must name the window nowhere.
 
+`scripts/tuna-gtk-shell-proof --dnd-overview-only --artifacts DIR` runs
+G-DND-OVERVIEW (#1189), the same function the full GTK proof calls after
+G-OV-DND: a client drag through the overview as GNOME 51 handles it
+(`overview.js` `_onDragBegin`/`_onDragMotion`/`_onDragEnd`, `panel.js`
+`ActivitiesButton.handleDragOver`, `layout.js` `HotCorner.handleDragOver`,
+`workspaceThumbnail.js` `handleDragOverInternal`). The drags are real:
+`scripts/lib/tuna-test-window.py` with `TUNA_TEST_DRAG=LOG` is a GTK 4 window
+whose label starts a `Gtk.DragSource` drag and takes its drop, and every
+button and move is X11 input through the nested window. Gates:
+G-DND-HOT-CORNER (the pointer to the corner opens the overview and the drag
+survives it), G-DND-WINDOW-SWITCH (a drag resting on the target window's
+preview activates and raises it no sooner than 750 ms after the last motion,
+and the drop lands in it), G-DND-ACTIVITIES (resting on the Activities button
+opens the overview no sooner than 250 ms after the last motion),
+G-DND-CANCEL-RETURNS and G-DND-DROP-RETURNS (a workspace activated by
+hovering a thumbnail is left for the starting workspace, the overview
+closing, when Escape cancels the drag or the button is released). Elapsed
+times are lower bounds from just before the last motion: the compositor's
+timer cannot fire sooner, and the state file is polled, so nothing tighter
+is claimed. The nested session opens its corner by hover (a native seat by
+barrier pressure), so G-DND-HOT-CORNER guards the end-to-end path and the
+hover-under-pressure rule is tested by `cargo test -p tuna-compositor --test
+data_device` (`a_client_drag_opens_the_hot_corner_even_where_only_pressure_does`,
+driving real `wl_data_device` drags between two clients, as the other rules
+are: the Activities and window-preview timers, the thumbnail switch, the
+return on cancel and on drop, and the supervised shell's own drags
+being left alone).
+
 `scripts/tuna-gtk-shell-proof --grid-hover-only --artifacts DIR` runs the same
 held-button hover and persisted reorder assertions as the full GTK proof,
 without the unrelated earlier gates. It adds no target motion or timing
