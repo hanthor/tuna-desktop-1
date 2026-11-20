@@ -1,4 +1,4 @@
-"""Host side of the marlin-vm app-integration boot (V-PICKER, V-INTROSPECT).
+"""Host side of the marlin-vm app-integration boot (V-PICKER, V-INTROSPECT, V-SWITCH-MONITOR).
 
 Drives real QEMU input and display changes against the guest fixtures in
 packaging/marlin/vm-lane (tuna-vm-picker, tuna-vm-introspect-watch,
@@ -19,6 +19,14 @@ QCODES = {"/": "slash", "-": "minus", ".": "dot", "_": ("shift", "minus")}
 TOPLEVEL = (1280, 800)
 SECOND = (1024, 768)
 PICKER_CASES = (("OpenFile", "cancel"), ("OpenFile", "accept"), ("SaveFile", "cancel"), ("SaveFile", "accept"))
+# Every gate this boot records, in order.
+GATES = ("V-PICKER", "V-INTROSPECT-SCREEN", "V-INTROSPECT-SANDBOX", "V-SWITCH-MONITOR")
+# The shell's switch-monitor popup: its layer-shell namespace
+# (crates/shell-gtk/src/monitor_switch.rs NAMESPACE) and GNOME's choices in
+# Meta.MonitorSwitchConfigType order (switchMonitor.js); the last two only
+# with a built-in panel.
+SWITCH_POPUP = "tuna-monitor-switch"
+SWITCH_CHOICES = ("Mirror", "Join Displays", "External Only", "Built-in Only")
 
 
 class AppError(RuntimeError):
@@ -61,6 +69,82 @@ def exposed_point(parent, dialog, top=40):
         if (inside((x, y), parent) and not inside((x, y), dialog) and y >= top
                 and 0 <= x < TOPLEVEL[0] and 0 <= y < TOPLEVEL[1]):
             return int(x), int(y)
+    return None
+
+
+def popup_open(scene):
+    """The switch-monitor popup's layer surface is mapped."""
+    return any(layer.get("namespace") == SWITCH_POPUP for layer in scene.get("layers") or ())
+
+
+def switch_presses(target, current, has_builtin):
+    """How many presses of the binding, Super held, leave `target` selected.
+
+    switchMonitor.js `_initialSelection`: the popup opens on the choice after
+    the one in effect, with any other configuration (UNKNOWN, 4) counting as
+    after the four; each further press steps forward and wraps."""
+    items = SWITCH_CHOICES if has_builtin else SWITCH_CHOICES[:2]
+    initial = ((SWITCH_CHOICES.index(current) if current else len(SWITCH_CHOICES)) + 1) % len(items)
+    return 1 + (items.index(target) - initial) % len(items)
+
+
+def mirror_mode(display):
+    """mutter's create_for_switch_config_all_mirror: the largest mode size the
+    first monitor offers that every monitor offers. GetCurrentState hides
+    only modes under 800x600 other than the preferred one, never the
+    largest common size of two heads that both offer 1024x768."""
+    monitors = display["monitors"]
+    best = None
+    for width, height in monitors[0]["modes"] if monitors else ():
+        if (all([width, height] in m["modes"] for m in monitors[1:])
+                and (best is None or width * height > best[0] * best[1])):
+            best = [width, height]
+    return best
+
+
+def mirror_problem(display):
+    """Why GetCurrentState is not GNOME's Mirror, or None: one primary logical
+    monitor at 0,0 showing every monitor at the largest common mode."""
+    connectors = sorted(m["connector"] for m in display["monitors"])
+    if len(connectors) < 2:
+        return f"{len(connectors)} monitor(s), nothing to mirror"
+    logical = display["logical"]
+    if len(logical) != 1:
+        return f"{len(logical)} logical monitors, not one showing every monitor"
+    only = logical[0]
+    if sorted(only["monitors"]) != connectors:
+        return f"the logical monitor shows {sorted(only['monitors'])}, not every monitor {connectors}"
+    if (only["x"], only["y"]) != (0, 0) or not only["primary"]:
+        return f"the mirrored logical monitor is at {only['x']},{only['y']}, primary {only['primary']}"
+    expected = mirror_mode(display)
+    wrong = {m["connector"]: m["current"] for m in display["monitors"] if m["current"] != expected}
+    if expected is None or wrong:
+        return f"monitors not all at the largest common mode {expected}: {wrong}"
+    return None
+
+
+def join_problem(display):
+    """Why GetCurrentState is not GNOME's Join Displays, or None: one logical
+    monitor per monitor at its preferred mode, the primary first at 0,0 and
+    the rest side by side along y 0 (create_monitors_config, linear)."""
+    monitors = {m["connector"]: m for m in display["monitors"]}
+    if len(monitors) < 2:
+        return f"{len(monitors)} monitor(s), nothing to join"
+    logical = sorted(display["logical"], key=lambda lm: (lm["x"], lm["y"]))
+    shown = sorted(c for lm in logical for c in lm["monitors"])
+    if len(logical) != len(monitors) or any(len(lm["monitors"]) != 1 for lm in logical) or shown != sorted(monitors):
+        return f"logical monitors {[lm['monitors'] for lm in logical]}, not one per monitor {sorted(monitors)}"
+    if not logical[0]["primary"] or sum(bool(lm["primary"]) for lm in logical) != 1:
+        return f"primary {[lm['primary'] for lm in logical]}: not the first monitor alone"
+    x = 0
+    for lm in logical:
+        monitor = monitors[lm["monitors"][0]]
+        if (lm["x"], lm["y"]) != (x, 0):
+            return f"{monitor['connector']} at {lm['x']},{lm['y']}, not beside the previous at {x},0"
+        if monitor["current"] is None or monitor["current"] != monitor["preferred"]:
+            return f"{monitor['connector']} at {monitor['current']}, not its preferred {monitor['preferred']}"
+        width, height = monitor["current"]
+        x += round((height if lm["transform"] % 2 else width) / lm["scale"])
     return None
 
 
@@ -406,6 +490,95 @@ class Lane:
             self.save("introspect-sandbox.json", steps)
         return failures
 
+    # ---- V-SWITCH-MONITOR ------------------------------------------------
+    def key(self, name, down):
+        """One QEMU keyboard event: a key held down or released."""
+        self.qmp.cmd("input-send-event", events=[{"type": "key", "data": {
+            "down": down, "key": {"type": "qcode", "data": name}}}])
+        time.sleep(0.05)
+
+    def switch_to(self, target, current, has_builtin, steps):
+        """Hold Super, press P until `target` is selected, check the popup is
+        up, release Super (the choice applies on the modifier's release) and
+        wait for GetCurrentState to show it. Returns failures."""
+        problem = mirror_problem if target == "Mirror" else join_problem
+        presses = switch_presses(target, current, has_builtin)
+        record = {"target": target, "after": current, "presses": presses}
+        steps.append(record)
+        held = False
+        try:
+            self.key("meta_l", True)
+            held = True
+            self.key("p", True)
+            self.key("p", False)
+            try:
+                opened = wait_for(lambda: (lambda s: s if popup_open(s) else None)(self.app("app-scene")),
+                                  10, f"Super+P did not open the switch-monitor popup for {target}")
+            except AppError as error:
+                record["no_popup"] = self.app("app-scene")
+                self.frame(f"switch-monitor-{target.split()[0].lower()}-nopopup.png")
+                return [str(error)]
+            record["popup"] = [layer for layer in opened["layers"] if layer["namespace"] == SWITCH_POPUP]
+            for _ in range(presses - 1):
+                self.key("p", True)
+                self.key("p", False)
+            time.sleep(0.6)  # past POPUP_DELAY, so the frame shows it
+            self.frame(f"switch-monitor-{target.split()[0].lower()}-popup.png")
+            if not popup_open(self.app("app-scene")):
+                return [f"the switch-monitor popup closed before Super was released ({target})"]
+        finally:
+            if held:
+                self.key("meta_l", False)
+        last = {}
+
+        def applied():
+            scene, display = self.app("app-scene"), self.app("app-display")
+            last.update(scene=scene, display=display, problem=problem(display))
+            if popup_open(scene) or last["problem"]:
+                return None
+            return scene, display
+        try:
+            scene, display = wait_for(applied, 30, f"{target} never applied", interval=1)
+        except AppError as error:
+            record["failure"] = last
+            self.frame(f"switch-monitor-{target.split()[0].lower()}-unapplied.png")
+            return [f"{error}: {last.get('problem') or 'the popup stayed open'}"]
+        record["applied"] = display
+        self.frame(f"switch-monitor-{target.split()[0].lower()}.png")
+        if scene["display_config"]["awaiting_confirmation"]:
+            return [f"{target} asks to keep the changes; the popup applies a temporary configuration"]
+        return []
+
+    def run_switch_monitor(self):
+        failures = []
+        steps = []
+        evidence = {"steps": steps}
+        try:
+            self.set_head(1, *SECOND, x=TOPLEVEL[0], y=0)
+            evidence["plugged"] = wait_for(
+                lambda: (lambda d: d if len(d["monitors"]) == 2 and len(d["logical"]) == 2 else None)(
+                    self.app("app-display")),
+                45, "the hotplugged second output never joined the layout", interval=1)
+            # The compositor tells the shell it may switch on the same tick.
+            time.sleep(1)
+            builtin = any(m["builtin"] for m in evidence["plugged"]["monitors"])
+            # The hotplug layout is no switch choice: Mirror first, then back.
+            failures = self.switch_to("Mirror", None, builtin, steps)
+            if not failures:
+                failures = self.switch_to("Join Displays", "Mirror", builtin, steps)
+        except (AppError, KeyError, TypeError) as error:
+            failures.append(f"{type(error).__name__}: {error}")
+        finally:
+            try:
+                self.set_head(1, 0, 0)
+                evidence["unplugged"] = wait_for(
+                    lambda: (lambda d: d if len(d["monitors"]) == 1 else None)(self.app("app-display")),
+                    45, "the second output never left the layout", interval=1)
+            except AppError as error:
+                failures.append(f"unplug: {error}")
+            self.save("switch-monitor.json", evidence)
+        return failures
+
 
 def run(qmp, connect, out, record, display_bus):
     lane = Lane(qmp, connect, out, record, display_bus)
@@ -432,5 +605,12 @@ def run(qmp, connect, out, record, display_bus):
                "; ".join(sandbox)[:900] if sandbox else
                "xdg-desktop-portal-gnome Background.GetAppState reports the Flatpak-sandboxed app, not an "
                "unsandboxed client claiming its app ID, and drops it on exit (app-integration/introspect-sandbox.json)")
+        switch = lane.run_switch_monitor()
+        record("V-SWITCH-MONITOR", not switch,
+               "; ".join(switch)[:900] if switch else
+               "with a hotplugged second head, real Super+P opens the shell's switch-monitor popup; P pressed "
+               "until Mirror is selected and Super released applies Mirror (GetCurrentState: one logical "
+               "monitor, both heads at the largest common mode), then Super+P applies Join Displays (side by "
+               "side at their preferred modes), with no confirmation asked (app-integration/switch-monitor.json)")
     finally:
         lane.close()

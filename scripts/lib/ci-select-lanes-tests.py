@@ -61,6 +61,9 @@ class Selection(unittest.TestCase):
                           "arch-package", "marlin-vm", "parity-ledger"])
         self.assertEqual(pr("scripts/tuna-orca-speech-proof"), ["orca-speech"])
         self.assertEqual(pr("scripts/lib/tuna-orca-speech.py"), ["orca-speech"])
+        # The two-head app-integration boot's host-side gates (V-PICKER,
+        # V-INTROSPECT, V-SWITCH-MONITOR) run only in marlin-vm.
+        self.assertEqual(pr("scripts/lib/vm_app_integration.py"), ["arch-package", "marlin-vm"])
 
 
     def test_transition_policy_and_suite_always_run_journey(self):

@@ -179,6 +179,7 @@ jobs:
       - run: python3 scripts/tests/test_ci_prepare_artifacts.py
       - run: python3 scripts/tests/test_vm_guest_agent_deadline.py
       - run: python3 scripts/tests/test_vm_reference_login.py
+      - run: python3 scripts/tests/test_vm_app_integration.py
       - run: python3 scripts/tests/test_gnome_reference_guest.py
       - run: python3 scripts/tests/test_native_switcher_reference.py
       - run: python3 scripts/tests/test_overview_recording.py
@@ -2018,14 +2019,17 @@ jobs:
           --meta "test_image_id=$(cat /mnt/vm/image-id)"
           --meta "commit=$PRODUCT_COMMIT"
           --meta "capture_commit=$(git rev-parse HEAD)"
-      # V-PICKER / V-INTROSPECT on their own two-head boot of the same disk:
-      # Nautilus file chooser parenting from real X11 and Wayland GTK callers,
-      # Introspect ScreenSize across virtio-gpu hotplug/rotation/unplug, and
-      # Flatpak sandbox identity through xdg-desktop-portal-gnome.
-      - name: App-integration boot (file chooser, Introspect display size and sandbox identity)
+      # V-PICKER / V-INTROSPECT / V-SWITCH-MONITOR on their own two-head boot
+      # of the same disk: Nautilus file chooser parenting from real X11 and
+      # Wayland GTK callers, Introspect ScreenSize across virtio-gpu
+      # hotplug/rotation/unplug, Flatpak sandbox identity through
+      # xdg-desktop-portal-gnome, and the Super+P switch-monitor popup
+      # mirroring and joining the two heads.
+      - name: App-integration boot (file chooser, Introspect display size, sandbox identity and switch-monitor)
         if: matrix.profile == 'lifecycle' && matrix.orca == 'distribution'
-        # Picker (2 roles x 4 cases), Flatpak install (400 s cap) and the
-        # hotplug/rotate/unplug waits fit well inside this bound.
+        # Picker (2 roles x 4 cases), Flatpak install (400 s cap), the
+        # hotplug/rotate/unplug waits and the two switch-monitor choices fit
+        # well inside this bound.
         timeout-minutes: 30
         env:
           PRODUCT_COMMIT: ${{ steps.native-product.outputs.product_commit }}

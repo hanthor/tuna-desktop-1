@@ -4262,7 +4262,7 @@ def main():
     ap.add_argument("--soak-revision", metavar="COMMIT",
                     help="the shipped payload's exact 40-digit source commit (deployment record)")
     ap.add_argument("--app-integration", action="store_true",
-                    help="two-head boot running V-PICKER and V-INTROSPECT instead of the tour")
+                    help="two-head boot running V-PICKER, V-INTROSPECT and V-SWITCH-MONITOR instead of the tour")
     ap.add_argument("--fresh-accounts", action="store_true",
                     help="tunaOS#4092: run only the record-free standard/admin account GDM journey "
                          "(first login, logout, login, reboot, login), not the tuna-test lane")
@@ -4495,7 +4495,7 @@ def main():
                 try:
                     app_integration.run(qmp, lambda: guest_agent.GuestAgent(agent_path), out, record, display_bus)
                 except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
-                    for gate in ("V-PICKER", "V-INTROSPECT-SCREEN", "V-INTROSPECT-SANDBOX"):
+                    for gate in app_integration.GATES:
                         results.setdefault(gate, (False, f"app-integration failed: {error}"))
                         log(f"{gate} FAIL: app-integration failed: {error}")
         # Give activation probes a bounded chance to report before shutdown.
@@ -4517,7 +4517,7 @@ def main():
             shutil.rmtree(display_dir, ignore_errors=True)
 
     if a.app_integration:
-        for gate in ("V-PICKER", "V-INTROSPECT-SCREEN", "V-INTROSPECT-SANDBOX"):
+        for gate in app_integration.GATES:
             results.setdefault(gate, (False, "session never came up; app-integration not run"))
     text = read_text(serial_path)
     drm = drm or DRM_RE.search(text)

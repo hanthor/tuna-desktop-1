@@ -161,7 +161,7 @@ state records its state observation next to its stills and clips.
 | P-ST-12 | Captive-portal sign-in | `unproven` | No adequate capture | notification and helper launch need NetworkManager reporting a portal |
 | P-PN-06 | Power Mode tile returns to the last profile | `unproven` | No adequate capture | G-QS-POWER-LAST checks the daemon's active profile and `last-selected-power-profile`; no capture state for the toggled tile yet |
 | P-PN-07 | Welcome dialog on first login | `unproven` | No adequate capture | the --welcome-only gates read the dialog from the accessibility tree; no capture state yet |
-| P-DS-05 | Switch-monitor popup (Super+P) | `unsupported-in-nested` | No adequate capture | the popup needs two monitors; the single nested output never shows it, so Corral with a second output |
+| P-DS-05 | Switch-monitor popup (Super+P) | `unsupported-in-nested` | No adequate capture | the popup needs two monitors; the single nested output never shows it. V-SWITCH-MONITOR keeps QEMU frames of it (`switch-monitor-*-popup.png`) from the Marlin VM's two-head boot; no capture state yet |
 
 ## Walkthrough states
 
