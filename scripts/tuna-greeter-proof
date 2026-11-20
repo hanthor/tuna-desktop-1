@@ -661,11 +661,13 @@ CURRENT_GATE=G-GREETER-GIVE-UP
 m="$(mark)"; g="$(gmark)"
 pick_user 2
 twait "$m" "greeter page prompt user=katherine" 10 >/dev/null || fail G-GREETER-GIVE-UP "the prompt did not open for katherine"
+# Each retry's query may arrive while the previous problem is being dumped,
+# so it is awaited from before the previous answer, not from the loop's top.
+gt="$g"
 for try in 1 2 3; do
-    gt="$(gmark)"
-    if [ "$try" = 1 ]; then gt="$g"; fi
     await_password_prompt "$gt" "D-$try-password"
     gq="$(gmark)"
+    gt="$gq"
     type_password "D-$try-password" "$WRONG_PASSWORD-$try"
     gwait "$gq" "$(call AnswerQuery '.detail.matches_password == false and .detail.user == "katherine"')" 10 ||
         fail G-GREETER-GIVE-UP "wrong answer $try did not reach AnswerQuery"
