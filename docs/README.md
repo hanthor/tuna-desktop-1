@@ -136,28 +136,19 @@ and plans under `.spektacular/` are historical records, not current state
 ## Feature notes
 
 How one feature matches GNOME 51 and how it is proved. New notes go in
-[`testing/`](testing/).
+[`testing/`](testing/); older ones still sit at the top of `docs/`.
 
 - [accessibility-shell.md](accessibility-shell.md) — GTK accessibility
   preferences and indicator.
 - [brightness-contract.md](brightness-contract.md) — the
   `org.gnome.Shell.Brightness` adapter.
-- [frame-callback-clock.md](frame-callback-clock.md) — frame callback
-  timestamps from the presentation clock.
 - [input-capture.md](input-capture.md) — `org.gnome.Mutter.InputCapture`.
-- [keyboard-input-aids.md](keyboard-input-aids.md) — Sticky, Slow, Bounce
-  and Mouse Keys.
-- [keyboard-native-parity.md](keyboard-native-parity.md) — source audit of
-  keyboard accessibility against Mutter 51.
 - [modal-dim.md](modal-dim.md) — attached modal parent dimming.
 - [network-agent.md](network-agent.md) — the NetworkManager secret agent.
 - [portal-screenshot-consent.md](portal-screenshot-consent.md) — Screenshot
   portal consent through the installed backends.
 - [portal-service-channel.md](portal-service-channel.md) — the
   `org.gnome.Mutter.ServiceChannel` bootstrap for the portal backend.
-- [screenshot-flash.md](screenshot-flash.md) — screenshot flash feedback.
-- [screenshot-keyboard.md](screenshot-keyboard.md) — keyboard control of
-  the screenshot selection.
 - [wellbeing-effect-protocol.md](wellbeing-effect-protocol.md) — GNOME 51
   semantics of the wellbeing grayscale and fade effects.
 - [window-lifecycle.md](window-lifecycle.md) — window map and destroy
@@ -166,18 +157,28 @@ How one feature matches GNOME 51 and how it is proved. New notes go in
   activation.
 - [testing/cursor-v1-integration.md](testing/cursor-v1-integration.md) —
   cursor qualification.
+- [testing/frame-callback-clock.md](testing/frame-callback-clock.md) —
+  frame callback timestamps from the presentation clock.
 - [testing/ibus-properties.md](testing/ibus-properties.md) — IBus panel
   properties.
 - [testing/idle-event-sources.md](testing/idle-event-sources.md) —
   compositor idle wake scheduling.
+- [testing/keyboard-input-aids.md](testing/keyboard-input-aids.md) —
+  Sticky, Slow, Bounce and Mouse Keys.
+- [testing/keyboard-native-parity.md](testing/keyboard-native-parity.md) —
+  source audit of keyboard accessibility against Mutter 51.
 - [testing/multitasking-preferences.md](testing/multitasking-preferences.md)
   — GNOME multitasking preferences in the live session.
 - [testing/native-sound-proof.md](testing/native-sound-proof.md) — media
   keys and output volume.
 - [testing/notification-action-lifecycle.md](testing/notification-action-lifecycle.md)
   — notification actions.
-- [testing/screenshot-flash-proof.md](testing/screenshot-flash-proof.md) —
-  running the screenshot flash proof.
+- [testing/screenshot-flash.md](testing/screenshot-flash.md) — screenshot
+  flash feedback;
+  [testing/screenshot-flash-proof.md](testing/screenshot-flash-proof.md)
+  runs its proof.
+- [testing/screenshot-keyboard.md](testing/screenshot-keyboard.md) —
+  keyboard control of the screenshot selection.
 - [testing/wellbeing-effects.md](testing/wellbeing-effects.md) — wellbeing
   grayscale and fade rendering.
 
@@ -198,8 +199,8 @@ How one feature matches GNOME 51 and how it is proved. New notes go in
   — guest CPU observer for Corral VMs.
 - [perf/corral-installed-visual-capture.md](perf/corral-installed-visual-capture.md)
   — visual capture of an installed fixture.
-- [corral-benchmark-disk.md](corral-benchmark-disk.md) — exporting a
-  paired benchmark disk from the performance workflow.
+- [perf/corral-benchmark-disk.md](perf/corral-benchmark-disk.md) —
+  exporting a paired benchmark disk from the performance workflow.
 
 ## Security
 
@@ -283,8 +284,8 @@ provenance; take current state from the living documents above.
   matrices and receipts.
 - [niri-parity/](niri-parity/) — paired niri frames behind
   [niri-parity.md](niri-parity.md).
-- [frame-callback-clock/](frame-callback-clock/) — the baseline behind
-  [frame-callback-clock.md](frame-callback-clock.md).
+- [testing/frame-callback-clock/](testing/frame-callback-clock/) — the
+  baseline behind [testing/frame-callback-clock.md](testing/frame-callback-clock.md).
 - [test-coverage/2026-10-04-initial-baseline.md](test-coverage/2026-10-04-initial-baseline.md)
   — the first measured coverage baseline.
 - [visual-capture-corral-request.md](visual-capture-corral-request.md) — a
