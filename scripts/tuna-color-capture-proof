@@ -331,7 +331,10 @@ def kernel_mode(connector, mode, unsupported=False):
                 continue
             encoding = output['connector_encoding']
             if mode == 1:
-                assert output['fp16_composition'] and '2101010' in output['scanout_format'], output
+                # A ten-bit 2101010 scanout: drm-fourcc's Debug prints the
+                # fourcc code (DrmFourcc(AR30)), not the Argb2101010 name.
+                ten_bit = ('2101010', '(AR30)', '(XR30)', '(AB30)', '(XB30)')
+                assert output['fp16_composition'] and any(f in output['scanout_format'] for f in ten_bit), output
                 assert output['sink_bt2020_rgb'] and output['sink_pq'] and output['sink_static_metadata_type1'], output
                 assert encoding['max_bpc'] >= 10 and encoding['colorspace'] != 0, output
                 assert encoding['hdr_metadata_blob'] > 0 and encoding['hdr_metadata_bytes'][4] == 2, output
