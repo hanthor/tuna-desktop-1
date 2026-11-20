@@ -1346,7 +1346,7 @@ impl Runtime {
             |stream, runtime: &mut Runtime| {
                 let mut client_data = ClientState::native_connection(&stream);
                 // Layer-shell is the supervised shell's alone (#1048).
-                client_data.admit_supervised_shell(&stream, runtime.shell.child_pid());
+                client_data.admit_supervised_shell(runtime.shell.child_pid());
                 if runtime
                     .display
                     .handle()
@@ -2007,7 +2007,8 @@ impl Runtime {
         }
         // Input capture never survives the lock (#1040).
         self.input_capture.revoke_all();
-        self.capture_authority.publish(true, self.shell.child_pid());
+        self.capture_authority
+            .publish(true, self.control.shell_bus_names());
         self.state.set_shortcut_inhibition_locked(true);
         // A three-finger swipe under way is the unlocked session's: end
         // it cancelled, so its overview or workspace slide never resumes
@@ -2015,9 +2016,10 @@ impl Runtime {
         // swipeTracker.js `_updateTouchpadGesture`/`_endTouchpadGesture`).
         self.interrupt_shell_swipe(crate::state::system_millis() as u32);
         self.control.set_overview(false);
-        // GNOME's lock closes the open menus and their grabs: a shell
-        // menu left open behind the lock kept the lock screen's keys.
-        self.state.dismiss_popup_grab_for_lock();
+        // GNOME's lock closes its own shell menus and their grabs: a
+        // shell menu left open behind the lock kept the lock screen's
+        // keys. An application's popup grab outlives the lock.
+        self.state.dismiss_shell_popup_grab_for_lock();
         // A client drag ends cancelled: its icon would draw above the
         // lock, as nothing else may.
         self.state
@@ -2200,10 +2202,11 @@ impl Runtime {
         // The lock held the keyboard (`hold_lock_focus`): quarantine
         // lock-origin holds, then hand it back to the session's owner
         // without raising, as GNOME's unlock returns focus to the
-        // focused window. The lock dismissed every popup grab
-        // (`dismiss_popup_grab_for_lock`), so only one taken while locked
-        // is returned to. A second `restore_keyboard_owner` here would
-        // raise that window and take the keyboard from a grabbing popup.
+        // focused window. The lock dismissed the shell's popup grabs
+        // (`dismiss_shell_popup_grab_for_lock`); an application's grab
+        // outlived it and is returned to. A second
+        // `restore_keyboard_owner` here would raise that window and take
+        // the keyboard from a grabbing popup.
         self.manager.unlock_input(&mut self.state);
         self.overlay.hide();
     }
@@ -5629,8 +5632,9 @@ impl Runtime {
         // ext-session-lock-v1: only the supervised shell may lock, and
         // locking through the protocol engages the compositor's own
         // flag. Anyone else's locker is dropped, which tells it the
-        // lock failed. Each waiting client gets its own verdict.
-        while let Some((locker, pid)) = self.state.take_lock_request() {
+        // lock failed. Only the shell's request is ever pending (others
+        // are refused on arrival), so there is at most one to judge.
+        if let Some((locker, pid)) = self.state.take_lock_request() {
             use crate::session_lock::{lock_request_verdict, LockVerdict};
             let verdict = lock_request_verdict(
                 pid,
@@ -5647,7 +5651,7 @@ impl Runtime {
                     eprintln!("tuna-compositor: session lock refused by administrator policy");
                 }
                 LockVerdict::RefusedForeign => {
-                    eprintln!("tuna-compositor: session lock refused for pid {pid:?}");
+                    eprintln!("tuna-compositor: session lock refused for pinned pid {pid:?}");
                 }
             }
             self.state
@@ -5793,8 +5797,6 @@ impl Runtime {
         crate::grid_trace::stage(&self.state, "ime_overlay");
         // Only the supervised shell may hold a control session (#30):
         // between restarts nobody may.
-        self.capture_authority
-            .publish(self.is_locked(), self.shell.child_pid());
         self.control.set_auth_owner(
             self.shell
                 .child_pid()
@@ -5805,6 +5807,10 @@ impl Runtime {
             Some(pid) => PeerGate::Pid(pid),
             None => PeerGate::Closed,
         });
+        // The shell is known on the session bus only by the unique names its
+        // current pinned control session declared (ADR 0010).
+        self.capture_authority
+            .publish(self.is_locked(), self.control.shell_bus_names());
         // Control EOF, manual/protocol/idle gates and shell PID gating are now current.
         // Never grant from a channel callback before those changes are observed.
         self.cancel_invalid_unlock();
