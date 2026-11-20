@@ -638,6 +638,23 @@ mod xwayland_tests {
         let (viewer, viewer_surface) = session.window("remote-viewer", "Remote-viewer");
         assert!(!session.state.shortcuts_inhibited());
         assert!(session.grab(viewer, &viewer_surface));
+        // Xwayland found the manager (the filter shows it Xwayland alone,
+        // `can_view`) and bound it at Mutter's version 1.
+        let grab = session
+            .state
+            .protocols
+            .xwayland_grabs
+            .grabs
+            .iter()
+            .find(|grab| grab.surface == viewer_surface)
+            .unwrap();
+        assert_eq!(grab.resource.version(), 1);
+        assert!(grab
+            .resource
+            .client()
+            .unwrap()
+            .get_data::<smithay::xwayland::XWaylandClientData>()
+            .is_some());
         assert!(session.state.shortcuts_inhibited());
         // Super+Escape (restore-shortcuts) ends the grab for good.
         assert!(session.state.restore_shortcuts());

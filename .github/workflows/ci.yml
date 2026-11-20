@@ -1034,8 +1034,9 @@ jobs:
           TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
         run: scripts/tuna-gtk-shell-proof --search-leak-only --artifacts gtk-shell-artifacts/search-leak
       # Mutter 51's protocols (#364, #588), each answering a real client:
-      # xdg_wm_base 7 edge states, xdg-foreign v1, wl_fixes and the
-      # background blur drawn behind a clear window.
+      # xdg_wm_base 7 edge states, xdg-foreign v1, wl_fixes, the
+      # background blur drawn behind a clear window and an X11 client's
+      # keyboard grab under Mutter's Xwayland access rules.
       - name: Mutter 51 protocols answer a real client
         if: ${{ !cancelled() }}
         timeout-minutes: 6
