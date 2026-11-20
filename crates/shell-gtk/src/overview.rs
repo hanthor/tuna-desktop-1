@@ -1112,15 +1112,15 @@ impl OverviewUi {
                     continue;
                 }
                 for id in ids {
+                    let (x, y) = dash_icon_origin(
+                        (monitor.x(), monitor.y(), monitor.width(), monitor.height()),
+                        (dash.width(), dash.height()),
+                        (bounds.x(), bounds.y()),
+                    );
                     geometries.push(tuna_shell_control::WindowIconGeometry {
                         window: *id,
-                        // The dash is centered on the monitor (layer-shell
-                        // placement of a bottom-anchored surface).
-                        x: monitor.x()
-                            + (monitor.width() - dash.width()) / 2
-                            + bounds.x().round() as i32,
-                        y: monitor.y() + monitor.height() - dash.height() - 12
-                            + bounds.y().round() as i32,
+                        x,
+                        y,
                         width: bounds.width().round() as i32,
                         height: bounds.height().round() as i32,
                     });
@@ -1441,7 +1441,7 @@ impl OverviewUi {
             .and_downcast::<gtk::gdk::Monitor>()
             .map_or(1280, |m| m.geometry().width());
         let (_, natural, _, _) = self.dash_row.measure(gtk::Orientation::Horizontal, -1);
-        let width = natural.min(monitor_width);
+        let width = dash_fit_width(natural, monitor_width);
         if self.dash_scroll.max_content_width() != width
             || self.dash_scroll.min_content_width() != width
         {
@@ -3247,6 +3247,55 @@ fn on_drop(
         true
     });
     widget.add_controller(target);
+}
+
+/// The content-wide dash (#503): its surface is as wide as its tiles, up
+/// to the monitor's width, rather than spanning the monitor.
+fn dash_fit_width(natural: i32, monitor_width: i32) -> i32 {
+    natural.min(monitor_width)
+}
+
+/// Where a dash icon at `icon` (relative to the dash) is on screen. The
+/// dash's bottom-anchored layer surface is centered on its `monitor`
+/// (x, y, width, height) 12 px above the bottom edge, so a dash narrower
+/// than the monitor starts at half the difference.
+fn dash_icon_origin(
+    monitor: (i32, i32, i32, i32),
+    dash: (i32, i32),
+    icon: (f32, f32),
+) -> (i32, i32) {
+    let (monitor_x, monitor_y, monitor_width, monitor_height) = monitor;
+    (
+        monitor_x + (monitor_width - dash.0) / 2 + icon.0.round() as i32,
+        monitor_y + monitor_height - dash.1 - 12 + icon.1.round() as i32,
+    )
+}
+
+#[cfg(test)]
+mod dash_fit_tests {
+    use super::{dash_fit_width, dash_icon_origin};
+
+    #[test]
+    fn the_dash_is_as_wide_as_its_tiles_up_to_the_monitor() {
+        assert_eq!(dash_fit_width(100, 1280), 100);
+        assert_eq!(dash_fit_width(420, 1280), 420);
+        assert_eq!(dash_fit_width(1600, 1280), 1280);
+    }
+
+    #[test]
+    fn icons_of_a_content_wide_dash_sit_in_the_centered_surface() {
+        // A 100 px dash (Show Apps alone) on a 1280x800 monitor right of a
+        // 1920 px one: the surface starts 590 px into the monitor.
+        assert_eq!(
+            dash_icon_origin((1920, 0, 1280, 800), (100, 76), (12.4, 8.6)),
+            (1920 + 590 + 12, 800 - 76 - 12 + 9)
+        );
+        // A dash as wide as the monitor starts at its left edge.
+        assert_eq!(
+            dash_icon_origin((0, 0, 1280, 800), (1280, 76), (640.0, 8.0)),
+            (640, 720)
+        );
+    }
 }
 
 #[cfg(test)]
