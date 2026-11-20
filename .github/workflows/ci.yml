@@ -1035,6 +1035,15 @@ jobs:
         env:
           TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
         run: scripts/tuna-gtk-shell-proof --window-leak-only --artifacts gtk-shell-artifacts/window-leak
+      # A client's drag through the overview (#1189): real GTK drags open it
+      # from the hot corner and the Activities button, activate a window
+      # preview after 750 ms, and return to the starting workspace.
+      - name: Client drags through the overview
+        if: ${{ !cancelled() }}
+        timeout-minutes: 8
+        env:
+          TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
+        run: scripts/tuna-gtk-shell-proof --dnd-overview-only --artifacts gtk-shell-artifacts/dnd-overview
       # Initial DnD target focus must not wait for another physical motion.
       # Run the unchanged shared hover/reorder assertions independently of
       # unrelated full-suite assertions, using this job's just-built binaries.
@@ -2186,8 +2195,11 @@ jobs:
   ci-gate:
     timeout-minutes: 10
     # One stable status for the run: lanes the selection skipped report
-    # skipped, any failed or cancelled job fails the gate.
-    if: always()
+    # skipped, any failed or cancelled job fails the gate. A superseded run
+    # (cancel-in-progress) needs no gate: with always() its gate still queued
+    # for a self-hosted runner, and the replacing run stayed pending until it
+    # got one, often for hours.
+    if: ${{ !cancelled() }}
     needs: [select-lanes, check, journey, app-content, scroll-proof, drm-smoke, grid-cancel-comparison, gtk-shell, orca-speech, portal-security, remote-security, niri-parity, arch-package, marlin-image, gdm51-native-package, marlin-vm, native-reference-context, parity-ledger, docs-shots]
     runs-on: *runner-24
     steps:
