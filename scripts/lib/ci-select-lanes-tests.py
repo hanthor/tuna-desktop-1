@@ -56,6 +56,13 @@ class Selection(unittest.TestCase):
         self.assertEqual(pr("docs/walkthrough.tsv"), ["gtk-shell"])
         self.assertEqual(pr("packaging/marlin/vm-lane/Containerfile"),
                          ["arch-package", "marlin-image", "marlin-vm"])
+        # The nested GTK gates (G-*) live in the GTK shell proof; journey
+        # runs it against the installed package.
+        self.assertEqual(pr("scripts/tuna-gtk-shell-proof"), ["journey", "gtk-shell"])
+        # G-VISUAL-BELL, G-X11-BELL, G-XSETTINGS-SOUNDS, G-QS-VOLUME-FEEDBACK
+        # (#353) are sourced into it, with their pixel reader.
+        for path in ("scripts/lib/tuna-sound-alerts-proof.sh", "scripts/lib/tuna-bell-pixels.py"):
+            self.assertEqual(pr(path), ["journey", "gtk-shell"], path)
         self.assertEqual(pr("docs/parity-ledger.md"),
                          ["journey", "drm-smoke", "gtk-shell", "orca-speech",
                           "arch-package", "marlin-vm", "parity-ledger"])
