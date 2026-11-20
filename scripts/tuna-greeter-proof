@@ -605,8 +605,9 @@ rows="$(jq '[.[] | select(.showing and (.role == "list item") and (.name | IN("A
 [ "$rows" = 3 ] || fail G-GREETER-USER-LIST "$rows user rows instead of 3"
 # Ada's IconFile is her avatar; the others' are the default.
 avatar_px="$(colour_pixels A-1-user-list 255 255 0)"
-[ "$avatar_px" -ge 2500 ] && [ "$avatar_px" -le 4500 ] ||
+if ! { [ "$avatar_px" -ge 2500 ] && [ "$avatar_px" -le 4500 ]; }; then
     fail G-GREETER-USER-LIST "ada's 64 px avatar image is not on her row alone ($avatar_px avatar pixels)"
+fi
 pass G-GREETER-USER-LIST "Ada Lovelace, Grace Hopper and Katherine Johnson listed as rows with Not listed?, Ada's row with her IconFile avatar ($avatar_px px); the system and locked accounts are not (A-1-user-list.png)"
 
 CURRENT_GATE=G-GREETER-NO-SHELL
