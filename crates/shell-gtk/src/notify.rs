@@ -1473,6 +1473,10 @@ impl NotifyUi {
         expand.add_css_class("message-expand-button");
         expand.set_valign(gtk::Align::Center);
         expand.update_property(&[gtk::accessible::Property::Label("Expand")]);
+        // An St.Button takes no keyboard focus (messageList.js builds the
+        // expand button without `can_focus`): Super+N then Tab still
+        // reaches Close, and Super+N itself expands.
+        expand.set_focusable(false);
         if let Some(header) = close.parent() {
             expand.insert_before(&header, Some(&close));
         }
@@ -2377,6 +2381,7 @@ mod gtk_action_lifecycle_tests {
             if let Some(button) = widget.downcast_ref::<gtk::Button>() {
                 if button.label().as_deref() == Some(wanted)
                     || (wanted == "close" && button.has_css_class("message-close-button"))
+                    || (wanted == "expand" && button.has_css_class("message-expand-button"))
                 {
                     found.push(button.clone());
                 }
@@ -2487,6 +2492,10 @@ mod gtk_action_lifecycle_tests {
         let ui = NotifyUi::build(&app, center.clone(), false);
         // Real clicked callbacks, retained even after their widgets leave the UI.
         let (id, take, delay, fired) = post(&ui);
+        // Tab from the focused banner skips the expand arrow, as St's
+        // focus chain does, and lands on Close.
+        assert!(!button(&ui.banner_box, "expand").is_focusable());
+        assert!(button(&ui.banner_box, "close").is_focusable());
         take.emit_clicked();
         take.emit_clicked();
         delay.emit_clicked();
