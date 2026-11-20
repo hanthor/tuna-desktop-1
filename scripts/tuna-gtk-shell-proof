@@ -3070,7 +3070,8 @@ scrot "$ARTIFACTS/10-search.png" >/dev/null
 # waits for that turn's frame to be drawn, and within 1 s after one it
 # starts once the turn is 1 s old.
 if [ "$GRID_CANCEL_OLD_NEGATIVE" != 1 ]; then
-    minute_ms() { echo $(($(date +%s%3N) % 60000)); }
+    # Not %3N: uutils date (Ubuntu 26.04's) ignores its width.
+    minute_ms() { echo $(($(date +%s%N) / 1000000 % 60000)); }
     sleep_ms() { sleep "$(printf '%d.%03d' $(($1 / 1000)) $(($1 % 1000)))"; }
     search_still_ms="$(minute_ms)"
     if [ "$search_still_ms" -ge 57000 ]; then
