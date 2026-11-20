@@ -3421,6 +3421,30 @@ mod tests {
         ));
     }
 
+    /// #1193: an app launch's startup sequence reaches the compositor as
+    /// `BeginStartupSequence` under the bare desktop id (no `.desktop`),
+    /// the app id its window will carry; the shell knows no WM class.
+    #[test]
+    fn a_launch_begins_its_startup_sequence_under_the_bare_desktop_id() {
+        let (mut client, mut peer) = handshook();
+        for (desktop_id, app_id) in [
+            ("org.gnome.TextEditor.desktop", "org.gnome.TextEditor"),
+            ("tuna-probe", "tuna-probe"),
+        ] {
+            let id = client.begin_startup_sequence(desktop_id).expect("sent");
+            assert_eq!(
+                server_read(&mut peer),
+                Message::Command {
+                    id,
+                    kind: CommandKind::BeginStartupSequence {
+                        app_id: app_id.into(),
+                        wm_class: None,
+                    },
+                }
+            );
+        }
+    }
+
     #[test]
     fn reconnect_failure_returns_an_error() {
         let dir = tempfile::tempdir().expect("tempdir");
