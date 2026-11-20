@@ -24,7 +24,7 @@ whole workspace:
 sudo apt-get install -y \
   libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev \
   libxkbcommon-dev pkg-config libgtk-4-dev libpipewire-0.3-dev \
-  libfontconfig1-dev librsvg2-common libadwaita-1-dev \
+  libfontconfig1-dev librsvg2-common libadwaita-1-dev libgweather-4-dev \
   libpam-wrapper libpam0g-dev libclang-dev zstd \
   libglib2.0-dev libglib2.0-bin libglib2.0-dev-bin \
   python3-yaml gsettings-desktop-schemas \
@@ -52,7 +52,7 @@ On Arch Linux (TunaOS Marlin's base), the `arch-package` CI job builds with:
 
 ```sh
 sudo pacman -S --needed base-devel git rust pkgconf clang pipewire gtk4 \
-  gtk4-layer-shell libadwaita libxkbcommon libxkbcommon-x11 mesa wayland \
+  gtk4-layer-shell libadwaita libgweather-4 libxkbcommon libxkbcommon-x11 mesa wayland \
   dbus glib2 seatd libinput systemd-libs libdrm \
   libsecret libcanberra sound-theme-freedesktop gnome-settings-daemon gnome-session \
   librsvg glycin gdk-pixbuf2 fontconfig adwaita-fonts namcap
@@ -74,7 +74,7 @@ spektacular version check
 
 ## Project Structure
 
-The project is a Cargo workspace with eight crates. The crate manifests and
+The project is a Cargo workspace with nine crates. The crate manifests and
 existing crate `README.md` files describe their purpose and dependencies.
 
 ```
@@ -82,6 +82,7 @@ tuna-desktop/
 ├── crates/
 │   ├── backlight/            # tuna-backlight: bounded backlight/owned-connector reads
 │   ├── compositor/           # tuna-compositor and tuna-session binaries (Smithay)
+│   ├── output/               # tuna-output: compositor-owned native DRM output identity
 │   ├── shell-control-schema/ # tuna-shell-control: compositor/shell IPC protocol
 │   ├── shell-host/           # tuna-shell-host: original shell binary and shared shell logic
 │   ├── shell-gtk/            # tuna-shell-gtk: GTK4/libadwaita shell (ADR 0006)
