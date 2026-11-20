@@ -234,6 +234,11 @@ impl ProtocolVersion {
     /// `0.52` appends GNOME's per-class `custom-accel-config` curves and the
     /// touchpad `disable-while-typing-timeout` to InputSettings (#343).
     /// Positional postcard peers must ship together.
+    /// `0.52` appends the shell-to-compositor `DeclareBusName` command: the
+    /// supervised shell names its session-bus connection over this
+    /// pidfd-pinned socket, and the compositor recognises the shell on
+    /// D-Bus by that unique name only (ADR 0010). Positional postcard peers
+    /// must ship together.
     pub const CURRENT: Self = Self {
         major: 0,
         minor: 52,
@@ -527,6 +532,13 @@ pub enum CommandKind {
         window: WindowId,
         response: CloseDialogResponse,
     },
+    /// Since 0.52: the unique name (`:1.N`) of the shell's session-bus
+    /// connection. The compositor admits D-Bus calls as the shell only
+    /// from the names its supervised, pidfd-pinned control session
+    /// declared, and forgets them when that session or process ends. A
+    /// session that is not the supervised shell is denied. A later
+    /// declaration replaces the earlier one.
+    DeclareBusName { unique_name: String },
 }
 
 /// mutter 51 `MetaCloseDialogResponse`: what the user chose in the dialog
@@ -4365,5 +4377,28 @@ mod close_dialog_wire_tests {
             );
             assert_eq!(decode_frame(&encode_frame(&message)).unwrap(), message);
         }
+    }
+
+    #[test]
+    fn declare_bus_name_follows_respond_close_dialog() {
+        let tag = |bytes: &[u8]| bytes[0];
+        let mut buffer = [0_u8; 64];
+        let respond = tag(postcard::to_slice(
+            &CommandKind::RespondCloseDialog {
+                window: 3,
+                response: CloseDialogResponse::Wait,
+            },
+            &mut buffer,
+        )
+        .unwrap());
+        let kind = CommandKind::DeclareBusName {
+            unique_name: ":1.42".into(),
+        };
+        assert_eq!(
+            tag(postcard::to_slice(&kind, &mut buffer).unwrap()),
+            respond + 1
+        );
+        let command = Message::Command { id: 12, kind };
+        assert_eq!(decode_frame(&encode_frame(&command)).unwrap(), command);
     }
 }

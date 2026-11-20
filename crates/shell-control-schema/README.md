@@ -56,6 +56,11 @@ before decoding.
   (screenShield.js `_lockScreenShown`); `false` once it unlocks. The shell
   reports `org.gnome.ScreenSaver` active only while it is shown, because
   gnome-settings-daemon blanks the screen on `ActiveChanged(true)`.
+- Shell bus identity (0.52): `CommandKind::DeclareBusName { unique_name }`
+  (peers >=52 only) names the shell's session-bus connection. The
+  compositor admits D-Bus capture and Introspect calls as the shell only
+  from names the supervised shell's pidfd-pinned control session declared,
+  and denies the command from any other session (ADR 0010).
 - Messages: `Message`, `StateOp`, `CommandKind`, `CommandStatus`,
   `ErrorKind`.
 - State types: `WindowInfo`, `WorkspaceInfo`, `OutputInfo`, `PreviewInfo`,
