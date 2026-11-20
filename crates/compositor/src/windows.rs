@@ -4488,11 +4488,12 @@ impl WindowManager {
     /// physical/XKB state until real keyup. Trusted AT runs before this filter.
     ///
     /// The keyboard goes back to what had it, as GNOME Shell's `popModal`
-    /// does. The lock dismissed every popup grab
-    /// ([`crate::State::dismiss_popup_grab_for_lock`]), so only a grab taken
-    /// while locked is returned to (its topmost popup); otherwise the owner
-    /// a popup grab hands back to (the parked overview, an Exclusive layer,
-    /// the focused window).
+    /// does. The lock dismissed the shell's popup grabs
+    /// ([`crate::State::dismiss_shell_popup_grab_for_lock`]); an
+    /// application's grab outlived it, revoked rather than dismissed as
+    /// by GNOME's modal stage grab, and gets the keyboard back (its
+    /// topmost popup); otherwise the owner a popup grab hands back to
+    /// (the parked overview, an Exclusive layer, the focused window).
     pub fn unlock_input(&mut self, state: &mut State) {
         if let Some(keyboard) = &self.keyboard {
             self.unlock_quarantined.extend(keyboard.pressed_keys());
