@@ -74,6 +74,12 @@ Conversations (gdm-session-worker.c through PAM):
   success switches to the user's session (logged as kind "switch"), the login
   screen's session turns inactive and the channel closes.
 
+The login screen's power menu calls logind (on hardware): CanSuspend,
+CanReboot, CanPowerOff -> 'yes'; Suspend(b), Reboot(b), PowerOff(b) are
+recorded and otherwise ignored. AddUser(s name, s real_name, t uid) lists a
+user (UserAdded) and DeleteUser(s name) removes one (UserDeleted, the object
+goes). A user's "icon" in FILE.json is relative to that file's directory.
+
 Every call and emitted signal is appended to FILE.jsonl as one JSON object
 (kind, interface, member, conn, args, outcome, wall and monotonic time).
 Answers are never logged: AnswerQuery and Reply record the answer's SHA-256
@@ -265,6 +271,12 @@ LOGIND_XML = f"""
       <arg name="pid" direction="in" type="u"/>
       <arg name="object_path" direction="out" type="o"/>
     </method>
+    <method name="CanSuspend"><arg name="result" direction="out" type="s"/></method>
+    <method name="CanReboot"><arg name="result" direction="out" type="s"/></method>
+    <method name="CanPowerOff"><arg name="result" direction="out" type="s"/></method>
+    <method name="Suspend"><arg name="interactive" direction="in" type="b"/></method>
+    <method name="Reboot"><arg name="interactive" direction="in" type="b"/></method>
+    <method name="PowerOff"><arg name="interactive" direction="in" type="b"/></method>
     <signal name="SessionNew"><arg name="session_id" type="s"/><arg name="object_path" type="o"/></signal>
     <signal name="SessionRemoved"><arg name="session_id" type="s"/><arg name="object_path" type="o"/></signal>
   </interface>
@@ -314,6 +326,11 @@ CONTROL_XML = f"""
     <method name="ApproveWebLogin"><arg name="approved" direction="in" type="b"/></method>
     <method name="SetPasskey"><arg name="connected" direction="in" type="b"/></method>
     <method name="TouchPasskey"/>
+    <method name="AddUser">
+      <arg name="name" direction="in" type="s"/><arg name="real_name" direction="in" type="s"/>
+      <arg name="uid" direction="in" type="t"/>
+    </method>
+    <method name="DeleteUser"><arg name="name" direction="in" type="s"/></method>
     <method name="CloseGreeterChannels"/>
     <method name="ActivateGreeterSession"/>
     <method name="EndSessions"><arg name="user" direction="in" type="s"/></method>
@@ -757,6 +774,11 @@ class Logind:
                 return GLib.Variant("(o)", (self.path(args[0]),))
             if member == "GetSessionByPID":
                 return GLib.Variant("(o)", (self.path(self.greeter_id),))
+            # The power menu: always available, recorded, never taken.
+            if member in ("CanSuspend", "CanReboot", "CanPowerOff"):
+                return GLib.Variant("(s)", ("yes",))
+            if member in ("Suspend", "Reboot", "PowerOff"):
+                return {"interactive": bool(args[0])}
             raise Refused("org.freedesktop.DBus.Error.UnknownMethod", member)
         self.mock.dispatch(sender, iface, member, params, inv, handle)
 
@@ -841,6 +863,8 @@ class Mock:
         self.session_node = Gio.DBusNodeInfo.new_for_xml(SESSION_XML)
         self.accounts_node = Gio.DBusNodeInfo.new_for_xml(ACCOUNTS_XML)
         self.control_node = Gio.DBusNodeInfo.new_for_xml(CONTROL_XML)
+        # user object path -> its registration on the bus
+        self.user_objects = {}
         self.logind = Logind(self)
         self.smartcard = None
         # gdm_dbus_setup_private_server: unix:dir=/run/gdm/dbus.
@@ -1029,6 +1053,23 @@ class Mock:
                 for sid in [sid for sid, s in self.logind.sessions.items()
                             if s["user"] == user and s["class"] == "user"]:
                     self.logind.remove(sid)
+            elif member == "AddUser":
+                name, real_name, uid = args
+                if any(u["name"] == name or u["uid"] == uid for u in self.users):
+                    raise Refused("org.freedesktop.Accounts.Error.UserExists", name)
+                entry = {"name": name, "real_name": real_name, "uid": uid}
+                self.users.append(entry)
+                self.export_user(entry)
+                self.accounts_signal("UserAdded", self.user_path(entry))
+            elif member == "DeleteUser":
+                (name,) = args
+                entry = next((u for u in self.users if u["name"] == name), None)
+                if entry is None:
+                    raise Refused("org.freedesktop.Accounts.Error.UserDoesNotExist", name)
+                self.users.remove(entry)
+                path = self.user_path(entry)
+                self.bus.unregister_object(self.user_objects.pop(path))
+                self.accounts_signal("UserDeleted", path)
             else:
                 raise Refused("org.freedesktop.DBus.Error.UnknownMethod", member)
             return None
@@ -1036,6 +1077,16 @@ class Mock:
 
     def user_path(self, entry):
         return f"{ACCOUNTS_PATH}/User{entry['uid']}"
+
+    def accounts_signal(self, member, path):
+        self.bus.emit_signal(None, ACCOUNTS_PATH, ACCOUNTS_IFACE, member,
+                             GLib.Variant("(o)", (path,)))
+        self.log.record(kind="signal", interface=ACCOUNTS_IFACE, member=member, args=[path])
+
+    def export_user(self, entry):
+        path = self.user_path(entry)
+        self.user_objects[path] = self.bus.register_object(
+            path, self.accounts_node.lookup_interface(USER_IFACE), None, self.user_property, None)
 
     def accounts_call(self, _c, sender, path, iface, member, params, inv):
         def handle(_iface, member, args):
@@ -1080,9 +1131,7 @@ class Mock:
         self.bus.register_object(CONTROL_PATH, self.control_node.lookup_interface(CONTROL_IFACE),
                                  self.control_call, None, None)
         for entry in self.users:
-            self.bus.register_object(self.user_path(entry),
-                                     self.accounts_node.lookup_interface(USER_IFACE),
-                                     None, self.user_property, None)
+            self.export_user(entry)
         self.logind.export(self.bus)
         for name in (GDM_NAME, ACCOUNTS_NAME, LOGIND_NAME):
             self.own(self.bus, name)
@@ -1112,6 +1161,9 @@ def main():
 
     with open(args.users, encoding="utf-8") as stream:
         users = json.load(stream)
+    for entry in users:
+        if entry.get("icon"):
+            entry["icon"] = os.path.join(os.path.dirname(os.path.abspath(args.users)), entry["icon"])
     secrets = {}
     with open(args.secrets, encoding="utf-8") as stream:
         for line in stream:

@@ -314,8 +314,10 @@ moved to `userVerifier.js` and the auth services):
   supervised client is `tuna-greeter` (`TUNA_GREETER_BIN`, sibling, `PATH`)
   with the shell's restart budget; when the budget runs out the compositor
   exits non-zero so GDM's own greeter recovery restarts the login screen.
-  No lock (idle, suspend and logind `Lock` are ignored, as the `gdm` mode has
-  no shield), no overview or hot corner, no shell swipes, no startup
+  No lock (idle, suspend and logind `Lock` are ignored: GDM's greeter dconf
+  profile sets `org.gnome.desktop.lockdown disable-lock-screen`, so GNOME
+  Shell's shield never locks the login screen), no overview or hot corner
+  (`gdm` mode's `hasOverview`), no shell swipes, no startup
   overview, no user-settings upgrade. On DRM it imports `WAYLAND_DISPLAY` to
   systemd and D-Bus activation but starts no `tuna-session.target`, holds
   no leader FIFO and does not register with GDM: gnome-session leads, and
@@ -350,13 +352,15 @@ moved to `userVerifier.js` and the auth services):
 GDM's daemon, AccountsService, logind and gsd-smartcard are
 `scripts/lib/tuna-gdm-mock.py` on a private system bus (gsd-smartcard on
 the private session bus), serving the API above with GDM 51.1.1's signal
-order and failure text, and a control interface the proof uses to insert
-the card or the passkey (and touch it), install `gdm-switchable-auth`, set
-timed login and restart the greeter's channel. `org.gnome.login-screen` is
-GDM 51.1.1's schema, compiled for the run and set with `gsettings`. Users
-are chosen and passwords typed with real X11 keys, and the result is read
-back through AT-SPI, the mock's call log and the compositor's state;
-`A-1-user-list.png` and `C-1-prompt.png` are the review shots against GNOME
+order and failure text, and a control interface (`org.tuna.Proof.GdmMock`)
+the proof uses to insert the card or the passkey (and touch it), install
+`gdm-switchable-auth`, set timed login, add and delete users, end a user's
+sessions and close GDM's channels. `org.gnome.login-screen` is GDM 51.1.1's
+schema (`scripts/lib/org.gnome.login-screen.gschema.xml`), compiled for the
+run and set with `gsettings` on the keyfile backend. Users are chosen and
+passwords typed with real X11 keys, and the result is read back through
+AT-SPI, the mock's call log and the compositor's state; `A-1-user-list.png`,
+`C-1-prompt.png` and `P-1-policy.png` are the review shots against GNOME
 51's login dialog, with `F-2-code.png`, `G-2-conflict.png`,
 `G-3-timeout.png`, `H-1-insert.png`, `H-2-choice.png`, `I-2-web-login.png`,
 `P-2-pin.png`, `P-3-touch.png`, `S-1-identity.png`, `X-2-new.png`,
@@ -366,8 +370,10 @@ Gates: `G-GREETER-READY`, `-USER-LIST`, `-NO-SHELL`, `-NOT-LISTED`,
 `-MULTISTEP`, `-SWITCH-RETURN`, `-CONFLICT`, `-CONFLICT-TIMEOUT`,
 `-SMARTCARD`, `-CHOICE-LIST`, `-WEB-LOGIN`, `-PASSKEY`, `-SSSD-SMARTCARD`,
 `-PASSWORD-EXPIRED`, `-POLICY-AUTH`, `-TIMED-LOGIN`, `-TIMED-LOGIN-PROMPT`,
-`-SUPERVISION`, `-HYGIENE`. Nested only: no real GDM, PAM, SSSD, card
-reader, passkey, identity provider, gnome-session or DRM.
+`-SUPERVISION`, `-HYGIENE`. A second login screen on the same mock then
+runs with `TUNA_SESSION_KIND=hardware`: `G-GREETER-POLICY`, `-CAPS-LOCK`,
+`-POWER-MENU`, `-LIVE-USERS`, `-RECONNECT`. Nested only: no real GDM, PAM,
+SSSD, card reader, passkey, identity provider, gnome-session or DRM.
 
 ## Security model
 
@@ -399,8 +405,9 @@ reader, passkey, identity provider, gnome-session or DRM.
   spent: the compositor exits non-zero, the unit fails, gnome-session shuts
   down, GDM sees the greeter session end and restarts the display (GDM's
   own limits apply; text consoles remain).
-- GDM channel closed: every owed result is denied, the prompt resets, and
-  the greeter reconnects every second.
+- GDM channel closed: the greeter asks for a new channel at once, then
+  every second until it gets one; the begin owed a result is denied and the
+  prompt begins again on the new channel (`G-GREETER-RECONNECT`).
 - Login: `VerificationComplete` → `SessionOpened` →
   `StartSessionWhenReady`; GDM starts the user session and stops the greeter
   session (SIGTERM to its process group).
@@ -409,15 +416,17 @@ reader, passkey, identity provider, gnome-session or DRM.
 
 | Area | GDM 51 | Tuna greeter now | Gate |
 |---|---|---|---|
-| User list from AccountsService, filtered like `UserList.addUser` | yes | yes (live add/remove) | G-GREETER-USER-LIST |
+| User list from AccountsService, filtered like `UserList.addUser`, with avatars | yes | yes (`IconFile` avatars, live add/remove) | G-GREETER-USER-LIST, G-GREETER-LIVE-USERS; cargo: `a_readable_avatar_file_is_the_users_image`, `only_added_and_deleted_users_change_the_list` |
 | Password through `gdm-password`, GNOME's prompt and messages | yes | yes (shared AuthPrompt machine) | G-GREETER-PASSWORD; cargo: `conversation::tests::*`, `gdm::tests::*` |
-| Wrong password: GDM's problem shown, retry, `allowed-failures` back to the list | yes | yes | G-GREETER-WRONG-PASSWORD, G-GREETER-GIVE-UP; cargo: `a_host_done_trying_gives_up_once_the_problem_is_read`, `failure_then_stop_is_one_denied_result_and_counts` |
-| "Not listed?" username entry | yes | yes | G-GREETER-NOT-LISTED |
+| Wrong password: GDM's problem shown, retry, `allowed-failures` back to the list | yes | yes | G-GREETER-WRONG-PASSWORD, G-GREETER-GIVE-UP, G-GREETER-POLICY; cargo: `a_host_done_trying_gives_up_once_the_problem_is_read`, `failure_then_stop_is_one_denied_result_and_counts` |
+| "Not listed?" username entry | yes | yes | G-GREETER-NOT-LISTED; cargo: `a_typed_username_is_trimmed_and_matched_to_the_list` |
+| Caps-lock warning under a secret question ("Caps lock is on") | yes | yes | G-GREETER-CAPS-LOCK; cargo: `the_caps_lock_warning_belongs_to_secret_questions` |
 | Session type in Login Options, `DefaultSessionNameChanged` | yes | yes (re-selected after GDM resets) | G-GREETER-SESSION; cargo: `sessions::tests::*` |
-| `StartSessionWhenReady` after `SessionOpened` | yes | yes | G-GREETER-START |
-| No overview, lock or panel layers; greeter supervised | yes (`gdm` mode) | yes | G-GREETER-NO-SHELL, G-GREETER-SUPERVISION |
-| Register session/display with GDM | yes | yes | G-GREETER-READY (mock GDM); V-GDM-LOGIN once packaged |
-| Banner, logo, `disable-user-list`, `disable-restart-buttons` | yes | read when the schema is installed | none yet |
+| `StartSessionWhenReady` after `SessionOpened` | yes | yes (at once: GNOME's `AuthPrompt.finish` waits for queued messages first) | G-GREETER-START; cargo: `only_session_opened_starts_a_session_after_verification` |
+| GDM's channel closes: reconnect, owed results denied | yes | yes | G-GREETER-RECONNECT; cargo: `wire_failures_and_disconnects_deny_what_is_owed` |
+| No overview, lock or panel layers; greeter supervised | yes (`gdm` mode) | yes | G-GREETER-NO-SHELL, G-GREETER-SUPERVISION; cargo: `the_login_screen_never_locks_and_has_no_overview`, `ready_is_sent_once_when_the_greeter_first_maps`, `greeter_flag_makes_a_login_screen_session`, `help_documents_greeter_mode`, `a_spent_greeter_budget_fails_the_unit` |
+| Register session/display with GDM | yes | yes (the greeter; the compositor only publishes the display) | G-GREETER-READY (mock GDM); cargo: `the_greeter_publishes_only_its_display`; V-GDM-LOGIN once packaged |
+| Banner, logo, `disable-user-list`, `disable-restart-buttons` | yes | yes, read at start (banner text only, not `banner-message-source=file`) | G-GREETER-POLICY, G-GREETER-POWER-MENU; cargo: `login_screen_keys_make_the_policy`, `banner_needs_enable_and_text_and_failures_allow_one_try` |
 | Wiggle, fades | yes | no | — |
 | Fingerprint | re-auth only in 51; not on the login dialog | not offered (as GNOME) | not applicable; see Login flows |
 | Smartcard (`gdm-smartcard`, gsd-smartcard insertion, PIN) | yes | yes | G-GREETER-SMARTCARD; cargo: `smartcard_changes_restart_only_the_smartcard_mechanism`, `tokens_report_insertions_like_smartcard_manager` |
@@ -430,7 +439,7 @@ reader, passkey, identity provider, gnome-session or DRM.
 | SSSD expired password (`_resettingPassword`) | yes | yes | G-GREETER-PASSWORD-EXPIRED; cargo: `an_expired_sssd_password_is_changed_through_pam_queries`, `only_the_password_mechanism_takes_the_expiry_notice` |
 | Multi-step (2FA after the password, Back at step 2 soft-resets) | yes | yes | G-GREETER-MULTISTEP; cargo: `a_second_query_after_the_password_is_the_next_step` |
 | Accessibility menu, Orca, OSK, input sources before login | yes | AT-SPI tree only | #1164 |
-| Quick settings (power, volume, network) | yes | power actions on hardware only | — |
+| Quick settings (power, volume, network) | yes | power actions (Suspend, Restart…, Power Off… straight to logind) on hardware only | G-GREETER-POWER-MENU; cargo: `power_actions_need_hardware_and_restart_buttons` |
 | Timed login (row countdown, key or click starts over; prompt countdown under `disable-user-list`) | yes | yes | G-GREETER-TIMED-LOGIN, G-GREETER-TIMED-LOGIN-PROMPT; cargo: `long_delays_wait_for_five_idle_seconds` |
 | Conflicting session dialog | yes | yes (in-window dialog; the timeout notice is a toast) | G-GREETER-CONFLICT, G-GREETER-CONFLICT-TIMEOUT; cargo: `the_banner_names_who_and_where`, `an_unanswered_dialog_times_out_after_a_minute`, `a_closed_dialogs_timer_does_nothing`, `the_conflicting_sessions_end_starts_the_login_and_stops_the_timer` |
 | User switching: logged-in ring, return to the running session | yes | yes | G-GREETER-SWITCH-RETURN; cargo: `access_denied_verifies_on_the_greeters_channel`, `a_replaced_reauthentication_channel_is_closed_but_never_the_greeters`, `a_closed_channel_is_the_greeters_or_a_users`, `begins_for_a_user_ask_for_the_users_channel_and_the_rest_follow`, `calls_go_out_one_at_a_time_in_order`, `begins_on_the_greeters_channel_select_the_session_again`, `access_denied_is_gdms_refusal_only`, `reauthentication_channels_are_opened_for_running_sessions_only`, `users_with_a_session_are_ringed`, `only_a_return_to_an_active_login_screen_starts_over` |
