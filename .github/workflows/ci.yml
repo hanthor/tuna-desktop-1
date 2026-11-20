@@ -948,6 +948,8 @@ jobs:
           if exit_status != 0 or not unchanged or '1 passed; 0 failed; 0 ignored' not in text or 'COUNTDOWN-OSD pass ' not in text:
               raise RuntimeError('actual admitted countdown OSD test did not pass')
           PY
+      # Each proof's marker line is its assertions.txt ("<ID> pass <desc>"):
+      # the parity ledger reads lock-idle-frames' (#1122).
       - name: Prove real GTK OSD fade-out, panel menu close/switch (#501), lock curtain (#502) and a settled lock screen's idle frame clock (#1122)
         run: |
           /usr/bin/python3 - <<'PY'
@@ -988,6 +990,7 @@ jobs:
               (artifacts / 'receipt.json').write_text(json.dumps({'build_admission': admission, 'argv': argv, 'exit_status': exit_status, 'executable_unchanged_after': unchanged, 'output_sha256': hashlib.sha256((artifacts / 'output.txt').read_bytes()).hexdigest(), 'scope': scope}, indent=2) + '\n')
               if exit_status != 0 or not unchanged or '1 passed; 0 failed; 0 ignored' not in text or marker not in text:
                   raise RuntimeError(f'actual admitted {name} test did not pass')
+              (artifacts / 'assertions.txt').write_text(text[text.index(marker):].splitlines()[0] + '\n')
           PY
       - name: Prove real MediaKeys callback completion and forced clamp interleave
         run: |
@@ -2122,6 +2125,7 @@ jobs:
           --assertions ledger-in/gtk-shell/session-restore/assertions.txt
           --assertions ledger-in/gtk-shell/osk/assertions.txt
           --assertions ledger-in/gtk-shell/lock-auth/assertions.txt
+          --assertions ledger-in/gtk-shell/lock-idle-frames/assertions.txt
           --assertions ledger-in/orca-speech/assertions.txt
           --assertions ledger-in/drm-smoke/assertions.txt
           --assertions ledger-in/marlin-vm/assertions.txt
