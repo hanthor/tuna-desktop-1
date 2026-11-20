@@ -1032,6 +1032,16 @@ jobs:
         env:
           TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
         run: scripts/tuna-gtk-shell-proof --search-leak-only --artifacts gtk-shell-artifacts/search-leak
+      # Mutter 51's protocols (#364, #588), each answering a real client:
+      # xdg_wm_base 7 edge states, xdg-foreign v1, wl_fixes and the
+      # background blur drawn behind a clear window.
+      - name: Mutter 51 protocols answer a real client
+        if: ${{ !cancelled() }}
+        timeout-minutes: 6
+        env:
+          TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
+          TUNA_REQUIRE_WAYLAND_INFO: "1"
+        run: scripts/tuna-gtk-shell-proof --protocols-only --artifacts gtk-shell-artifacts/protocols
       # Native/X11 geometry and physical input at all required virtual scales.
       - run: |
           for scale in 1 1.25 1.5 2; do
@@ -2122,6 +2132,7 @@ jobs:
           --assertions ledger-in/gtk-shell/session-restore/assertions.txt
           --assertions ledger-in/gtk-shell/osk/assertions.txt
           --assertions ledger-in/gtk-shell/lock-auth/assertions.txt
+          --assertions ledger-in/gtk-shell/protocols/assertions.txt
           --assertions ledger-in/orca-speech/assertions.txt
           --assertions ledger-in/drm-smoke/assertions.txt
           --assertions ledger-in/marlin-vm/assertions.txt

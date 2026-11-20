@@ -217,6 +217,24 @@ subsurface, a grabbing popup and uploaded shm buffers, closed by destroying
 every object or by disconnecting, must drop every surface's server-side
 data, and the window manager must name the window nowhere.
 
+`scripts/tuna-gtk-shell-proof --protocols-only --artifacts DIR` runs
+G-WAYLAND-INFO and the Mutter 51 protocol gates (#364, #588), each driven by
+a real client, `crates/compositor/examples/protocol-probe.rs`, that exits
+with a `FAIL` line when the session answers otherwise than Mutter 51 does.
+G-XDG-WM-BASE-7: a version 7 bind sees a maximized window tiled and
+constrained on every edge, a version 6 bind the tiled states alone.
+G-XDG-FOREIGN-V1: a GTK 3 `zxdg_exporter_v1` handle imported through
+`zxdg_importer_v2` parents the dialog (the compositor state's
+`parent_window_id`), revoking the export destroys the import and unparents,
+a v2 handle imports through v1 and an unknown v1 handle is destroyed.
+G-WL-FIXES: `wl_fixes` 1 destroys a second registry and the connection
+carries on. G-BACKGROUND-BLUR: `ext_background_effect_manager_v1` offers
+blur, and a clear window whose surface is a blur region smooths the
+one-pixel stripes of a maximized window behind it (mean step between
+neighbouring pixels below 16) while beside it they stay sharp (above 128),
+from `background-blur.png`. CI runs the slice in the `gtk-shell` job; its
+`protocols/assertions.txt` feeds the ledger.
+
 `scripts/tuna-gtk-shell-proof --grid-hover-only --artifacts DIR` runs the same
 held-button hover and persisted reorder assertions as the full GTK proof,
 without the unrelated earlier gates. It adds no target motion or timing
