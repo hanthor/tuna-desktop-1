@@ -1509,11 +1509,16 @@ jobs:
           name: tuna-arch
           path: arch-artifacts/
           retention-days: 14
+      # Artifact zips drop file modes; the colour image admits the overlay's
+      # executables as built (test -x), so carry the makepkg output as a tar.
+      - name: Archive the native colour overlay with its modes
+        if: contains(fromJSON(needs.select-lanes.outputs.lanes), 'marlin-vm')
+        run: tar -C native-colour-overlay -cf native-colour-overlay.tar .
       - uses: actions/upload-artifact@v7.0.2
         if: contains(fromJSON(needs.select-lanes.outputs.lanes), 'marlin-vm')
         with:
           name: native-colour-overlay
-          path: native-colour-overlay/
+          path: native-colour-overlay.tar
           if-no-files-found: error
           retention-days: 14
 
@@ -1820,7 +1825,10 @@ jobs:
         if: matrix.profile == 'colour'
         with:
           name: native-colour-overlay
-          path: native-colour-overlay
+          path: native-colour-overlay-artifact
+      - name: Unpack the native colour overlay with its built modes
+        if: matrix.profile == 'colour'
+        run: mkdir native-colour-overlay && tar -C native-colour-overlay -xf native-colour-overlay-artifact/native-colour-overlay.tar
       - uses: actions/download-artifact@v8.0.2
         with:
           name: gdm51-native-package
