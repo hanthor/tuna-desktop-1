@@ -40,6 +40,7 @@ gnome-settings-daemon's smartcard plugin's:
       Token (IsInserted)
   /org/tuna/Proof/GdmMock  org.tuna.Proof.GdmMock: the proof's controls
       (SetSmartcard, SetSwitchable, SetTimedLogin, ApproveWebLogin,
+      SetPasskey, TouchPasskey, EndSessions (a user logs out),
       CloseGreeterChannels, ActivateGreeterSession)
 
 Conversations (gdm-session-worker.c through PAM):
@@ -58,7 +59,14 @@ Conversations (gdm-session-worker.c through PAM):
                  ConversationStopped) until SetSwitchable(true); then a user
                  with "switchable" gets SSSD's CustomJSON 'auth-mechanisms'
                  request, others pam_unix's 'Password: '. Web login succeeds
-                 once ApproveWebLogin(true).
+                 once ApproveWebLogin(true). A passkey mechanism's
+                 keyConnected is SetPasskey's; its reply (the PIN, kerberos
+                 and cryptoChallenge echoed) waits for TouchPasskey(). A
+                 smartcard mechanism's reply names one of its certificates
+                 and carries the card's PIN. A "password_expired" user's
+                 right password gets pam_sss's 'Password expired. Change
+                 your password now.' (Info), then 'New Password: ' and
+                 'Reenter new Password: ' (SecretInfoQuery, AnswerQuery).
   Success: VerificationComplete then SessionOpened(service, cN) (gdm-session.c
   on_opened) and a logind session cN for the user. Cancel emits Reset, then
   ConversationStopped for each conversation, forgets the selected session and
@@ -113,6 +121,10 @@ CARD_INSERT = "Please insert smart card"
 # pam_sss: "PIN for %s: " with the token's name.
 CARD_PIN = "PIN for PIV_II: "
 CARD_CHOICE = "Select a certificate"
+# pam_sss's password change (src/sss_client/pam_sss.c).
+PASSWORD_EXPIRED = "Password expired. Change your password now."
+NEW_PROMPT = "New Password: "
+RETYPE_PROMPT = "Reenter new Password: "
 # gdm-session-worker.c get_generic_error_message.
 FAILED = {
     "gdm-password": "Sorry, password authentication didn’t work. Please try again.",
@@ -300,8 +312,11 @@ CONTROL_XML = f"""
       <arg name="user" direction="in" type="s"/><arg name="delay" direction="in" type="i"/>
     </method>
     <method name="ApproveWebLogin"><arg name="approved" direction="in" type="b"/></method>
+    <method name="SetPasskey"><arg name="connected" direction="in" type="b"/></method>
+    <method name="TouchPasskey"/>
     <method name="CloseGreeterChannels"/>
     <method name="ActivateGreeterSession"/>
+    <method name="EndSessions"><arg name="user" direction="in" type="s"/></method>
   </interface>
 </node>
 """
@@ -419,7 +434,8 @@ class Peer:
         if member == "AnswerQuery":
             service, answer = args
             conversation = self.conversations.get(service)
-            if conversation is None or conversation["query"] not in ("password", "code", "pin"):
+            if conversation is None or conversation["query"] not in (
+                    "password", "code", "pin", "new", "retype"):
                 # GDM completes the call and drops an unexpected answer.
                 return {"answer_sha256": sha(answer), "dropped": True}
             step = conversation["query"]
@@ -468,15 +484,37 @@ class Peer:
         selection = reply.get("authSelection", {})
         mechanism = next((k for k in selection if k != "status"), None)
         response = selection.get(mechanism) or {}
-        if mechanism == "eidp":
+        offered = self.mock.sssd_mechanism(conversation["user"], mechanism) or {}
+        role = offered.get("role")
+        detail = {}
+        if role == "eidp":
             right = self.mock.web_login_approved
+        elif role == "passkey":
+            # pam_sss: the PIN, and the request's kerberos and
+            # cryptoChallenge echoed; then the key is touched.
+            right = (response.get("pin") == self.mock.secrets.get("passkey@pin")
+                     and response.get("kerberos") == offered.get("kerberos")
+                     and response.get("cryptoChallenge") == offered.get("cryptoChallenge"))
+        elif role == "smartcard":
+            # One of the offered certificates, and the card's PIN.
+            cert = next((c for c in offered.get("certificates", [])
+                         if c.get("keyId") == response.get("keyId")), None)
+            detail["key_id"] = response.get("keyId")
+            right = (cert is not None
+                     and all(response.get(k) == cert.get(k)
+                             for k in ("tokenName", "moduleName", "label"))
+                     and response.get("pin") == self.mock.secrets.get("smartcard@pin"))
         elif "password" in response:
             right = self.mock.check("password", conversation, response["password"])
         else:
             right = False
-        GLib.idle_add(self.after_answer, service, "json", right)
+        if right and role == "passkey":
+            conversation["query"] = "touch"
+        else:
+            GLib.idle_add(self.after_answer, service, "json", right)
         return {"reply_sha256": sha(text), "status": selection.get("status"),
-                "mechanism": mechanism, "matches": right, "user": conversation["user"]}
+                "mechanism": mechanism, "role": role, "matches": right,
+                "user": conversation["user"], **detail}
 
     def after_begin(self, service, user):
         conversation = self.conversations.get(service)
@@ -506,7 +544,7 @@ class Peer:
             else:
                 self.ask_pin(service)
         elif service == SWITCHABLE:
-            selection = self.mock.switchable_selection(user)
+            selection = self.mock.sssd_request(user)
             if selection is not None and JSON_IFACE in self.extensions:
                 conversation["query"] = "json"
                 text = json.dumps(selection)
@@ -535,8 +573,17 @@ class Peer:
         conversation = self.conversations.get(service)
         if conversation is None:
             return GLib.SOURCE_REMOVE
-        if right and step == "password" and self.mock.second_factor(conversation["user"]):
+        user = conversation["user"]
+        if right and step == "password" and self.mock.second_factor(user):
             self.ask(service, "code", "InfoQuery", CODE_PROMPT)
+        elif (right and step == "json" and self.mock.password_expired(user)
+              and not conversation.get("changing")):
+            # pam_sss: right but expired; it is changed over plain PAM.
+            conversation["changing"] = True
+            self.emit(VERIFIER_IFACE, "Info", "(ss)", (service, PASSWORD_EXPIRED))
+            self.ask(service, "new", "SecretInfoQuery", NEW_PROMPT)
+        elif right and step == "new":
+            self.ask(service, "retype", "SecretInfoQuery", RETYPE_PROMPT)
         elif right:
             if conversation["user"] is None:
                 conversation["user"] = self.mock.card_user
@@ -784,6 +831,7 @@ class Mock:
         self.card_inserted = False
         self.switchable = False
         self.web_login_approved = False
+        self.passkey_connected = False
         self.timed_login = None
         self.autologin_user = None
         self.peers = []
@@ -828,8 +876,27 @@ class Mock:
     def second_factor(self, user):
         return bool((self.entry(user) or {}).get("second_factor"))
 
+    def password_expired(self, user):
+        return bool((self.entry(user) or {}).get("password_expired"))
+
     def switchable_selection(self, user):
         return (self.entry(user) or {}).get("switchable")
+
+    def sssd_request(self, user):
+        """SSSD's auth-mechanisms request for `user` now: a passkey's
+        keyConnected is SetPasskey's."""
+        selection = self.switchable_selection(user)
+        if selection is None:
+            return None
+        selection = json.loads(json.dumps(selection))
+        for m in selection.get("authSelection", {}).get("mechanisms", {}).values():
+            if m.get("role") == "passkey":
+                m["keyConnected"] = self.passkey_connected
+        return selection
+
+    def sssd_mechanism(self, user, mechanism_id):
+        selection = self.switchable_selection(user) or {}
+        return selection.get("authSelection", {}).get("mechanisms", {}).get(mechanism_id)
 
     def check(self, step, conversation, answer):
         user = conversation["user"]
@@ -837,6 +904,15 @@ class Mock:
             expected = self.secrets.get(user)
         elif step == "code":
             expected = self.secrets.get(f"{user}@code")
+        elif step == "new":
+            # pam_sss takes any new password but the old one; it is kept
+            # (in memory only) for the retype.
+            if not answer or answer == self.secrets.get(user):
+                return False
+            conversation["new"] = answer
+            return True
+        elif step == "retype":
+            expected = conversation.get("new")
         else:  # pin
             if user not in (None, self.card_user):
                 return False
@@ -930,12 +1006,29 @@ class Mock:
                 self.autologin_user = user or None
             elif member == "ApproveWebLogin":
                 self.web_login_approved = bool(args[0])
+            elif member == "SetPasskey":
+                self.passkey_connected = bool(args[0])
+            elif member == "TouchPasskey":
+                touched = [(peer, service) for peer in self.peers
+                           for service, c in peer.conversations.items()
+                           if c["query"] == "touch"]
+                if not touched:
+                    raise Refused("org.freedesktop.DBus.Error.Failed",
+                                  "no passkey waits for a touch")
+                for peer, service in touched:
+                    peer.conversations[service]["query"] = None
+                    GLib.idle_add(peer.after_answer, service, "touch", True)
             elif member == "CloseGreeterChannels":
                 for peer in self.peers:
                     if peer.reauth_user is None and not peer.conn.is_closed():
                         peer.conn.close(None, None, None)
             elif member == "ActivateGreeterSession":
                 self.logind.set_active(self.logind.greeter_id, True)
+            elif member == "EndSessions":
+                (user,) = args
+                for sid in [sid for sid, s in self.logind.sessions.items()
+                            if s["user"] == user and s["class"] == "user"]:
+                    self.logind.remove(sid)
             else:
                 raise Refused("org.freedesktop.DBus.Error.UnknownMethod", member)
             return None

@@ -229,8 +229,19 @@ moved to `userVerifier.js` and the auth services):
   (link prompt, a 150 px QR code of the URL, the URL without its scheme,
   "Login code: " and the code, Cancel and Done); Done replies `{}` and the
   dialog waits; `timeout` refreshes the mechanisms. `cancelRequested`'s
-  steps back (dialog → button, PIN → certificate list, waiting → soft reset)
-  are the conversation's own.
+  steps back (dialog → button, PIN → certificate list, touch or waiting →
+  soft reset) are the conversation's own; Back at the insert-key
+  instruction or at a single PIN resets hard. The passkey reply carries
+  the PIN with SSSD's `kerberos` and `cryptoChallenge`. GNOME 51 also
+  restarts the passkey prompt when a FIDO2 token is plugged in or out
+  (`fido2TokenManager.js`, udev `hidraw` with `ID_FIDO_TOKEN`); the greeter
+  does not watch udev yet, so after the insert-key instruction the user
+  goes Back and chooses again.
+- **Expired SSSD password.** SSSD reports expiry only as PAM text: with
+  the password mechanism selected, `Info` "Password expired. Change your
+  password now." shows and the following `SecretInfoQuery`s ("New
+  Password", "Reenter new Password") are prompt steps answered with
+  `AnswerQuery` on `gdm-switchable-auth`, not JSON (`_resettingPassword`).
 - **Multi-step.** Any further `InfoQuery`/`SecretInfoQuery` (a 2FA code
   after the password) is the next prompt step of the shared AuthPrompt
   machine: the entry clears, shows the question (visible for `InfoQuery`)
@@ -250,7 +261,9 @@ moved to `userVerifier.js` and the auth services):
   four local/remote texts and the force-stop warning). Cancel resets (GDM's
   `Cancel` closes the opened session) back to the list; Force Stop calls
   `StopConflictingSession` and the session starts when logind removes the
-  old one; after 60 s the dialog closes with "Login Attempt Timed Out".
+  old one; after 60 s unanswered the dialog closes with "Login Attempt Timed
+  Out" (a toast, kept until dismissed like GNOME's critical banner) and the prompt resets
+  (GDM's `Cancel`) back to the list.
 - **User switching.** The list rings users with a session (`logged-in`,
   libaccountsservice's count from logind; the row's accessible description
   is "Logged in"); a logged-in user's Login Options has no session type.
@@ -338,20 +351,23 @@ GDM's daemon, AccountsService, logind and gsd-smartcard are
 `scripts/lib/tuna-gdm-mock.py` on a private system bus (gsd-smartcard on
 the private session bus), serving the API above with GDM 51.1.1's signal
 order and failure text, and a control interface the proof uses to insert
-the card, install `gdm-switchable-auth`, set timed login and restart the
-greeter's channel. `org.gnome.login-screen` is GDM 51.1.1's schema,
-compiled for the run and set with `gsettings`. Users are chosen and
-passwords typed with real X11 keys, and the result is read back through
-AT-SPI, the mock's call log and the compositor's state; `A-1-user-list.png`
-and `C-1-prompt.png` are the review shots against GNOME 51's login dialog,
-with `F-2-code.png`, `G-2-conflict.png`, `H-1-insert.png`,
-`H-2-choice.png`, `I-2-web-login.png`, `J-1-policy.png` and `K-1-timed.png`
-for the flows. Gates: `G-GREETER-READY`, `-USER-LIST`, `-NO-SHELL`,
-`-NOT-LISTED`, `-GIVE-UP`, `-SESSION`, `-WRONG-PASSWORD`, `-PASSWORD`,
-`-START`, `-MULTISTEP`, `-SWITCH-RETURN`, `-CONFLICT`, `-SMARTCARD`,
-`-CHOICE-LIST`, `-WEB-LOGIN`, `-POLICY-AUTH`, `-TIMED-LOGIN`,
+the card or the passkey (and touch it), install `gdm-switchable-auth`, set
+timed login and restart the greeter's channel. `org.gnome.login-screen` is
+GDM 51.1.1's schema, compiled for the run and set with `gsettings`. Users
+are chosen and passwords typed with real X11 keys, and the result is read
+back through AT-SPI, the mock's call log and the compositor's state;
+`A-1-user-list.png` and `C-1-prompt.png` are the review shots against GNOME
+51's login dialog, with `F-2-code.png`, `G-2-conflict.png`,
+`G-3-timeout.png`, `H-1-insert.png`, `H-2-choice.png`, `I-2-web-login.png`,
+`P-2-pin.png`, `P-3-touch.png`, `S-1-identity.png`, `X-2-new.png`,
+`J-1-policy.png`, `K-1-timed.png` and `L-1-prompt-timed.png` for the flows.
+Gates: `G-GREETER-READY`, `-USER-LIST`, `-NO-SHELL`, `-NOT-LISTED`,
+`-GIVE-UP`, `-SESSION`, `-WRONG-PASSWORD`, `-PASSWORD`, `-START`,
+`-MULTISTEP`, `-SWITCH-RETURN`, `-CONFLICT`, `-CONFLICT-TIMEOUT`,
+`-SMARTCARD`, `-CHOICE-LIST`, `-WEB-LOGIN`, `-PASSKEY`, `-SSSD-SMARTCARD`,
+`-PASSWORD-EXPIRED`, `-POLICY-AUTH`, `-TIMED-LOGIN`, `-TIMED-LOGIN-PROMPT`,
 `-SUPERVISION`, `-HYGIENE`. Nested only: no real GDM, PAM, SSSD, card
-reader, identity provider, gnome-session or DRM.
+reader, passkey, identity provider, gnome-session or DRM.
 
 ## Security model
 
@@ -405,15 +421,19 @@ reader, identity provider, gnome-session or DRM.
 | Wiggle, fades | yes | no | — |
 | Fingerprint | re-auth only in 51; not on the login dialog | not offered (as GNOME) | not applicable; see Login flows |
 | Smartcard (`gdm-smartcard`, gsd-smartcard insertion, PIN) | yes | yes | G-GREETER-SMARTCARD; cargo: `smartcard_changes_restart_only_the_smartcard_mechanism`, `tokens_report_insertions_like_smartcard_manager` |
-| Authentication policy keys (`enable-password-/smartcard-/switchable-authentication`) | yes | yes (followed live) | G-GREETER-POLICY-AUTH; cargo: `password_policy_leaves_smartcard_without_a_username` |
+| Authentication policy keys (`enable-password-/smartcard-/switchable-authentication`, `allowed-failures`) | yes | yes (followed live) | G-GREETER-POLICY-AUTH; cargo: `password_policy_leaves_smartcard_without_a_username`, `the_schemas_defaults_are_the_default_policy`, `allowed_failures_leaves_at_least_one_try`, `a_reset_lands_on_the_list_the_question_or_no_user` |
 | ChoiceList | yes | yes | G-GREETER-CHOICE-LIST; cargo: `legacy_choice_lists_answer_with_select_choice` |
-| Switchable auth, CustomJSON web login (`eidp`), SSSD smartcard/passkey | yes | yes (passkey and SSSD smartcard unit-tested only) | G-GREETER-WEB-LOGIN; cargo: `sssd_*`, `missing_switchable_service_cascades_to_password` |
-| Multi-step (2FA after the password) | yes | yes | G-GREETER-MULTISTEP |
+| Login Options' mechanisms (`_onMechanismsChanged`, `selectMechanism`) | yes | yes | G-GREETER-SMARTCARD, G-GREETER-POLICY-AUTH; cargo: `login_options_select_the_first_mechanism_and_start_it`, `no_mechanism_is_chosen_while_an_answer_is_checked` |
+| Switchable auth, CustomJSON web login (`eidp`) | yes | yes | G-GREETER-WEB-LOGIN; cargo: `sssd_web_login_*`, `missing_switchable_service_cascades_to_password`, `plain_pam_on_the_switchable_service_is_not_sssd` |
+| SSSD passkey (insert key, PIN with the attempts warning, touch) | yes | yes, but a FIDO2 token plugged in does not restart the prompt (no udev watch: Back and choose again) | G-GREETER-PASSKEY; cargo: `sssd_passkey_without_the_key_asks_for_it`, `sssd_passkey_pin_then_touch_replies_json`, `sssd_passkey_warns_only_of_its_last_three_attempts` |
+| SSSD smartcard certificates ("Select Identity", PIN) | yes | yes | G-GREETER-SSSD-SMARTCARD; cargo: `sssd_smartcard_lists_certificates_then_asks_the_pin` |
+| SSSD expired password (`_resettingPassword`) | yes | yes | G-GREETER-PASSWORD-EXPIRED; cargo: `an_expired_sssd_password_is_changed_through_pam_queries`, `only_the_password_mechanism_takes_the_expiry_notice` |
+| Multi-step (2FA after the password, Back at step 2 soft-resets) | yes | yes | G-GREETER-MULTISTEP; cargo: `a_second_query_after_the_password_is_the_next_step` |
 | Accessibility menu, Orca, OSK, input sources before login | yes | AT-SPI tree only | #1164 |
 | Quick settings (power, volume, network) | yes | power actions on hardware only | — |
-| Timed login | yes | yes | G-GREETER-TIMED-LOGIN |
-| Conflicting session dialog | yes | yes (in-window dialog; the timeout notice is a toast) | G-GREETER-CONFLICT |
-| User switching: logged-in ring, return to the running session | yes | yes | G-GREETER-SWITCH-RETURN |
+| Timed login (row countdown, key or click starts over; prompt countdown under `disable-user-list`) | yes | yes | G-GREETER-TIMED-LOGIN, G-GREETER-TIMED-LOGIN-PROMPT; cargo: `long_delays_wait_for_five_idle_seconds` |
+| Conflicting session dialog | yes | yes (in-window dialog; the timeout notice is a toast) | G-GREETER-CONFLICT, G-GREETER-CONFLICT-TIMEOUT; cargo: `the_banner_names_who_and_where`, `an_unanswered_dialog_times_out_after_a_minute`, `a_closed_dialogs_timer_does_nothing`, `the_conflicting_sessions_end_starts_the_login_and_stops_the_timer` |
+| User switching: logged-in ring, return to the running session | yes | yes | G-GREETER-SWITCH-RETURN; cargo: `access_denied_verifies_on_the_greeters_channel`, `a_replaced_reauthentication_channel_is_closed_but_never_the_greeters`, `a_closed_channel_is_the_greeters_or_a_users`, `begins_for_a_user_ask_for_the_users_channel_and_the_rest_follow`, `calls_go_out_one_at_a_time_in_order`, `begins_on_the_greeters_channel_select_the_session_again`, `access_denied_is_gdms_refusal_only`, `reauthentication_channels_are_opened_for_running_sessions_only`, `users_with_a_session_are_ringed`, `only_a_return_to_an_active_login_screen_starts_over` |
 | Realmd login hint | yes | no | — |
 | Translations | yes | no | — |
 | Greeter on every variant, `org.gnome.Shell@gdm.service` gone | — | no packaging yet | V-GREETER-LIST, V-GDM-LOGIN, V-GDM-FALLBACK |

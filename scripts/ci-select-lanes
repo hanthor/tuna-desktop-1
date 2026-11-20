@@ -95,6 +95,8 @@ OWNED = [
     # against a GDM 51 and AccountsService mock.
     ("scripts/tuna-greeter-proof", ["gtk-shell"]),
     ("scripts/lib/tuna-gdm-mock.py", ["gtk-shell"]),
+    # GDM 51.1.1's org.gnome.login-screen, compiled by the greeter proof.
+    ("scripts/lib/org.gnome.login-screen.gschema.xml", ["gtk-shell"]),
     ("scripts/tuna-walkthrough", ["gtk-shell"]),
     # scripts/tests/* run by a lane job (#1108): a test edit must run the lane
     # that executes it, or it first runs after merge.

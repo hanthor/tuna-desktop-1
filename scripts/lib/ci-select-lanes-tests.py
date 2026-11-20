@@ -56,6 +56,9 @@ class Selection(unittest.TestCase):
         self.assertEqual(pr("docs/walkthrough.tsv"), ["gtk-shell"])
         self.assertEqual(pr("scripts/tuna-greeter-proof"), ["gtk-shell"])
         self.assertEqual(pr("scripts/lib/tuna-gdm-mock.py"), ["gtk-shell"])
+        # The greeter proof's GDM schema fixture runs the proof, not the
+        # catch-all script lanes.
+        self.assertEqual(pr("scripts/lib/org.gnome.login-screen.gschema.xml"), ["gtk-shell"])
         self.assertEqual(pr("packaging/marlin/vm-lane/Containerfile"),
                          ["arch-package", "marlin-image", "marlin-vm"])
         self.assertEqual(pr("docs/parity-ledger.md"),
