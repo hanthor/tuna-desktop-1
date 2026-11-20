@@ -344,8 +344,13 @@ until grep -q '^READY' "$ARTIFACTS/color-pixel.txt"; do
     [ "$(date +%s)" -le "$end" ] || fail D-COLOR-PIXEL "colour client never presented"
     sleep 0.2
 done
-# READY code_r code_g code_b expected_r expected_g expected_b
-read -r _ code_r code_g code_b want_r want_g want_b <"$ARTIFACTS/color-pixel.txt"
+# READY code_r code_g code_b expected_r expected_g expected_b. The client
+# prints PRESENTED-CLOCK (and with --icc PREFERRED) before it.
+ready_line="$(grep -m1 '^READY ' "$ARTIFACTS/color-pixel.txt")"
+read -r _ code_r code_g code_b want_r want_g want_b <<EOF
+$ready_line
+EOF
+[ -n "$want_b" ] || fail D-COLOR-PIXEL "colour client printed no complete READY line: $ready_line"
 got=""
 matched=""
 for _ in $(seq 1 20); do
