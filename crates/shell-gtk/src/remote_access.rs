@@ -297,8 +297,13 @@ mod tests {
     /// grant, and the button hides once none is left and it has shown five
     /// seconds; the record icon follows recordings.
     #[test]
-    #[ignore = "requires an owned GTK display (Xvfb)"]
+    #[ignore = "requires owned Xvfb/private D-Bus and explicit remote access indicator admission"]
     fn actual_gtk_indicator_shows_stops_and_hides() {
+        assert_eq!(
+            std::env::var("TUNA_REQUIRE_REMOTE_ACCESS_INDICATOR").as_deref(),
+            Ok("1")
+        );
+        assert!(std::env::var_os("WAYLAND_DISPLAY").is_none());
         gtk::init().expect("actual GTK display required");
         let stopped: Rc<RefCell<Vec<(RemoteAccessKind, u64)>>> = Rc::default();
         let ui = {
@@ -380,5 +385,6 @@ mod tests {
         ui.sync_connection(Some(1));
         drain(5.2);
         assert!(!ui.sharing.is_visible());
+        println!("REMOTE-ACCESS-INDICATOR pass Stop Screen Sharing shows for shares and remote control, stops each, stays five seconds; the record icon follows other owners' recordings");
     }
 }

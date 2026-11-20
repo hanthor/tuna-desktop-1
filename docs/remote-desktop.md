@@ -107,6 +107,20 @@ session are remote access grants the compositor publishes to the shell
 Sharing" panel button while any is active; pressing it revokes them for
 good (see [Capture admission](capture-security.md)).
 
+Evidence: the remote-security job (`tests/remote-desktop-reference/run.sh`)
+runs grd 51's own Desktop Sharing daemon on a private settings backend that
+has RDP and remote control on, with its credentials in gnome-keyring, and
+connects a real FreeRDP client. While the user's
+`org.gnome.desktop.remote-desktop.rdp` `enable` (dconf) is off, grd's
+CreateSession is refused and the client is dropped; once it is on, grd
+streams to the client and the panel shows Stop Screen Sharing; switching it
+off drops the client and hides the button (R-GRD-ENABLE,
+R-REMOTE-INDICATOR). The in-binary probe
+(`scripts/lib/tuna-service-identity-probe.c`, LD_PRELOAD into the genuine
+grd executable) shows the Handover name refused with every switch on, the
+Headless name following only `rdp.headless` and the User name `rdp` or
+`vnc`.
+
 Lock matches GNOME for the shared desktop. gnome-shell 51 `main.js`
 `_sessionUpdated` calls `inhibit_remote_access()` whenever the session mode
 disallows screencast and the backend is not headless; the `unlock-dialog`
