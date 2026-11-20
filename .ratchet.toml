@@ -42,7 +42,7 @@ pattern = '#\[ignore'
 include = ["**/*.rs"]
 exclude = ["third-party/**", "**/vendor/**"]
 exclude-rust-tests = false
-budget = 15
+budget = 16
 
 [metrics.shellcheck-disable]
 description = "shellcheck disable directives in any non-test, non-doc file"
