@@ -424,10 +424,11 @@ pub struct WindowManager {
     /// [`unmanaged`]).
     #[cfg(feature = "xwayland")]
     x11_unmanaged: Vec<X11Surface>,
-    /// X11 windows last told they are iconic (`WM_STATE` IconicState and
-    /// `_NET_WM_STATE_HIDDEN`): those hidden by minimize.
+    /// The `WM_STATE` last sent to each X11 window: true is IconicState
+    /// with `_NET_WM_STATE_HIDDEN` (hidden by minimize), false is
+    /// NormalState. A window absent here has not been told yet.
     #[cfg(feature = "xwayland")]
-    x11_iconic: HashSet<u64>,
+    x11_iconic: HashMap<u64, bool>,
     /// Model ids bottom-to-top; focus raises to the top.
     stacking: Vec<u64>,
     // Explicit activation history is independent of raising transient families.
@@ -757,7 +758,7 @@ impl WindowManager {
             #[cfg(feature = "xwayland")]
             x11_unmanaged: Vec::new(),
             #[cfg(feature = "xwayland")]
-            x11_iconic: HashSet::new(),
+            x11_iconic: HashMap::new(),
             stacking: Vec::new(),
             focus_history: Vec::new(),
             cascade: 0,
@@ -911,7 +912,7 @@ impl WindowManager {
         #[cfg(feature = "xwayland")]
         check("x11_index", self.x11_index.values().any(|v| *v == id));
         #[cfg(feature = "xwayland")]
-        check("x11_iconic", self.x11_iconic.contains(&id));
+        check("x11_iconic", self.x11_iconic.contains_key(&id));
         check("stacking", self.stacking.contains(&id));
         check("focus_history", self.focus_history.contains(&id));
         check(
@@ -3268,17 +3269,13 @@ impl WindowManager {
                     continue;
                 };
                 let iconic = hidden.contains(id);
-                if iconic == self.x11_iconic.contains(id) {
+                if self.x11_iconic.get(id) == Some(&iconic) {
                     continue;
                 }
                 if let Err(error) = surface.set_iconic(iconic) {
                     eprintln!("tuna-compositor: window {id} X11 WM_STATE refused: {error}");
                 }
-                if iconic {
-                    self.x11_iconic.insert(*id);
-                } else {
-                    self.x11_iconic.remove(id);
-                }
+                self.x11_iconic.insert(*id, iconic);
             }
         }
     }
