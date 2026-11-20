@@ -293,10 +293,15 @@ fn ibus_bus(address: &str) -> Result<gio::DBusConnection, glib::Error> {
 }
 
 /// How long the session's IBus unit may take to bring the daemon up
-/// (the session manager starts it with the session), and how long a
-/// daemon the bridge itself started may take to publish its bus.
+/// (the session manager starts it with the session).
 const UNIT_WAIT: Duration = Duration::from_secs(60);
-const CHILD_WAIT: Duration = Duration::from_secs(10);
+/// How long a daemon the bridge itself started may take to publish its
+/// bus: what GNOME's session gives the same `ibus-daemon --panel disable`
+/// (`org.freedesktop.IBus.session.GNOME.service` is `Type=dbus`, so
+/// systemd's 90 s `DefaultTimeoutStartSec`). A loaded host has taken
+/// longer than 10 s; giving up sooner killed a daemon that was coming up
+/// and spent one of the compositor's few bridge restarts on starting over.
+const CHILD_WAIT: Duration = Duration::from_secs(90);
 /// How long a stopped daemon gets to quit before it is killed.
 const DAEMON_STOP_GRACE: Duration = Duration::from_millis(1500);
 
@@ -1317,5 +1322,15 @@ mod tests {
             assert!(!wait(&context, wayland.as_fd(), Some(Duration::from_secs(5))).unwrap());
         }
         signal.join().unwrap();
+    }
+
+    #[test]
+    fn an_owned_daemon_gets_the_start_up_gnomes_ibus_unit_gets() {
+        // org.freedesktop.IBus.session.GNOME.service is Type=dbus with no
+        // TimeoutStartSec of its own: systemd's DefaultTimeoutStartSec.
+        assert_eq!(CHILD_WAIT, Duration::from_secs(90));
+        // A daemon of the bridge's own is never given up on sooner than a
+        // session's unit would be waited for.
+        assert!(CHILD_WAIT >= UNIT_WAIT);
     }
 }

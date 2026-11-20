@@ -1038,12 +1038,27 @@ real nested compositor twice and checks that exactly one party owns the
 session's `ibus-daemon` (#1014). With no IBus unit, as in every nested
 session, the bridge starts one `ibus-daemon --panel disable`: not
 daemonized, its own child, in its process group, and the only daemon
-for the display, named by the bus file. With a unit (`TUNA_IBUS_UNIT`
+for the display, named by the bus file. Before that session ends,
+G-IBUS-OWNER-RESTART kills the daemon (the same bridge must start a new
+child of its own within 10 s, as systemd's `Restart=on-abnormal` would),
+kills the bridge while its daemon runs (nothing of the bridge's group, the
+daemon or its config component may be left, and the compositor's
+replacement bridge starts its own daemon, whose start the proof slows by
+15 s through an `ibus-daemon` shim on `PATH`: the bridge must wait it out,
+not give it up), runs `ibus exit` (no daemon may return for 7 s, longer
+than the bridge's longest IBus retry) and kills that bridge too (its
+replacement starts a daemon again); there are never two daemons. A
+daemon's own start-up, up to its bus file and its config component, gets
+90 s: what GNOME's session gives its IBus unit (`Type=dbus`, systemd's
+`DefaultTimeoutStartSec`), and what the bridge waits for a daemon of its
+own. On a loaded host that start-up has taken over 30 s with the new
+daemon already the bridge's child. With a unit (`TUNA_IBUS_UNIT`
 and a stub `systemctl`) the bridge starts none, asks the manager once
 the session is up, and the one daemon is the unit's. After SIGTERM to
 the compositor no `ibus-*` process of the display is left: the
 compositor retires the bridge's group, and in the unit run the stub
-manager stops its unit. It writes `assertions.txt` (`G-IBUS-OWNER-*`).
+manager stops its unit. It writes `assertions.txt` (`G-IBUS-OWNER-*`),
+which the parity-ledger job reads.
 
 ## Parity ledger check
 
