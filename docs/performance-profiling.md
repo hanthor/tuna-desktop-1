@@ -32,8 +32,9 @@ The gated metrics (`scripts/tuna-perf-gate`, budgets in
 
 The phases and roles are listed in the
 [perf README's regression gate section](perf/README.md#regression-gate-315).
-Memory (PSS/RSS) is sampled but not yet budgeted. #315 tracks memory and
-growth budgets.
+Memory (PSS/RSS) is sampled but not yet budgeted on main. #315 tracks memory
+and growth budgets; open [#1075](https://github.com/tuna-os/tuna-desktop/pull/1075)
+adds PSS metrics to the gate, reported but not enforced.
 
 `scripts/tuna-shell-memory-profile --display :5N --artifacts DIR` replays the
 gate's workload in a nested session with real X input and records, for the
