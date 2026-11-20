@@ -64,6 +64,25 @@ class Selection(unittest.TestCase):
         self.assertEqual(pr("scripts/tuna-orca-speech-proof"), ["orca-speech"])
         self.assertEqual(pr("scripts/lib/tuna-orca-speech.py"), ["orca-speech"])
 
+    def test_greeter_code_and_fixtures_always_run_its_orca_gate(self):
+        # G-GREETER-ORCA runs only in orca-speech (--orca-only), a rotated
+        # lane: a change to what it proves must select it on every run.
+        for run in range(len(m.ROTATION)):
+            for path in ("crates/greeter/src/a11y.rs", "crates/greeter/src/control.rs",
+                         "crates/greeter/Cargo.toml",
+                         "crates/compositor/src/login_services.rs"):
+                with self.subTest(path=path, run=run):
+                    self.assertEqual(pr(path, run=run, size=0),
+                                     ["grid-cancel-comparison", "gtk-shell", "orca-speech"])
+                    self.assertIn("orca-speech", pr(path, run=run))
+            with self.subTest(run=run):
+                self.assertEqual(pr("scripts/lib/org.gnome.login-screen.gschema.xml", run=run),
+                                 ["gtk-shell", "orca-speech"])
+                self.assertEqual(pr("scripts/lib/tuna-a11y-dump.py", run=run),
+                                 ["journey", "grid-cancel-comparison", "gtk-shell", "orca-speech"])
+        # The rest of the compositor keeps the code rule.
+        self.assertNotIn("orca-speech", pr("crates/compositor/src/lib.rs", run=0, size=0))
+
 
     def test_transition_policy_and_suite_always_run_journey(self):
         for path in ('scripts/lib/transition-package-policy.py',
