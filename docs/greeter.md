@@ -240,8 +240,8 @@ logind) → fade out → `StartSessionWhenReady(service, true)`.
 
 ## Proof
 
-`scripts/tuna-greeter-proof` (gtk-shell CI job) runs the real
-`tuna-compositor --greeter` nested on Xvfb with the real `tuna-greeter`;
+`scripts/tuna-greeter-proof` (gtk-shell CI job, on the source build) runs
+the real `tuna-compositor --greeter` nested on Xvfb with the real `tuna-greeter`;
 GDM's daemon and AccountsService are `scripts/lib/tuna-gdm-mock.py` on a
 private system bus, serving the API above with GDM 51.1.1's signal order and
 failure text. Users are chosen and passwords typed with real X11 keys, and
@@ -250,7 +250,15 @@ compositor's state; `A-1-user-list.png` and `C-1-prompt.png` are the review
 shots against GNOME 51's login dialog. Gates: `G-GREETER-READY`,
 `-USER-LIST`, `-NO-SHELL`, `-NOT-LISTED`, `-GIVE-UP`, `-SESSION`,
 `-WRONG-PASSWORD`, `-PASSWORD`, `-START`, `-SUPERVISION`, `-HYGIENE`.
-Nested only: no real GDM, PAM, gnome-session or DRM.
+Nested only: no real GDM, PAM, gnome-session or DRM. The journey CI job runs
+the same proof against the installed `.deb`'s own binaries
+(`TUNA_PROOF_BIN_DIR=/usr/bin`, artifacts under `journey-artifacts/greeter`),
+and the parity ledger requires both runs' gates to pass.
+`scripts/check-deb-clean-install` (journey; unit suite
+`scripts/lib/deb-clean-install-tests.py`) and arch-package's installed smoke
+check the packaged layout: `tuna-greeter` runs (`--version`) beside the
+compositor, the unit and the inactive drop-in are installed, and no drop-in
+is installed at GDM's `/etc/systemd/user` path.
 
 ## Security model
 
@@ -303,4 +311,4 @@ Nested only: no real GDM, PAM, gnome-session or DRM.
 | Quick settings (power, volume, network) | yes | power actions on hardware only | — |
 | Timed/auto login, conflicting session dialog, realmd hint | yes | no | — |
 | Translations | yes | no | — |
-| Greeter on every variant, `org.gnome.Shell@gdm.service` gone | — | no packaging yet | V-GREETER-LIST, V-GDM-LOGIN, V-GDM-FALLBACK |
+| Greeter on every variant, `org.gnome.Shell@gdm.service` gone | — | both packages ship it inactive beside the compositor; the VM lane's tunaOS layer enables it | `check-deb-clean-install` (journey), arch-package installed smoke, journey's installed-package greeter proof, V-GREETER-TUNA; V-GREETER-LIST, V-GDM-LOGIN, V-GDM-FALLBACK |
