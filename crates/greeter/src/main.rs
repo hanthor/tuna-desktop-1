@@ -37,6 +37,9 @@ const LOGIN_SCREEN_SCHEMA: &str = "org.gnome.login-screen";
 const USERNAME_QUESTION: &str = "Username";
 /// How long to wait before asking GDM for its channel again.
 const RECONNECT: std::time::Duration = std::time::Duration::from_secs(1);
+/// The prompt's caps-lock warning (gnome-shell 51.1 shellEntry.js
+/// `CapsLockWarning`).
+const CAPS_LOCK_WARNING: &str = "Caps lock is on";
 
 thread_local! {
     /// The login screen, alive for the process (GTK's main thread only).
@@ -60,30 +63,48 @@ struct Policy {
     disable_restart_buttons: bool,
 }
 
+impl Default for Policy {
+    /// The schema's defaults.
+    fn default() -> Self {
+        Self {
+            allowed_failures: 3,
+            disable_user_list: false,
+            banner: None,
+            logo: None,
+            disable_restart_buttons: false,
+        }
+    }
+}
+
 impl Policy {
     fn read() -> Self {
         let settings = gio::SettingsSchemaSource::default()
             .and_then(|source| source.lookup(LOGIN_SCREEN_SCHEMA, true))
             .map(|_| gio::Settings::new(LOGIN_SCREEN_SCHEMA));
         let Some(s) = settings else {
-            return Self {
-                allowed_failures: 3,
-                disable_user_list: false,
-                banner: None,
-                logo: None,
-                disable_restart_buttons: false,
-            };
+            return Self::default();
         };
-        let banner = s
-            .boolean("banner-message-enable")
-            .then(|| s.string("banner-message-text").to_string());
-        let logo = Some(s.string("logo").to_string()).filter(|path| !path.is_empty());
+        Self::parse(|key| s.value(key))
+    }
+
+    /// The policy from the schema's keys (`value` reads one): the banner
+    /// only when enabled with text (loginDialog.js `_updateBanner`), the
+    /// logo only when named, and at least one try (`_canRetry` with a
+    /// fail count of one stops at any `allowed-failures` below 2).
+    fn parse(value: impl Fn(&str) -> glib::Variant) -> Self {
+        let boolean = |key: &str| value(key).get::<bool>().unwrap_or(false);
+        let string = |key: &str| value(key).get::<String>().unwrap_or_default();
+        let banner = boolean("banner-message-enable").then(|| string("banner-message-text"));
         Self {
-            allowed_failures: u32::try_from(s.int("allowed-failures")).unwrap_or(0).max(1),
-            disable_user_list: s.boolean("disable-user-list"),
+            allowed_failures: value("allowed-failures")
+                .get::<i32>()
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(0)
+                .max(1),
+            disable_user_list: boolean("disable-user-list"),
             banner: banner.filter(|text| !text.trim().is_empty()),
-            logo,
-            disable_restart_buttons: s.boolean("disable-restart-buttons"),
+            logo: Some(string("logo")).filter(|path| !path.is_empty()),
+            disable_restart_buttons: boolean("disable-restart-buttons"),
         }
     }
 }
@@ -264,7 +285,7 @@ impl Greeter {
         button_box.append(&cancel_room);
         button_box.append(&entry_area);
         button_box.append(&spacer);
-        let caps = gtk::Label::new(Some("Caps lock is on."));
+        let caps = gtk::Label::new(Some(CAPS_LOCK_WARNING));
         caps.add_css_class("caps-lock-warning-label");
         caps.set_visible(false);
         let message = gtk::Label::new(None);
@@ -600,12 +621,10 @@ impl Greeter {
             return;
         }
         if self.asking_username.get() {
-            let name = text.trim().to_owned();
-            if name.is_empty() {
+            let Some((name, user)) = typed_user(&text, &self.users.borrow()) else {
                 return;
-            }
+            };
             self.entry.clear();
-            let user = self.users.borrow().iter().find(|u| u.name == name).cloned();
             self.choose_user(&name, user.as_ref());
             return;
         }
@@ -664,7 +683,7 @@ impl Greeter {
             .and_then(|d| d.default_seat())
             .and_then(|s| s.keyboard())
             .is_some_and(|k| k.is_caps_locked());
-        self.caps.set_visible(secret && caps_locked);
+        self.caps.set_visible(caps_warning(secret, caps_locked));
         let (text, kind) = match (&view.message, asking) {
             (Some((text, kind)), false) => (text.as_str(), Some(*kind)),
             _ => ("", None),
@@ -795,14 +814,15 @@ impl Greeter {
     }
 
     fn on_signal(self: &Rc<Self>, signal: Signal) {
+        if let Some(service) = session_to_start(&signal) {
+            // loginDialog.js `_onSessionOpened` → `_startSession`.
+            trace(&format!("greeter session-opened service={service}"));
+            self.send(Call::StartSessionWhenReady {
+                service: service.to_owned(),
+            });
+            return;
+        }
         match &signal {
-            Signal::SessionOpened { service, .. } => {
-                // loginDialog.js `_onSessionOpened` → `_startSession`.
-                trace(&format!("greeter session-opened service={service}"));
-                self.send(Call::StartSessionWhenReady {
-                    service: service.clone(),
-                });
-            }
             Signal::DefaultSessionNameChanged { session } => {
                 trace(&format!("greeter default-session id={session}"));
                 self.show_default_session(session);
@@ -973,12 +993,45 @@ fn set_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {
     }
 }
 
-/// The system menu's power actions, offered on hardware only (a nested
-/// login screen's logind seat is the host's) and not under
-/// `disable-restart-buttons`.
+/// authPrompt.js `_updateEntry`: the caps-lock warning is part of a
+/// secret question only, shown while the lock is on (`CapsLockWarning`).
+fn caps_warning(secret: bool, caps_locked: bool) -> bool {
+    secret && caps_locked
+}
+
+/// "Not listed?": the username typed (trimmed; nothing for blank input),
+/// and that user's list entry when the list has one (its name and avatar
+/// then show on the prompt).
+fn typed_user(text: &str, users: &[accounts::User]) -> Option<(String, Option<accounts::User>)> {
+    let name = text.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let user = users.iter().find(|u| u.name == name).cloned();
+    Some((name.to_owned(), user))
+}
+
+/// loginDialog.js `_onSessionOpened`: GDM opened the session of a
+/// conversation it verified (`SessionOpened` comes after
+/// `VerificationComplete`); that service's session is to start. No other
+/// signal starts one.
+fn session_to_start(signal: &Signal) -> Option<&str> {
+    match signal {
+        Signal::SessionOpened { service, .. } => Some(service),
+        _ => None,
+    }
+}
+
+/// Whether the panel offers the power actions: on hardware only (a nested
+/// login screen's logind seat is the host's, `TUNA_SESSION_KIND`) and not
+/// under `disable-restart-buttons`.
+fn offers_power(session_kind: Option<&str>, policy: &Policy) -> bool {
+    session_kind == Some("hardware") && !policy.disable_restart_buttons
+}
+
+/// The system menu's power actions, when [`offers_power`].
 fn power_menu(policy: &Policy) -> Option<gtk::MenuButton> {
-    let hardware = std::env::var("TUNA_SESSION_KIND").is_ok_and(|kind| kind == "hardware");
-    if !hardware || policy.disable_restart_buttons {
+    if !offers_power(std::env::var("TUNA_SESSION_KIND").ok().as_deref(), policy) {
         return None;
     }
     let menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -1023,17 +1076,29 @@ fn power_menu(policy: &Policy) -> Option<gtk::MenuButton> {
     Some(button)
 }
 
-/// Release version stamped at build time, as the other binaries do it.
-fn release_version() -> &'static str {
-    match option_env!("TUNA_VERSION") {
+/// Release version stamped at build time: `TUNA_VERSION` (a `vX.Y.Z` tag
+/// or plain `X.Y.Z`) wins, otherwise the crate version, as the other
+/// binaries do it.
+fn normalize_version<'a>(raw: Option<&'a str>, fallback: &'a str) -> &'a str {
+    match raw {
         Some(v) if !v.is_empty() => v.strip_prefix('v').unwrap_or(v),
-        _ => env!("CARGO_PKG_VERSION"),
+        _ => fallback,
     }
 }
 
+fn release_version() -> &'static str {
+    normalize_version(option_env!("TUNA_VERSION"), env!("CARGO_PKG_VERSION"))
+}
+
+/// What `--version` (or `-V`) anywhere on the command line prints.
+fn version_line(mut args: impl Iterator<Item = String>) -> Option<String> {
+    args.any(|a| a == "--version" || a == "-V")
+        .then(|| format!("tuna-greeter {}", release_version()))
+}
+
 fn main() -> glib::ExitCode {
-    if std::env::args().any(|a| a == "--version" || a == "-V") {
-        println!("tuna-greeter {}", release_version());
+    if let Some(line) = version_line(std::env::args()) {
+        println!("{line}");
         return glib::ExitCode::SUCCESS;
     }
     glib::set_prgname(Some("tuna-greeter"));
@@ -1058,4 +1123,191 @@ fn main() -> glib::ExitCode {
         GREETER.with(|g| *g.borrow_mut() = Some(greeter));
     });
     app.run_with_args::<&str>(&[])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(entries: &[(&str, glib::Variant)]) -> impl Fn(&str) -> glib::Variant {
+        // GDM 51.1.1's defaults, overridden by `entries`.
+        let mut values: std::collections::HashMap<String, glib::Variant> = [
+            ("allowed-failures", 3i32.to_variant()),
+            ("disable-user-list", false.to_variant()),
+            ("banner-message-enable", false.to_variant()),
+            ("banner-message-text", "".to_variant()),
+            ("logo", "".to_variant()),
+            ("disable-restart-buttons", false.to_variant()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+        for (key, value) in entries {
+            values.insert((*key).to_owned(), value.clone());
+        }
+        move |key| values[key].clone()
+    }
+
+    #[test]
+    fn login_screen_keys_make_the_policy() {
+        let defaults = Policy::parse(keys(&[]));
+        let none = Policy::default();
+        assert_eq!(defaults.allowed_failures, none.allowed_failures);
+        assert_eq!(defaults.disable_user_list, none.disable_user_list);
+        assert_eq!(defaults.banner, none.banner);
+        assert_eq!(defaults.logo, none.logo);
+        assert_eq!(
+            defaults.disable_restart_buttons,
+            none.disable_restart_buttons
+        );
+        assert_eq!(none.allowed_failures, 3, "the schema's default");
+
+        let set = Policy::parse(keys(&[
+            ("allowed-failures", 1i32.to_variant()),
+            ("disable-user-list", true.to_variant()),
+            ("banner-message-enable", true.to_variant()),
+            ("banner-message-text", "Authorized use only.".to_variant()),
+            ("logo", "/usr/share/pixmaps/logo.png".to_variant()),
+            ("disable-restart-buttons", true.to_variant()),
+        ]));
+        assert_eq!(set.allowed_failures, 1);
+        assert!(set.disable_user_list);
+        assert_eq!(set.banner.as_deref(), Some("Authorized use only."));
+        assert_eq!(set.logo.as_deref(), Some("/usr/share/pixmaps/logo.png"));
+        assert!(set.disable_restart_buttons);
+    }
+
+    #[test]
+    fn banner_needs_enable_and_text_and_failures_allow_one_try() {
+        let text_only = Policy::parse(keys(&[("banner-message-text", "Hi".to_variant())]));
+        assert_eq!(text_only.banner, None, "banner-message-enable is off");
+        let blank = Policy::parse(keys(&[
+            ("banner-message-enable", true.to_variant()),
+            ("banner-message-text", "  ".to_variant()),
+        ]));
+        assert_eq!(blank.banner, None);
+        for failures in [0, -4] {
+            let policy = Policy::parse(keys(&[("allowed-failures", failures.to_variant())]));
+            assert_eq!(
+                policy.allowed_failures, 1,
+                "{failures}: one try, as _canRetry"
+            );
+        }
+        // A mistyped value (not the schema's) reads as the key's zero.
+        let wrong = Policy::parse(keys(&[("disable-user-list", "yes".to_variant())]));
+        assert!(!wrong.disable_user_list);
+    }
+
+    #[test]
+    fn power_actions_need_hardware_and_restart_buttons() {
+        let allowed = Policy::default();
+        let disabled = Policy {
+            disable_restart_buttons: true,
+            ..Policy::default()
+        };
+        assert!(offers_power(Some("hardware"), &allowed));
+        assert!(!offers_power(Some("hardware"), &disabled));
+        assert!(!offers_power(Some("nested"), &allowed), "the host's logind");
+        assert!(!offers_power(None, &allowed));
+        assert!(!offers_power(Some("Hardware"), &allowed));
+    }
+
+    #[test]
+    fn the_caps_lock_warning_belongs_to_secret_questions() {
+        assert!(caps_warning(true, true));
+        assert!(!caps_warning(true, false));
+        assert!(
+            !caps_warning(false, true),
+            "a visible question (Username) warns of nothing"
+        );
+        assert!(!caps_warning(false, false));
+        assert_eq!(CAPS_LOCK_WARNING, "Caps lock is on");
+    }
+
+    #[test]
+    fn a_typed_username_is_trimmed_and_matched_to_the_list() {
+        let ada = accounts::User {
+            path: "/org/freedesktop/Accounts/User1001".into(),
+            name: "ada".into(),
+            real_name: "Ada Lovelace".into(),
+            ..accounts::User::default()
+        };
+        let users = [ada.clone()];
+        assert_eq!(
+            typed_user("  ada \n", &users),
+            Some(("ada".into(), Some(ada)))
+        );
+        assert_eq!(typed_user("dave", &users), Some(("dave".into(), None)));
+        assert_eq!(typed_user("Ada", &users), Some(("Ada".into(), None)));
+        assert_eq!(typed_user("   ", &users), None);
+        assert_eq!(typed_user("", &users), None);
+    }
+
+    #[test]
+    fn only_session_opened_starts_a_session_after_verification() {
+        let service = conversation::PASSWORD_SERVICE.to_owned();
+        let opened = Signal::SessionOpened {
+            service: service.clone(),
+            session_id: "c42".into(),
+        };
+        assert_eq!(session_to_start(&opened), Some("gdm-password"));
+        for signal in [
+            Signal::VerificationComplete {
+                service: service.clone(),
+            },
+            Signal::ConversationStarted {
+                service: service.clone(),
+            },
+            Signal::DefaultSessionNameChanged {
+                session: "tuna".into(),
+            },
+            Signal::Reset,
+        ] {
+            assert_eq!(session_to_start(&signal), None, "{signal:?}");
+        }
+        // The conversation completes on VerificationComplete; SessionOpened
+        // is no input of the prompt's machine.
+        let host = Conversations::new(3);
+        host.set_user(Some("ada".into()));
+        let request =
+            tuna_auth_prompt::Host::begin(&host, tuna_shell_control::AuthService::Password)
+                .unwrap();
+        assert_eq!(
+            host.on_signal(&Signal::VerificationComplete { service }),
+            vec![Input::Result {
+                request,
+                applied: true
+            }]
+        );
+        assert_eq!(host.on_signal(&opened), Vec::new());
+        let (interface, method, args) = Call::StartSessionWhenReady {
+            service: "gdm-password".into(),
+        }
+        .wire();
+        assert_eq!((interface, method), (gdm::GREETER, "StartSessionWhenReady"));
+        assert_eq!(args, ("gdm-password", true).to_variant());
+    }
+
+    #[test]
+    fn version_is_asked_anywhere_and_normalized() {
+        let args = |list: &[&str]| list.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+        let expected = format!("tuna-greeter {}", release_version());
+        assert_eq!(
+            version_line(args(&["tuna-greeter", "--version"]).into_iter()),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            version_line(args(&["tuna-greeter", "x", "-V"]).into_iter()),
+            Some(expected)
+        );
+        assert_eq!(version_line(args(&["tuna-greeter"]).into_iter()), None);
+        assert_eq!(
+            version_line(args(&["tuna-greeter", "--versions"]).into_iter()),
+            None
+        );
+        assert_eq!(normalize_version(Some("v51.2.0"), "0.1.0"), "51.2.0");
+        assert_eq!(normalize_version(Some("51.2.0"), "0.1.0"), "51.2.0");
+        assert_eq!(normalize_version(Some(""), "0.1.0"), "0.1.0");
+        assert_eq!(normalize_version(None, "0.1.0"), "0.1.0");
+    }
 }

@@ -217,8 +217,10 @@ logind) → fade out → `StartSessionWhenReady(service, true)`.
   supervised client is `tuna-greeter` (`TUNA_GREETER_BIN`, sibling, `PATH`)
   with the shell's restart budget; when the budget runs out the compositor
   exits non-zero so GDM's own greeter recovery restarts the login screen.
-  No lock (idle, suspend and logind `Lock` are ignored, as the `gdm` mode has
-  no shield), no overview or hot corner, no shell swipes, no startup
+  No lock (idle, suspend and logind `Lock` are ignored: GDM's greeter dconf
+  profile sets `org.gnome.desktop.lockdown disable-lock-screen`, so GNOME
+  Shell's shield never locks the login screen), no overview or hot corner
+  (`gdm` mode's `hasOverview`), no shell swipes, no startup
   overview, no user-settings upgrade. On DRM it imports `WAYLAND_DISPLAY` to
   systemd and D-Bus activation but starts no `tuna-session.target`, holds
   no leader FIFO and does not register with GDM: gnome-session leads, and
@@ -246,12 +248,18 @@ GDM's daemon and AccountsService are `scripts/lib/tuna-gdm-mock.py` on a
 private system bus, serving the API above with GDM 51.1.1's signal order and
 failure text. Users are chosen and passwords typed with real X11 keys, and
 the result is read back through AT-SPI, the mock's call log and the
-compositor's state; `A-1-user-list.png` and `C-1-prompt.png` are the review
-shots against GNOME 51's login dialog. Gates: `G-GREETER-READY`,
-`-USER-LIST`, `-NO-SHELL`, `-NOT-LISTED`, `-GIVE-UP`, `-SESSION`,
-`-WRONG-PASSWORD`, `-PASSWORD`, `-START`, `-SUPERVISION`, `-HYGIENE`.
-Nested only: no real GDM, PAM, gnome-session or DRM. The journey CI job runs
-the same proof against the installed `.deb`'s own binaries
+compositor's state; `A-1-user-list.png`, `C-1-prompt.png` and
+`P-1-policy.png` are the review shots against GNOME 51's login dialog.
+Gates: `G-GREETER-READY`, `-USER-LIST`, `-NO-SHELL`, `-NOT-LISTED`,
+`-GIVE-UP`, `-SESSION`, `-WRONG-PASSWORD`, `-PASSWORD`, `-START`,
+`-SUPERVISION`, `-HYGIENE`. A second login screen on the same mock then
+runs with GDM 51.1.1's `org.gnome.login-screen` schema
+(`scripts/lib/org.gnome.login-screen.gschema.xml`, keyfile backend) and
+`TUNA_SESSION_KIND=hardware`, and the mock's control interface
+(`org.tuna.Proof.GdmMock`) adds and deletes users and closes GDM's
+channels: `G-GREETER-POLICY`, `-CAPS-LOCK`, `-POWER-MENU`, `-LIVE-USERS`,
+`-RECONNECT`. Nested only: no real GDM, PAM, gnome-session or DRM. The
+journey CI job runs the same proof against the installed `.deb`'s own binaries
 (`TUNA_PROOF_BIN_DIR=/usr/bin`, artifacts under `journey-artifacts/greeter`),
 and the parity ledger requires both runs' gates to pass.
 `scripts/check-deb-clean-install` (journey; unit suite
@@ -286,8 +294,9 @@ is installed at GDM's `/etc/systemd/user` path.
   spent: the compositor exits non-zero, the unit fails, gnome-session shuts
   down, GDM sees the greeter session end and restarts the display (GDM's
   own limits apply; text consoles remain).
-- GDM channel closed: every owed result is denied, the prompt resets, and
-  the greeter reconnects every second.
+- GDM channel closed: the greeter asks for a new channel at once, then
+  every second until it gets one; the begin owed a result is denied and the
+  prompt begins again on the new channel (`G-GREETER-RECONNECT`).
 - Login: `VerificationComplete` → `SessionOpened` →
   `StartSessionWhenReady`; GDM starts the user session and stops the greeter
   session (SIGTERM to its process group).
@@ -296,19 +305,21 @@ is installed at GDM's `/etc/systemd/user` path.
 
 | Area | GDM 51 | Tuna greeter now | Gate |
 |---|---|---|---|
-| User list from AccountsService, filtered like `UserList.addUser` | yes | yes (live add/remove) | G-GREETER-USER-LIST |
+| User list from AccountsService, filtered like `UserList.addUser`, with avatars | yes | yes (`IconFile` avatars, live add/remove) | G-GREETER-USER-LIST, G-GREETER-LIVE-USERS; cargo: `a_readable_avatar_file_is_the_users_image`, `only_added_and_deleted_users_change_the_list` |
 | Password through `gdm-password`, GNOME's prompt and messages | yes | yes (shared AuthPrompt machine) | G-GREETER-PASSWORD; cargo: `conversation::tests::*`, `gdm::tests::*` |
-| Wrong password: GDM's problem shown, retry, `allowed-failures` back to the list | yes | yes | G-GREETER-WRONG-PASSWORD, G-GREETER-GIVE-UP; cargo: `a_host_done_trying_gives_up_once_the_problem_is_read`, `failure_then_stop_is_one_denied_result_and_counts` |
-| "Not listed?" username entry | yes | yes | G-GREETER-NOT-LISTED |
+| Wrong password: GDM's problem shown, retry, `allowed-failures` back to the list | yes | yes | G-GREETER-WRONG-PASSWORD, G-GREETER-GIVE-UP, G-GREETER-POLICY; cargo: `a_host_done_trying_gives_up_once_the_problem_is_read`, `failure_then_stop_is_one_denied_result_and_counts` |
+| "Not listed?" username entry | yes | yes | G-GREETER-NOT-LISTED; cargo: `a_typed_username_is_trimmed_and_matched_to_the_list` |
+| Caps-lock warning under a secret question ("Caps lock is on") | yes | yes | G-GREETER-CAPS-LOCK; cargo: `the_caps_lock_warning_belongs_to_secret_questions` |
 | Session type in Login Options, `DefaultSessionNameChanged` | yes | yes (re-selected after GDM resets) | G-GREETER-SESSION; cargo: `sessions::tests::*` |
-| `StartSessionWhenReady` after `SessionOpened` | yes | yes | G-GREETER-START |
-| No overview, lock or panel layers; greeter supervised | yes (`gdm` mode) | yes | G-GREETER-NO-SHELL, G-GREETER-SUPERVISION |
-| Register session/display with GDM | yes | yes | G-GREETER-READY (mock GDM); V-GDM-LOGIN once packaged |
-| Banner, logo, `disable-user-list`, `disable-restart-buttons` | yes | read when the schema is installed | none yet |
+| `StartSessionWhenReady` after `SessionOpened` | yes | yes (at once: GNOME's `AuthPrompt.finish` waits for queued messages first) | G-GREETER-START; cargo: `only_session_opened_starts_a_session_after_verification` |
+| GDM's channel closes: reconnect, owed results denied | yes | yes | G-GREETER-RECONNECT; cargo: `wire_failures_and_disconnects_deny_what_is_owed` |
+| No overview, lock or panel layers; greeter supervised | yes (`gdm` mode) | yes | G-GREETER-NO-SHELL, G-GREETER-SUPERVISION; cargo: `the_login_screen_never_locks_and_has_no_overview`, `ready_is_sent_once_when_the_greeter_first_maps`, `greeter_flag_makes_a_login_screen_session`, `help_documents_greeter_mode`, `a_spent_greeter_budget_fails_the_unit` |
+| Register session/display with GDM | yes | yes (the greeter; the compositor only publishes the display) | G-GREETER-READY (mock GDM); cargo: `the_greeter_publishes_only_its_display`; V-GDM-LOGIN once packaged |
+| Banner, logo, `disable-user-list`, `disable-restart-buttons` | yes | yes, read at start (banner text only, not `banner-message-source=file`) | G-GREETER-POLICY, G-GREETER-POWER-MENU; cargo: `login_screen_keys_make_the_policy`, `banner_needs_enable_and_text_and_failures_allow_one_try` |
 | Wiggle, fades | yes | no | — |
 | Fingerprint (re-auth only in 51), smartcard, switchable auth, ChoiceList, CustomJSON web login | yes | no | #1164 |
 | Accessibility menu, Orca, OSK, input sources before login | yes | AT-SPI tree only | #1164 |
-| Quick settings (power, volume, network) | yes | power actions on hardware only | — |
+| Quick settings (power, volume, network) | yes | power actions (Suspend, Restart…, Power Off… straight to logind) on hardware only | G-GREETER-POWER-MENU; cargo: `power_actions_need_hardware_and_restart_buttons` |
 | Timed/auto login, conflicting session dialog, realmd hint | yes | no | — |
 | Translations | yes | no | — |
 | Greeter on every variant, `org.gnome.Shell@gdm.service` gone | — | both packages ship it inactive beside the compositor; the VM lane's tunaOS layer enables it | `check-deb-clean-install` (journey), arch-package installed smoke, journey's installed-package greeter proof, V-GREETER-TUNA; V-GREETER-LIST, V-GDM-LOGIN, V-GDM-FALLBACK |

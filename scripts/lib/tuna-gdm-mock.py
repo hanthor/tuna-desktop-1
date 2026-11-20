@@ -22,6 +22,21 @@ and AccountsService's (data/org.freedesktop.Accounts{,.User}.xml):
       Greeter: SelectSession(s), StartSessionWhenReady(s, b)
   /org/freedesktop/Accounts  ListCachedUsers() -> ao; users' properties
 
+The login screen's power menu calls logind (on hardware):
+
+  org.freedesktop.login1 /org/freedesktop/login1 (Manager): CanSuspend,
+      CanReboot, CanPowerOff -> 'yes'; Suspend(b), Reboot(b), PowerOff(b)
+      recorded and otherwise ignored
+
+The proof's hand on GDM and AccountsService:
+
+  /org/tuna/Proof/GdmMock  org.tuna.Proof.GdmMock
+      AddUser(s name, s real_name, t uid)  a listed user; UserAdded
+      DeleteUser(s name)                   UserDeleted, the object goes
+      CloseGreeterChannels()               GDM closes every greeter channel
+
+A user's "icon" in FILE.json is relative to that file's directory.
+
 The gdm-password conversation is pam_unix's through GDM's worker:
 BeginVerificationForUser emits ConversationStarted, completes, then
 DefaultLanguageNameChanged/DefaultSessionNameChanged (the user's saved
@@ -61,6 +76,11 @@ ACCOUNTS_NAME = "org.freedesktop.Accounts"
 ACCOUNTS_PATH = "/org/freedesktop/Accounts"
 ACCOUNTS_IFACE = "org.freedesktop.Accounts"
 USER_IFACE = "org.freedesktop.Accounts.User"
+LOGIND_NAME = "org.freedesktop.login1"
+LOGIND_PATH = "/org/freedesktop/login1"
+LOGIND_MANAGER = "org.freedesktop.login1.Manager"
+CONTROL_PATH = "/org/tuna/Proof/GdmMock"
+CONTROL_IFACE = "org.tuna.Proof.GdmMock"
 PAM_PROMPT = "Password: "
 # gdm-session-worker.c get_friendly_error_message for gdm-password.
 PASSWORD_FAILED = "Sorry, password authentication didn’t work. Please try again."
@@ -152,6 +172,33 @@ ACCOUNTS_XML = f"""
     <property name="Locked" type="b" access="read"/>
     <property name="XSession" type="s" access="read"/>
     <property name="Session" type="s" access="read"/>
+  </interface>
+</node>
+"""
+
+# The power half of logind's Manager (the greeter's quick settings).
+LOGIND_POWER_XML = f"""
+<node>
+  <interface name="{LOGIND_MANAGER}">
+    <method name="CanSuspend"><arg name="result" direction="out" type="s"/></method>
+    <method name="CanReboot"><arg name="result" direction="out" type="s"/></method>
+    <method name="CanPowerOff"><arg name="result" direction="out" type="s"/></method>
+    <method name="Suspend"><arg name="interactive" direction="in" type="b"/></method>
+    <method name="Reboot"><arg name="interactive" direction="in" type="b"/></method>
+    <method name="PowerOff"><arg name="interactive" direction="in" type="b"/></method>
+  </interface>
+</node>
+"""
+
+CONTROL_XML = f"""
+<node>
+  <interface name="{CONTROL_IFACE}">
+    <method name="AddUser">
+      <arg name="name" direction="in" type="s"/><arg name="real_name" direction="in" type="s"/>
+      <arg name="uid" direction="in" type="t"/>
+    </method>
+    <method name="DeleteUser"><arg name="name" direction="in" type="s"/></method>
+    <method name="CloseGreeterChannels"/>
   </interface>
 </node>
 """
@@ -306,6 +353,31 @@ class Peer:
         self.conversations.clear()
 
 
+class LogindPower:
+    """logind's power actions: always available, recorded, never taken."""
+
+    AVAILABILITY = {"CanSuspend", "CanReboot", "CanPowerOff"}
+    ACTIONS = {"Suspend", "Reboot", "PowerOff"}
+
+    def __init__(self, mock):
+        self.mock = mock
+        self.node = Gio.DBusNodeInfo.new_for_xml(LOGIND_POWER_XML)
+
+    def handle(self, _iface, member, args):
+        if member in self.AVAILABILITY:
+            return GLib.Variant("(s)", ("yes",))
+        if member in self.ACTIONS:
+            return {"interactive": bool(args[0])}
+        raise Refused("org.freedesktop.DBus.Error.UnknownMethod", member)
+
+    def export(self, bus):
+        bus.register_object(
+            LOGIND_PATH, self.node.lookup_interface(LOGIND_MANAGER),
+            lambda _c, sender, _p, iface, member, params, inv:
+                self.mock.dispatch(sender, iface, member, params, inv, self.handle),
+            None, None)
+
+
 class Mock:
     def __init__(self, bus, log, users, secrets, sessions, fallback, server_dir):
         self.bus = bus
@@ -319,6 +391,9 @@ class Mock:
         self.manager_node = Gio.DBusNodeInfo.new_for_xml(MANAGER_XML)
         self.session_node = Gio.DBusNodeInfo.new_for_xml(SESSION_XML)
         self.accounts_node = Gio.DBusNodeInfo.new_for_xml(ACCOUNTS_XML)
+        self.control_node = Gio.DBusNodeInfo.new_for_xml(CONTROL_XML)
+        # user object path -> its registration on the bus
+        self.user_objects = {}
         observer = Gio.DBusAuthObserver()
         observer.connect("allow-mechanism", lambda _o, mech: mech == "EXTERNAL")
         observer.connect("authorize-authenticated-peer", self.authorize_peer)
@@ -401,6 +476,46 @@ class Mock:
     def user_path(self, entry):
         return f"{ACCOUNTS_PATH}/User{entry['uid']}"
 
+    def control_call(self, _c, sender, _path, iface, member, params, inv):
+        def handle(_iface, member, args):
+            if member == "AddUser":
+                name, real_name, uid = args
+                if any(u["name"] == name or u["uid"] == uid for u in self.users):
+                    raise Refused("org.freedesktop.Accounts.Error.UserExists", name)
+                entry = {"name": name, "real_name": real_name, "uid": uid}
+                self.users.append(entry)
+                self.export_user(entry)
+                self.accounts_signal("UserAdded", self.user_path(entry))
+            elif member == "DeleteUser":
+                (name,) = args
+                entry = next((u for u in self.users if u["name"] == name), None)
+                if entry is None:
+                    raise Refused("org.freedesktop.Accounts.Error.UserDoesNotExist", name)
+                self.users.remove(entry)
+                path = self.user_path(entry)
+                self.bus.unregister_object(self.user_objects.pop(path))
+                self.accounts_signal("UserDeleted", path)
+            elif member == "CloseGreeterChannels":
+                # GDM restarts its session server (gdm-session.c dropping
+                # the greeter's connection): every channel closes.
+                for peer in self.peers:
+                    if not peer.conn.is_closed():
+                        peer.conn.close(None, None, None)
+            else:
+                raise Refused("org.freedesktop.DBus.Error.UnknownMethod", member)
+            return None
+        self.dispatch(sender, iface, member, params, inv, handle)
+
+    def accounts_signal(self, member, path):
+        self.bus.emit_signal(None, ACCOUNTS_PATH, ACCOUNTS_IFACE, member,
+                             GLib.Variant("(o)", (path,)))
+        self.log.record(kind="signal", interface=ACCOUNTS_IFACE, member=member, args=[path])
+
+    def export_user(self, entry):
+        path = self.user_path(entry)
+        self.user_objects[path] = self.bus.register_object(
+            path, self.accounts_node.lookup_interface(USER_IFACE), None, self.user_property, None)
+
     def accounts_call(self, _c, sender, path, iface, member, params, inv):
         def handle(_iface, member, args):
             if member == "ListCachedUsers":
@@ -432,11 +547,12 @@ class Mock:
                                  self.manager_call, self.manager_property, None)
         self.bus.register_object(ACCOUNTS_PATH, self.accounts_node.lookup_interface(ACCOUNTS_IFACE),
                                  self.accounts_call, None, None)
+        self.bus.register_object(CONTROL_PATH, self.control_node.lookup_interface(CONTROL_IFACE),
+                                 self.control_call, None, None)
         for entry in self.users:
-            self.bus.register_object(self.user_path(entry),
-                                     self.accounts_node.lookup_interface(USER_IFACE),
-                                     None, self.user_property, None)
-        for name in (GDM_NAME, ACCOUNTS_NAME):
+            self.export_user(entry)
+        LogindPower(self).export(self.bus)
+        for name in (GDM_NAME, ACCOUNTS_NAME, LOGIND_NAME):
             reply = self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus",
                                        "org.freedesktop.DBus", "RequestName",
                                        GLib.Variant("(su)", (name, 4)),  # DO_NOT_QUEUE
@@ -462,6 +578,9 @@ def main():
 
     with open(args.users, encoding="utf-8") as stream:
         users = json.load(stream)
+    for entry in users:
+        if entry.get("icon"):
+            entry["icon"] = os.path.join(os.path.dirname(os.path.abspath(args.users)), entry["icon"])
     secrets = {}
     with open(args.secrets, encoding="utf-8") as stream:
         for line in stream:
