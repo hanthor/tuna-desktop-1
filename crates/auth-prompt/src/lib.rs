@@ -4,8 +4,8 @@
 //! unlock dialog and GDM's login dialog.
 //!
 //! Something else runs the conversations (GDM's role: on the lock screen
-//! the compositor's PAM conversation for the password service and fprintd
-//! for the fingerprint service; on the login screen GDM's own
+//! the compositor's PAM conversations, the fingerprint service's through
+//! `pam_fprintd` on `tuna-lock-fingerprint`; on the login screen GDM's own
 //! `UserVerifier`); this machine is GNOME Shell's side of them, combining:
 //!
 //! - `AuthPrompt` (<https://gitlab.gnome.org/GNOME/gnome-shell/-/blob/51.0/js/gdm/authPrompt.js>):
