@@ -1,6 +1,6 @@
 name: Ratchet
 
-# Counted metrics held at a budget that only goes down: unsafe, .unwrap(), #[allow], #[ignore] and shellcheck disables.
+# Counted metrics held at a budget that only goes down: unsafe, .unwrap(), #[allow], #[ignore] and ShellCheck suppressions.
 # Budgets and patterns live in .ratchet.toml; the checker is the shared
 # count-ratchet action in tuna-os/.github, so the rules cannot drift between
 # repos.
