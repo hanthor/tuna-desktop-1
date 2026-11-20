@@ -1083,8 +1083,13 @@ impl OverviewUi {
             // resizes through a compositor round trip. Sample only once
             // that size has held for a tick, or the monitor-centered
             // origin below is computed from a stale width.
+            // A size that merely held for a tick can still be the stale
+            // one while the compositor's configure is in flight, so also
+            // require the width `fit_dash` asked for.
             let size = (dash.width(), dash.height());
-            if last_size.replace(size) != size && attempt < 30 {
+            let wanted = me.dash_scroll.min_content_width();
+            let settled = last_size.replace(size) == size && size.0 == wanted;
+            if !settled && attempt < 30 {
                 return gtk::glib::ControlFlow::Continue;
             }
             let monitor = dash.surface().and_then(|surface| {
