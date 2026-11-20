@@ -423,6 +423,18 @@ dump() {
 }
 showing() { jq -e --arg n "$2" 'any(.[]; .name == $n and .showing)' "$ARTIFACTS/a11y-$1.json" >/dev/null; }
 hidden() { ! showing "$@"; }
+# shown_within DUMP TEXT SECONDS: dump until TEXT is showing, from now. GDM's
+# problem message stays up for about three seconds before a retry clears it,
+# and one dump started half a second late can miss it on a loaded host.
+shown_within() {
+    sw_end=$(($(date +%s%N) / 1000000 + $3 * 1000))
+    while :; do
+        dump "$1"
+        showing "$1" "$2" && return 0
+        [ "$(($(date +%s%N) / 1000000))" -ge "$sw_end" ] && return 1
+        sleep 0.1
+    done
+}
 role_of() {
     jq -r --arg n "$2" 'first(.[] | select(.name == $n and .showing and .role != "label")) | .role' \
         "$ARTIFACTS/a11y-$1.json"
@@ -811,9 +823,8 @@ for try in 1 2 3; do
     gwait "$gq" "$(call AnswerQuery '.detail.matches_password == false and .detail.user == "katherine"')" 10 ||
         fail G-GREETER-GIVE-UP "wrong answer $try did not reach AnswerQuery"
     gwait "$gq" "$(sig VerificationFailed)" 10 || fail G-GREETER-GIVE-UP "GDM did not fail answer $try"
-    sleep 0.5
-    dump "D-$try-problem"
-    showing "D-$try-problem" "$GDM_FAILED" || fail G-GREETER-GIVE-UP "GDM's problem is not shown after try $try"
+    shown_within "D-$try-problem" "$GDM_FAILED" 3 ||
+        fail G-GREETER-GIVE-UP "GDM's problem is not shown after try $try"
     [ "$try" = 1 ] && shot D-1-problem
 done
 twait "$m" "greeter give-up" 20 >/dev/null || fail G-GREETER-GIVE-UP "the greeter did not give up after three failures"
@@ -879,10 +890,8 @@ gwait "$gw" "$(call AnswerQuery '.detail.matches_password == false and .detail.u
     fail G-GREETER-WRONG-PASSWORD "the wrong answer did not reach AnswerQuery"
 gwait "$gw" "$(sig Problem "(.args == [\"gdm-password\", \"$GDM_FAILED\"])")" 10 ||
     fail G-GREETER-WRONG-PASSWORD "GDM's problem was not sent"
-sleep 0.5
-dump C-5-wrong-password
+shown_within C-5-wrong-password "$GDM_FAILED" 3 || fail G-GREETER-WRONG-PASSWORD "GDM's problem is not shown"
 shot C-2-wrong-password
-showing C-5-wrong-password "$GDM_FAILED" || fail G-GREETER-WRONG-PASSWORD "GDM's problem is not shown"
 await_password_prompt "$gw" C-6-retry
 gwait "$gw" "$(call BeginVerificationForUser '.args == ["gdm-password", "ada"] and .outcome == "ok"')" 5 ||
     fail G-GREETER-WRONG-PASSWORD "gdm-password did not begin again for ada after the failure"
