@@ -1141,6 +1141,11 @@ jobs:
           sudo apt-get install -y gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0
           cargo build --locked -p tuna-compositor --bin tuna-compositor --example tuna-color-pixel-client --example tuna-color-cast-client
           /usr/bin/python3 scripts/tuna-color-capture-proof --compositor target/debug/tuna-compositor --color-client target/debug/examples/tuna-color-pixel-client --artifacts gtk-shell-artifacts/colour
+      # D-COLOR-ICC / D-COLOR-FEEDBACK: an ICC matrix-shaper description and
+      # the surface feedback's preferred description, from a real client.
+      - name: Prove ICC descriptions and surface feedback on real capture consumers
+        if: ${{ !cancelled() }}
+        run: /usr/bin/python3 scripts/tuna-color-capture-proof --mode icc --compositor target/debug/tuna-compositor --color-client target/debug/examples/tuna-color-pixel-client --artifacts gtk-shell-artifacts/colour-icc
       # Closed windows must free their surfaces and textures (#1088): 100
       # libadwaita windows leave the compositor within a fixed bound.
       - name: Closed windows leave no memory behind
@@ -2312,6 +2317,7 @@ jobs:
           --assertions ledger-in/gtk-shell/osk/assertions.txt
           --assertions ledger-in/gtk-shell/lock-auth/assertions.txt
           --assertions ledger-in/gtk-shell/colour/assertions.txt
+          --assertions ledger-in/gtk-shell/colour-icc/assertions.txt
           --assertions ledger-in/orca-speech/assertions.txt
           --assertions ledger-in/drm-smoke/assertions.txt
           --assertions ledger-in/marlin-vm/assertions.txt

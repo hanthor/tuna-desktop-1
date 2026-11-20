@@ -15,11 +15,19 @@
 //! `--sdr` tags the same code as BT.709/gamma 2.2; `--unmanaged`
 //! creates no colour-management surface object. Both are live capture
 //! controls whose expected pixels stay equal to the original code.
+//! `--icc` tags the code with an ICC matrix-shaper profile (BT.2020
+//! primaries, gamma 2.2) through wp_image_description_creator_icc_v1,
+//! whose expected pixels follow that profile's transform, and prints
+//! `PREFERRED <primaries> <tf>` from the surface feedback's preferred
+//! description before readiness.
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::fd::AsFd;
 
-use tuna_compositor::color_state::{self, ColorState, Colorspace, Params, TransferFunction};
+use tuna_compositor::color_state::{
+    self, ColorState, Colorspace, Icc, Kind, Params, TransferFunction,
+};
+use tuna_compositor::icc;
 use wayland_client::{
     protocol::{
         wl_buffer::WlBuffer,
@@ -33,9 +41,12 @@ use wayland_client::{
     Connection, Dispatch, QueueHandle,
 };
 use wayland_protocols::wp::color_management::v1::client::{
+    wp_color_management_surface_feedback_v1::WpColorManagementSurfaceFeedbackV1,
     wp_color_management_surface_v1::WpColorManagementSurfaceV1,
     wp_color_manager_v1::{self as manager, WpColorManagerV1},
+    wp_image_description_creator_icc_v1::WpImageDescriptionCreatorIccV1,
     wp_image_description_creator_params_v1::WpImageDescriptionCreatorParamsV1,
+    wp_image_description_info_v1::{self as info, WpImageDescriptionInfoV1},
     wp_image_description_v1::{self as image_desc, WpImageDescriptionV1},
 };
 use wayland_protocols::xdg::shell::client::{
@@ -54,7 +65,15 @@ struct Client {
     configured: bool,
     described: Option<Result<(), String>>,
     presented: Option<u32>,
+    /// The surface feedback's preferred description: ready or failed.
+    preferred: Option<Result<(), String>>,
+    /// Its information: (named primaries, named transfer function).
+    preferred_named: (Option<String>, Option<String>),
+    preferred_done: bool,
 }
+
+/// User data of the surface feedback's preferred description.
+struct Preferred;
 
 impl Client {
     fn bind<I: wayland_client::Proxy + 'static>(
@@ -173,6 +192,45 @@ impl Dispatch<WlCallback, ()> for Client {
     }
 }
 
+impl Dispatch<WpImageDescriptionV1, Preferred> for Client {
+    fn event(
+        state: &mut Self,
+        _: &WpImageDescriptionV1,
+        event: image_desc::Event,
+        _: &Preferred,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            image_desc::Event::Ready { .. } | image_desc::Event::Ready2 { .. } => {
+                state.preferred = Some(Ok(()))
+            }
+            image_desc::Event::Failed { msg, .. } => state.preferred = Some(Err(msg)),
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WpImageDescriptionInfoV1, ()> for Client {
+    fn event(
+        state: &mut Self,
+        _: &WpImageDescriptionInfoV1,
+        event: info::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            info::Event::PrimariesNamed { primaries } => {
+                state.preferred_named.0 = Some(format!("{primaries:?}"))
+            }
+            info::Event::TfNamed { tf } => state.preferred_named.1 = Some(format!("{tf:?}")),
+            info::Event::Done => state.preferred_done = true,
+            _ => {}
+        }
+    }
+}
+
 wayland_client::delegate_noop!(Client: ignore WlCompositor);
 wayland_client::delegate_noop!(Client: ignore WlSurface);
 wayland_client::delegate_noop!(Client: ignore WlShm);
@@ -181,33 +239,71 @@ wayland_client::delegate_noop!(Client: ignore WlBuffer);
 wayland_client::delegate_noop!(Client: ignore WpColorManagerV1);
 wayland_client::delegate_noop!(Client: ignore WpColorManagementSurfaceV1);
 wayland_client::delegate_noop!(Client: ignore WpImageDescriptionCreatorParamsV1);
+wayland_client::delegate_noop!(Client: ignore WpImageDescriptionCreatorIccV1);
+wayland_client::delegate_noop!(Client: ignore WpColorManagementSurfaceFeedbackV1);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Source {
     Pq,
     Sdr,
     Unmanaged,
+    Icc,
+}
+
+/// The `--icc` profile: a matrix-shaper RGB profile with BT.2020
+/// primaries, D65 white and a gamma 2.2 curve, as lcms2/colord write one.
+fn icc_profile() -> Vec<u8> {
+    let space = Colorspace::Bt2020.primaries();
+    icc::DisplayProfile {
+        description: "Tuna colour proof BT.2020 gamma 2.2".to_owned(),
+        copyright: None,
+        manufacturer: None,
+        model: None,
+        primaries: [space.r, space.g, space.b]
+            .map(|[x, y]| icc::Xy::new(f64::from(x), f64::from(y))),
+        white: icc::D65,
+        trc: icc::Trc::Gamma(2.2),
+        vcgt: None,
+        metadata: Vec::new(),
+    }
+    .encode()
+    .expect("encodable ICC profile")
+}
+
+/// The colour state the client tags its pixels with; `None` when they
+/// already are the SDR output's (or untagged).
+fn source_state(source: Source) -> Option<std::sync::Arc<ColorState>> {
+    match source {
+        Source::Pq => Some(ColorState::params(Params::named(
+            Colorspace::Bt2020,
+            TransferFunction::Pq,
+        ))),
+        Source::Icc => Some(ColorState::new(Kind::Icc(
+            Icc::parse(&icc_profile()).expect("the proof profile parses"),
+        ))),
+        Source::Sdr | Source::Unmanaged => None,
+    }
 }
 
 /// The 8-bit capture colour for `code` in the fixed SDR target.
 fn expected(source: Source, code: [u8; 3]) -> [u8; 3] {
-    if source != Source::Pq {
+    let Some(source) = source_state(source) else {
         return code;
-    }
-    let source = ColorState::params(Params::named(Colorspace::Bt2020, TransferFunction::Pq));
+    };
     let output = ColorState::params(color_state::output_params());
-    let transform = color_state::transform(&source, &output).expect("PQ needs a transform");
+    let transform =
+        color_state::transform(&source, &output).expect("a wide-gamut source needs a transform");
     let [r, g, b] = code.map(|v| f32::from(v) / 255.0);
     let out = transform.apply([r, g, b, 1.0]);
     [out[0], out[1], out[2]].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
 }
 
 fn expected_hdr(source: Source, code: [u8; 3]) -> [u32; 3] {
-    let input = ColorState::params(if source == Source::Pq {
-        color_state::hdr_output_params()
-    } else {
-        color_state::default_params()
-    });
+    let input = match source {
+        Source::Pq => ColorState::params(color_state::hdr_output_params()),
+        Source::Icc => source_state(source).expect("an ICC source state"),
+        Source::Sdr | Source::Unmanaged => ColorState::params(color_state::default_params()),
+    };
     let target = ColorState::params(color_state::hdr_output_params());
     let [r, g, b] = code.map(|v| f32::from(v) / 255.0);
     let pixel = [r, g, b, 1.0];
@@ -275,12 +371,16 @@ fn main() {
             source = Source::Sdr;
         } else if option == "--unmanaged" {
             source = Source::Unmanaged;
+        } else if option == "--icc" {
+            source = Source::Icc;
         } else if option == "--highlight" {
             code = [192, 192, 192];
         } else if option == "--white" {
             code = [255, 255, 255];
         } else {
-            panic!("expected --sdr, --unmanaged, --highlight, --white or --check-screenshot PATH");
+            panic!(
+                "expected --sdr, --unmanaged, --icc, --highlight, --white or --check-screenshot PATH"
+            );
         }
     }
     if let Some(path) = screenshot {
@@ -300,22 +400,36 @@ fn main() {
     let shm: WlShm = client.bind(&registry, &qh, 1);
     let cm: WpColorManagerV1 = client.bind(&registry, &qh, 2);
 
-    let description = if source == Source::Unmanaged {
-        client.described = Some(Ok(()));
-        None
-    } else {
-        let creator = cm.create_parametric_creator(&qh, ());
-        let (primaries, tf) = if source == Source::Pq {
-            (
-                manager::Primaries::Bt2020,
-                manager::TransferFunction::St2084Pq,
-            )
-        } else {
-            (manager::Primaries::Srgb, manager::TransferFunction::Gamma22)
-        };
-        creator.set_primaries_named(primaries);
-        creator.set_tf_named(tf);
-        Some(creator.create(&qh, ()))
+    // The ICC file stays open until the description is ready or failed.
+    let mut icc_file = None;
+    let description = match source {
+        Source::Unmanaged => {
+            client.described = Some(Ok(()));
+            None
+        }
+        Source::Icc => {
+            let profile = icc_profile();
+            let mut file = tempfile::tempfile().unwrap();
+            file.write_all(&profile).unwrap();
+            let creator = cm.create_icc_creator(&qh, ());
+            creator.set_icc_file(file.as_fd(), 0, profile.len() as u32);
+            icc_file = Some(file);
+            Some(creator.create(&qh, ()))
+        }
+        Source::Pq | Source::Sdr => {
+            let creator = cm.create_parametric_creator(&qh, ());
+            let (primaries, tf) = if source == Source::Pq {
+                (
+                    manager::Primaries::Bt2020,
+                    manager::TransferFunction::St2084Pq,
+                )
+            } else {
+                (manager::Primaries::Srgb, manager::TransferFunction::Gamma22)
+            };
+            creator.set_primaries_named(primaries);
+            creator.set_tf_named(tf);
+            Some(creator.create(&qh, ()))
+        }
     };
 
     let surface = compositor.create_surface(&qh, ());
@@ -333,6 +447,29 @@ fn main() {
     }
     if let Some(Err(message)) = &client.described {
         panic!("image description failed: {message}");
+    }
+    drop(icc_file);
+    if source == Source::Icc {
+        // What the compositor prefers for this surface: the description
+        // of the output it is on (Mutter's surface feedback).
+        let feedback = cm.get_surface_feedback(&surface, &qh, ());
+        let preferred = feedback.get_preferred(&qh, Preferred);
+        while client.preferred.is_none() {
+            queue.blocking_dispatch(&mut client).unwrap();
+        }
+        if let Some(Err(message)) = &client.preferred {
+            panic!("preferred description failed: {message}");
+        }
+        preferred.get_information(&qh, ());
+        while !client.preferred_done {
+            queue.blocking_dispatch(&mut client).unwrap();
+        }
+        let (primaries, tf) = &client.preferred_named;
+        println!(
+            "PREFERRED {} {}",
+            primaries.as_deref().unwrap_or("none"),
+            tf.as_deref().unwrap_or("none")
+        );
     }
     let (width, height) = client.size.expect("a fullscreen size");
 
@@ -425,6 +562,32 @@ mod tests {
         assert!(check_screenshot(&path, Source::Pq, CODE)
             .unwrap_err()
             .contains("must declare SDR"));
+    }
+
+    #[test]
+    fn icc_source_follows_its_profile_not_the_code() {
+        // The wide-gamut profile moves the code: an untransformed draw
+        // (or the profile ignored) fails the capture comparison.
+        let want = expected(Source::Icc, CODE);
+        assert!(
+            want.iter().zip(CODE).any(|(w, c)| w.abs_diff(c) > 4),
+            "{want:?}"
+        );
+        // A matrix-shaper ICC is the parametric description it encodes
+        // (BT.2020 primaries, gamma 2.2), as the compositor applies it.
+        let parametric =
+            ColorState::params(Params::named(Colorspace::Bt2020, TransferFunction::Gamma22));
+        let output = ColorState::params(color_state::output_params());
+        let [r, g, b] = CODE.map(|v| f32::from(v) / 255.0);
+        let out = color_state::transform(&parametric, &output)
+            .unwrap()
+            .apply([r, g, b, 1.0]);
+        let via_params =
+            [out[0], out[1], out[2]].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+        assert!(
+            want.iter().zip(via_params).all(|(w, p)| w.abs_diff(p) <= 1),
+            "{want:?} {via_params:?}"
+        );
     }
 
     #[test]

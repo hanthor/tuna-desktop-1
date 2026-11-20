@@ -16,6 +16,10 @@ gir1.2-gstreamer-1.0, gir1.2-gst-plugins-base-1.0, gstreamer1.0-pipewire,
 and a usable EGL renderer. This script does not build or install anything.
 Use --mode external-yuv with a real tuna-color-yuv-client and its DMA-heap/GPU
 prerequisites; repeat --client-arg=VALUE for its format/representation options.
+--mode icc (SDR only) tags the window with an ICC matrix-shaper description
+(wp_image_description_creator_icc_v1) and requires the surface feedback's
+preferred description to be the SDR output's sRGB/gamma 2.2; it records
+D-COLOR-ICC and D-COLOR-FEEDBACK instead of D-COLOR-CAPTURE.
 The raw cast buffers and actual negotiated SPA colour fields are retained;
 generated cast previews are only viewing aids, not producer PNG metadata evidence.
 An explicit --host-wayland-socket /absolute/socket instead nests only the
@@ -64,7 +68,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--compositor', type=Path, required=True)
 parser.add_argument('--color-client', type=Path, required=True)
 parser.add_argument('--artifacts', type=Path, required=True)
-parser.add_argument('--mode', choices=('all', 'pq', 'sdr', 'unmanaged', 'external-yuv'), default='all')
+parser.add_argument('--mode', choices=('all', 'pq', 'sdr', 'unmanaged', 'icc', 'external-yuv'), default='all')
 parser.add_argument('--client-arg', action='append', default=[])
 parser.add_argument('--backend', choices=('winit', 'drm'), default='winit')
 parser.add_argument('--hdr', action='store_true')
@@ -79,6 +83,7 @@ consumer = Path(__file__).resolve().parent / 'lib' / 'tuna-color-capture-shell.p
 assert not (args.hdr and args.expect_unsupported_hdr), 'choose HDR or unsupported-SDR qualification'
 assert not (args.hdr or args.expect_unsupported_hdr) or args.backend == 'drm', 'HDR requires a real native backend'
 assert not args.hdr or args.mode == 'all', 'HDR qualification requires highlight, SDR-white and unmanaged controls'
+assert args.mode != 'icc' or not args.expect_unsupported_hdr, 'the ICC case is an ordinary SDR qualification'
 cast_consumer = (args.cast_consumer or compositor.parent / 'examples' / 'tuna-color-cast-client').resolve()
 host_socket = args.host_wayland_socket
 if host_socket is not None:
@@ -348,7 +353,7 @@ def run_cases(prefix, hdr_active):
         name = prefix + '-' + mode if prefix else mode
         names.append(name)
         command = [str(color_client)]
-        if mode in ('sdr', 'unmanaged'):
+        if mode in ('sdr', 'unmanaged', 'icc'):
             command.append('--' + mode)
         if args.hdr and mode == 'pq':
             command.append('--highlight')
@@ -377,10 +382,15 @@ def run_cases(prefix, hdr_active):
             numbers = [int(value) for value in ready_line.split()[1:]]
             assert len(numbers) == 6 and all(0 <= value <= 255 for value in numbers), ready_line
             code, expected = numbers[:3], numbers[3:]
-            if mode == 'pq':
+            if mode in ('pq', 'icc'):
                 assert any(abs(a - b) > 4 for a, b in zip(code, expected)), numbers
             elif mode in ('sdr', 'unmanaged'):
                 assert code == expected, numbers
+            preferred = None
+            if mode == 'icc':
+                preferred = next((line for line in (art / ('client-' + name + '.log')).read_text().splitlines()
+                                  if line.startswith('PREFERRED ')), None)
+                assert preferred == 'PREFERRED Value(Srgb) Value(Gamma22)', preferred
             payload = {'id': name, 'expected': expected}
             if hdr_active:
                 hdr_line = next(line for line in (art / ('client-' + name + '.log')).read_text().splitlines()
@@ -392,6 +402,7 @@ def run_cases(prefix, hdr_active):
             evidence = request_capture(payload)
             report['cases'][name] = {
                 'ready': ready_line,
+                'preferred': preferred,
                 'client_identity': {'pid': client.pid, 'surface_protocol_id': surface_id,
                                     'executable_sha256': client_sha256},
                 'presentation_clock': {'first_ms': first, 'last_ms': last,
@@ -657,7 +668,13 @@ finally:
                          'activated_pids': [pid for pid, _ in activated],
                          'runtime_removed': not runtime.exists()}
     (art / 'receipt.json').write_text(json.dumps(report, indent=2) + '\n')
-if report['passed']:
+if report['passed'] and args.mode == 'icc':
+    (art / 'assertions.txt').write_text(
+        'D-COLOR-ICC pass ICC matrix-shaper (BT.2020, gamma 2.2) description from a real client is ready '
+        'and its transform reaches real screenshot pixels and PipeWire monitor/window/area SDR bytes\n'
+        'D-COLOR-FEEDBACK pass surface feedback preferred description of a real client is the SDR '
+        "output's sRGB/gamma 2.2\n")
+elif report['passed']:
     (art / 'assertions.txt').write_text(
         'D-COLOR-CAPTURE pass real screenshot PNG chunks/pixels and PipeWire '
         'monitor/window/area negotiated SDR bytes; controls=' + ','.join(report['cases']) + '; '

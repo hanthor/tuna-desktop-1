@@ -70,6 +70,9 @@ class Selection(unittest.TestCase):
                      "crates/compositor/src/screencast.rs",
                      "crates/compositor/src/screenshot.rs",
                      "crates/compositor/examples/tuna-color-cast-client.rs",
+                     # The D-COLOR-ICC / D-COLOR-FEEDBACK client and consumer.
+                     "crates/compositor/examples/tuna-color-pixel-client.rs",
+                     "scripts/lib/tuna-color-capture-shell.py",
                      "crates/compositor/tests/color_management.rs",
                      "scripts/tuna-color-capture-proof"):
             self.assertEqual(pr(path, size=0), ["drm-smoke", "gtk-shell", "arch-package", "marlin-vm"], path)
