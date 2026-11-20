@@ -1074,11 +1074,29 @@ jobs:
       - if: ${{ !cancelled() }}
         run: shellcheck -x scripts/tuna-osk-proof && scripts/tuna-osk-proof --artifacts gtk-shell-artifacts/osk
       # Keep runnable binaries even when a later live proof assertion fails.
+      # #1124: tuna-wallpaper-svg is built only by scripts/tuna-gtk-shell-proof
+      # and the layer-shell library is installed by the ci-tool step. After an
+      # earlier failure this copies what exists, so that earlier step stays the
+      # job's reported failure; with no earlier failure a missing file fails here.
       - if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p gtk-shell-artifacts/bin
-          cp target/debug/tuna-compositor target/debug/tuna-shell-gtk target/debug/tuna-wallpaper-svg gtk-shell-artifacts/bin/
-          cp /usr/local/lib/*/libgtk4-layer-shell.so* gtk-shell-artifacts/bin/ 2>/dev/null || cp /usr/local/lib/libgtk4-layer-shell.so* gtk-shell-artifacts/bin/
+          shopt -s nullglob
+          layer_shell=(/usr/local/lib/*/libgtk4-layer-shell.so*)
+          [ ${#layer_shell[@]} -gt 0 ] || layer_shell=(/usr/local/lib/libgtk4-layer-shell.so*)
+          [ ${#layer_shell[@]} -gt 0 ] || layer_shell=(/usr/local/lib/libgtk4-layer-shell.so)
+          missing=0
+          for file in target/debug/tuna-compositor target/debug/tuna-shell-gtk target/debug/tuna-wallpaper-svg "${layer_shell[@]}"; do
+            if [ -e "$file" ]; then
+              cp "$file" gtk-shell-artifacts/bin/
+            else
+              echo "::warning::not collected, never built or installed: $file"
+              missing=1
+            fi
+          done
+          if [ "$missing" = 1 ] && [ "$JOB_STATUS" = success ]; then exit 1; fi
       # G-WS-INSERT publishes the targeted insertion frame/state. Full
       # parity captures need native fonts, wallpapers and installed apps;
       # use the binaries uploaded as gtk-shell-binaries with that reference
