@@ -7437,12 +7437,20 @@ fn previews_to_elements(
 }
 
 /// A drag's icon at the pointer, centred on it (front to back).
-fn dnd_icon_elements(
-    renderer: &mut GlesRenderer,
+fn dnd_icon_elements<R>(
+    renderer: &mut R,
     state: &State,
     view: View,
     pointer: Point<f64, Logical>,
-) -> Vec<PreviewElement> {
+) -> Vec<
+    smithay::backend::renderer::element::utils::RescaleRenderElement<
+        WaylandSurfaceRenderElement<R>,
+    >,
+>
+where
+    R: smithay::backend::renderer::Renderer + smithay::backend::renderer::ImportAll,
+    R::TextureId: Clone + 'static,
+{
     let Some(icon) = state.dnd_icon() else {
         return Vec::new();
     };
@@ -7479,13 +7487,17 @@ fn dnd_icon_elements(
 /// accumulate bottom to top before [`crate::layer::front_to_back`]:
 /// Smithay returns a tree front to back, subsurfaces above their parent
 /// first, so appended as is a parent would cover its subsurfaces.
-fn surface_tree_bottom_to_top(
-    renderer: &mut GlesRenderer,
+fn surface_tree_bottom_to_top<R>(
+    renderer: &mut R,
     surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
     location: Point<i32, smithay::utils::Physical>,
     scale: f64,
     alpha: f32,
-) -> Vec<WaylandSurfaceRenderElement<GlesRenderer>> {
+) -> Vec<WaylandSurfaceRenderElement<R>>
+where
+    R: smithay::backend::renderer::Renderer + smithay::backend::renderer::ImportAll,
+    R::TextureId: Clone + 'static,
+{
     let mut elements = render_elements_from_surface_tree(
         renderer,
         surface,
@@ -9415,3 +9427,7 @@ mod power_save_frame_tests {
         assert_eq!(app.frames_done, 2);
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_surface_order_tests.rs"]
+mod surface_order_tests;

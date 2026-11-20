@@ -120,6 +120,18 @@ class Selection(unittest.TestCase):
         # Control: a test only the always-on check job runs adds no lane.
         self.assertEqual(pr("scripts/tests/test_disk_guard.py"), [])
 
+    def test_proof_example_clients_run_the_lane_that_runs_them(self):
+        # G-SUBSURFACE-STACKING's client runs only in the gtk-shell job's
+        # --subsurface-only slice; the check job compiles it.
+        for run in (0, 4, 19):
+            with self.subTest(run=run):
+                self.assertEqual(pr("crates/compositor/examples/tuna-subsurface-client.rs", run=run),
+                                 ["gtk-shell"])
+        # Control: the compositor code it proves still rotates lanes.
+        lanes = pr("crates/compositor/src/runtime_surface_order_tests.rs", run=3)
+        self.assertIn("gtk-shell", lanes)
+        self.assertGreater(len(lanes), 1)
+
     def test_pull_requests_never_rotate_the_push_only_image_lane(self):
         self.assertNotIn("marlin-image", m.ROTATION)
         for run in range(len(m.ROTATION)):

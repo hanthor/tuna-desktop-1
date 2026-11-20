@@ -1032,6 +1032,17 @@ jobs:
         env:
           TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
         run: scripts/tuna-gtk-shell-proof --search-leak-only --artifacts gtk-shell-artifacts/search-leak
+      # A window's subsurfaces stack where its client placed them, above
+      # and below it, on the desktop, in the overview and in the window's
+      # screenshot (G-SUBSURFACE-STACKING).
+      - name: Subsurfaces stack above and below their window
+        if: ${{ !cancelled() }}
+        timeout-minutes: 8
+        env:
+          TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
+        run: |
+          cargo build --locked -p tuna-compositor --example tuna-subsurface-client
+          scripts/tuna-gtk-shell-proof --subsurface-only --artifacts gtk-shell-artifacts/subsurface
       # Native/X11 geometry and physical input at all required virtual scales.
       - run: |
           for scale in 1 1.25 1.5 2; do
@@ -2121,6 +2132,7 @@ jobs:
           --assertions ledger-in/gtk-shell/magnifier/assertions.txt
           --assertions ledger-in/gtk-shell/session-restore/assertions.txt
           --assertions ledger-in/gtk-shell/osk/assertions.txt
+          --assertions ledger-in/gtk-shell/subsurface/assertions.txt
           --assertions ledger-in/gtk-shell/lock-auth/assertions.txt
           --assertions ledger-in/orca-speech/assertions.txt
           --assertions ledger-in/drm-smoke/assertions.txt
