@@ -1329,6 +1329,12 @@ impl OverviewUi {
                 // The settled icons are the minimize targets.
                 gtk::glib::idle_add_local_once(move || {
                     if let Some(ui) = weak.upgrade() {
+                        // The tiles measured mid-ease when the dash was
+                        // first fitted; refit so a settled tile is not
+                        // clipped out of a too-narrow dash.
+                        if let Ok(me) = ui.try_borrow() {
+                            me.fit_dash();
+                        }
                         Self::publish_dash_icons(&ui);
                     }
                 });
