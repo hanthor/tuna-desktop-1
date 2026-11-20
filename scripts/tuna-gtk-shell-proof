@@ -30,8 +30,9 @@
 #   --lock-menu-only runs panel readiness, G-LOCK-WITH-MENU-OPEN and
 #   G-SHELL-STABLE only (needs pam_wrapper).
 #   --app-menu-only runs panel readiness, G-APP-MENU, G-DASH-PIN-DND,
-#   G-FAVORITES-LIVE (the app-icon menu, dash drag-to-pin and live
-#   favorite-apps, #1182, #1183) and G-SHELL-STABLE only.
+#   G-FAVORITES-LIVE, G-FAVORITES-IMPORT (the app-icon menu, dash
+#   drag-to-pin, live favorite-apps and the one-time import of the old
+#   favorites.json, #1182, #1183) and G-SHELL-STABLE only.
 #   --grid-cancel-only --grid-cancel-admission FILE is an exact CI comparison slice.
 #   --expect-grid-cancel-old-negative is permitted only in that admitted slice.
 #   Run at most one --*-only slice at a time.
@@ -1187,8 +1188,14 @@ fi
 # The dash shows only the proof's own windows: pin a favourite no
 # runner has, so the host's apps (GitHub's runners now ship Firefox,
 # which GNOME's default favourites name) never reach the a11y goldens.
-# `favorite-apps` is the dash's only source (the shell reads no pins file).
-gsettings set org.gnome.shell favorite-apps "['org.tuna.ProofNoFavorite.desktop']"
+# `favorite-apps` is the dash's source; the shell only imports the old
+# pins file once, into a key still unset.
+if [ "$APP_MENU_ONLY" = 1 ]; then
+    # G-FAVORITES-IMPORT: the key stays unset and the old pins are seeded.
+    am_seed_legacy_favorites
+else
+    gsettings set org.gnome.shell favorite-apps "['org.tuna.ProofNoFavorite.desktop']"
+fi
 # Media settings are also exercised on lean hosts without gsd's schema.
 if ! gsettings list-schemas 2>/dev/null | grep -qx org.gnome.settings-daemon.plugins.media-keys; then
     mkdir -p "$ARTIFACTS/schemas"
@@ -2089,6 +2096,7 @@ if [ "$APP_MENU_ONLY" = 1 ]; then
         fail G-APP-MENU "desktop never became ready"
     # Let the startup cover settle before the first overview.
     sleep 3
+    favorites_import_proof
     app_menu_proof
     dash_pin_dnd_proof
     favorites_live_proof

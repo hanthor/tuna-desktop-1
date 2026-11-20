@@ -13,11 +13,19 @@
 //! Without the schema (a host with no GNOME shell settings) the dash
 //! shows GNOME's default favorites and nothing can be pinned, as
 //! `global.settings.is_writable('favorite-apps')` is false there.
+//!
+//! Before #1183 the dash kept its own pins in
+//! `$XDG_DATA_HOME/tuna-shell/favorites.json` (which the legacy
+//! `tuna-shell-host` still uses). The shell imports them into the key
+//! once (`import_legacy`), unless the user has already set the key.
 
 use std::cell::RefCell;
+use std::path::Path;
 use std::rc::Rc;
 
 use gio::prelude::*;
+
+use tuna_shell_host::favorites::{Favorites, FAVORITES_FILE};
 
 use crate::live_apps::LiveApps;
 use crate::providers;
@@ -25,6 +33,9 @@ use crate::providers;
 const SCHEMA: &str = "org.gnome.shell";
 /// `FAVORITE_APPS_KEY`.
 pub const KEY: &str = "favorite-apps";
+/// Beside the legacy pins once they have been considered for import:
+/// the import never runs again, even after `gsettings reset`.
+pub const IMPORTED_STAMP: &str = "favorite-apps-imported";
 
 /// What pinning or unpinning tells the user: the summary
 /// (`%s Pinned to Dash`) and what its Undo button does.
@@ -68,6 +79,53 @@ pub fn desktop_id(app_id: &str) -> String {
     format!("{}.desktop", app_id.trim_end_matches(".desktop"))
 }
 
+/// What the legacy pins `legacy` make `favorite-apps`: their desktop
+/// ids, once each and in order. `None` leaves the key as it is: the
+/// user has set it (`customised`) or there is no pin to import.
+pub fn legacy_favorites(legacy: &[String], customised: bool) -> Option<Vec<String>> {
+    if customised || legacy.is_empty() {
+        return None;
+    }
+    let mut ids: Vec<String> = Vec::new();
+    for id in legacy.iter().map(|id| desktop_id(id)) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Some(ids)
+}
+
+/// Import the legacy pins in `dir` into `settings`' `favorite-apps`
+/// once: only while the key has no value of the user's own, and never
+/// again once [`IMPORTED_STAMP`] is in `dir`. A key that cannot be
+/// written leaves the pins for a later start. The legacy file stays, as
+/// the legacy shell still reads it.
+pub fn import_legacy(settings: &gio::Settings, dir: &Path) {
+    let file = dir.join(FAVORITES_FILE);
+    let stamp = dir.join(IMPORTED_STAMP);
+    if !file.is_file() || stamp.exists() || !settings.is_writable(KEY) {
+        return;
+    }
+    let legacy = Favorites::load(file);
+    let customised = settings.user_value(KEY).is_some();
+    if let Some(ids) = legacy_favorites(legacy.ids(), customised) {
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        if let Err(e) = settings.set_strv(KEY, refs.as_slice()) {
+            eprintln!("tuna-shell-gtk: {KEY}: legacy pins not imported: {e}");
+            return;
+        }
+        // The key must be stored before the stamp says it is.
+        gio::Settings::sync();
+        eprintln!(
+            "tuna-shell-gtk: {KEY}: imported {} legacy dash pins",
+            ids.len()
+        );
+    }
+    if let Err(e) = std::fs::write(&stamp, b"") {
+        eprintln!("tuna-shell-gtk: {}: {e}", stamp.display());
+    }
+}
+
 impl AppFavorites {
     pub fn new(apps: Rc<LiveApps>) -> Rc<Self> {
         let source = gio::SettingsSchemaSource::default();
@@ -75,6 +133,9 @@ impl AppFavorites {
             .and_then(|source| source.lookup(SCHEMA, true))
             .filter(|schema| schema.has_key(KEY))
             .map(|_| gio::Settings::new(SCHEMA));
+        if let (Some(settings), Some(dir)) = (&settings, tuna_shell_host::favorites::data_dir()) {
+            import_legacy(settings, &dir);
+        }
         let this = Rc::new(Self {
             settings,
             apps,
@@ -303,6 +364,123 @@ mod tests {
 
     fn ids(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// gnome-shell's `favorite-apps` with a default of two apps, on a
+    /// private memory backend.
+    fn shell_settings() -> (crate::test_settings::SettingsFixture, gio::Settings) {
+        let fixture = crate::test_settings::SettingsFixture::new(
+            r#"<schemalist>
+  <schema id="org.gnome.shell" path="/org/gnome/shell/">
+    <key name="favorite-apps" type="as"><default>['org.gnome.Epiphany.desktop', 'org.gnome.Nautilus.desktop']</default></key>
+  </schema>
+</schemalist>"#,
+        );
+        let settings = fixture.settings(SCHEMA);
+        (fixture, settings)
+    }
+
+    fn key(settings: &gio::Settings) -> Vec<String> {
+        settings.strv(KEY).iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn legacy_pins_become_desktop_ids_once_each_unless_the_key_is_set() {
+        let legacy = ids(&["b", "a.desktop", "b.desktop", "gone"]);
+        assert_eq!(
+            legacy_favorites(&legacy, false),
+            Some(ids(&["b.desktop", "a.desktop", "gone.desktop"]))
+        );
+        assert_eq!(legacy_favorites(&legacy, true), None);
+        assert_eq!(legacy_favorites(&[], false), None);
+    }
+
+    #[test]
+    fn legacy_pins_are_imported_into_an_unset_key_only_once() {
+        let (_fixture, settings) = shell_settings();
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join(FAVORITES_FILE);
+        let pins = "[\"org.example.Editor\", \"org.example.Mail.desktop\"]\n";
+        std::fs::write(&legacy, pins).unwrap();
+
+        import_legacy(&settings, dir.path());
+        assert_eq!(
+            key(&settings),
+            ids(&["org.example.Editor.desktop", "org.example.Mail.desktop"])
+        );
+        assert!(dir.path().join(IMPORTED_STAMP).exists());
+        // The legacy shell's file is left as it was.
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), pins);
+
+        // Reset to GNOME's defaults, the pins never come back.
+        settings.reset(KEY);
+        import_legacy(&settings, dir.path());
+        assert_eq!(
+            key(&settings),
+            ids(&["org.gnome.Epiphany.desktop", "org.gnome.Nautilus.desktop"])
+        );
+    }
+
+    #[test]
+    fn a_key_the_user_set_keeps_its_value_over_legacy_pins() {
+        let (_fixture, settings) = shell_settings();
+        settings
+            .set_strv(KEY, ["org.example.Mine.desktop"])
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FAVORITES_FILE), "[\"org.example.Editor\"]").unwrap();
+
+        import_legacy(&settings, dir.path());
+        assert_eq!(key(&settings), ids(&["org.example.Mine.desktop"]));
+        assert!(dir.path().join(IMPORTED_STAMP).exists());
+
+        // Even a key set to its default value is the user's own.
+        let (_fixture, settings) = shell_settings();
+        settings
+            .set_strv(
+                KEY,
+                ["org.gnome.Epiphany.desktop", "org.gnome.Nautilus.desktop"],
+            )
+            .unwrap();
+        std::fs::remove_file(dir.path().join(IMPORTED_STAMP)).unwrap();
+        import_legacy(&settings, dir.path());
+        assert_eq!(
+            key(&settings),
+            ids(&["org.gnome.Epiphany.desktop", "org.gnome.Nautilus.desktop"])
+        );
+    }
+
+    #[test]
+    fn without_a_legacy_file_nothing_is_written() {
+        let (_fixture, settings) = shell_settings();
+        let dir = tempfile::tempdir().unwrap();
+        import_legacy(&settings, dir.path());
+        assert!(settings.user_value(KEY).is_none());
+        assert!(!dir.path().join(IMPORTED_STAMP).exists());
+        // An empty legacy list leaves the key unset too.
+        std::fs::write(dir.path().join(FAVORITES_FILE), "[]").unwrap();
+        import_legacy(&settings, dir.path());
+        assert!(settings.user_value(KEY).is_none());
+        assert!(dir.path().join(IMPORTED_STAMP).exists());
+    }
+
+    #[test]
+    fn an_invalid_legacy_file_leaves_the_key_unset() {
+        let (_fixture, settings) = shell_settings();
+        for text in [
+            "{\"pins\": [\"org.example.Editor\"]}",
+            "[\"org.example.Ed",
+            "\u{0}\u{1}",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(FAVORITES_FILE), text).unwrap();
+            import_legacy(&settings, dir.path());
+            assert!(settings.user_value(KEY).is_none(), "{text:?}");
+            assert_eq!(
+                key(&settings),
+                ids(&["org.gnome.Epiphany.desktop", "org.gnome.Nautilus.desktop"])
+            );
+        }
     }
 
     #[test]

@@ -22,6 +22,9 @@
 #                   unpins; a drop anywhere else changes nothing
 #   G-FAVORITES-LIVE favorite-apps written by gsettings reaches the dash
 #                   without a restart, open or closed
+#   G-FAVORITES-IMPORT the pins an older Tuna Desktop kept in
+#                   ~/.local/share/tuna-shell/favorites.json are imported
+#                   once into an unset favorite-apps when the shell starts
 
 AM_APP=tuna-test-menu
 
@@ -480,6 +483,33 @@ am_fixtures_pin() {
             >"$XDG_DATA_HOME/applications/tuna-pin-$am_n.desktop"
     done
     sleep 1.5
+}
+
+# Before the shell starts, with favorite-apps left unset: the pins an
+# older Tuna Desktop kept in its own file (one twice, one without
+# ".desktop", one not installed).
+am_seed_legacy_favorites() {
+    mkdir -p "$XDG_DATA_HOME/applications" "$XDG_DATA_HOME/tuna-shell"
+    am_fixtures_pin
+    printf '%s\n' '["tuna-pin-Three", "org.example.Gone.desktop", "tuna-pin-One.desktop", "tuna-pin-Three.desktop"]' \
+        >"$XDG_DATA_HOME/tuna-shell/favorites.json"
+    cp "$XDG_DATA_HOME/tuna-shell/favorites.json" "$ARTIFACTS/am-legacy-favorites.json"
+}
+
+favorites_import_proof() {
+    AM_GATE=G-FAVORITES-IMPORT
+    am_wait_favorites "['tuna-pin-Three.desktop', 'org.example.Gone.desktop', 'tuna-pin-One.desktop']" ||
+        fail G-FAVORITES-IMPORT "the legacy pins were not imported: favorite-apps reads $(am_favorites)"
+    [ -e "$XDG_DATA_HOME/tuna-shell/favorite-apps-imported" ] ||
+        fail G-FAVORITES-IMPORT "the import left no stamp, so it would run again"
+    cmp -s "$XDG_DATA_HOME/tuna-shell/favorites.json" "$ARTIFACTS/am-legacy-favorites.json" ||
+        fail G-FAVORITES-IMPORT "the import changed the legacy shell's favorites.json"
+    am_overview_open
+    am_dump am-import
+    [ "$(am_dash_names "$ARTIFACTS/am-import.json")" = "AAA Pin Three,AAA Pin One" ] ||
+        fail G-FAVORITES-IMPORT "the dash shows '$(am_dash_names "$ARTIFACTS/am-import.json")', not the imported pins"
+    am_overview_close
+    pass G-FAVORITES-IMPORT "the pins an older Tuna Desktop kept in tuna-shell/favorites.json reach favorite-apps once (desktop ids, in order, each once) and the dash when the shell starts with the key unset; the file stays for the legacy shell"
 }
 
 # Press at $1,$2, drag to $3,$4, and hold with the button down.
