@@ -120,6 +120,14 @@ class Selection(unittest.TestCase):
         # Control: a test only the always-on check job runs adds no lane.
         self.assertEqual(pr("scripts/tests/test_disk_guard.py"), [])
 
+    def test_native_desktop_driver_runs_the_vm_lane_that_drives_it(self):
+        # #1013: a shared-driver change runs the VM lane whose autotz profile
+        # drives it, not whatever slice the rotation picks.
+        for run in range(len(m.ROTATION)):
+            with self.subTest(run=run):
+                self.assertEqual(pr("scripts/lib/vm_native_desktop.py", run=run),
+                                 ["arch-package", "marlin-vm"])
+
     def test_pull_requests_never_rotate_the_push_only_image_lane(self):
         self.assertNotIn("marlin-image", m.ROTATION)
         for run in range(len(m.ROTATION)):
