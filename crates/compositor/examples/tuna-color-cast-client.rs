@@ -8,8 +8,9 @@
 //! No GStreamer conversion or synthesized caps establish colour metadata:
 //! older PipeWire GStreamer plugins omit SPA colourimetry on RGB streams.
 //! The supervised Python fixture also uses --shell-hello,
-//! --keep-display-change ID and --inspect-shell-frame as canonical wire
-//! codecs. These modes never connect a socket or acquire shell authority.
+//! --keep-display-change ID, --declare-bus-name ID NAME and
+//! --inspect-shell-frame as canonical wire codecs. These modes never
+//! connect a socket or acquire shell authority.
 
 use std::cell::RefCell;
 use std::io::{Read, Write};
@@ -297,6 +298,30 @@ fn main() {
                 &tuna_shell_control::Message::Command {
                     id,
                     kind: tuna_shell_control::CommandKind::CompleteDisplayChange { keep: true },
+                },
+            ))
+            .unwrap();
+        return;
+    }
+    if first == "--declare-bus-name" {
+        let id = args
+            .next()
+            .expect("command ID")
+            .to_str()
+            .expect("numeric ID")
+            .parse()
+            .expect("numeric ID");
+        let unique_name = args
+            .next()
+            .expect("unique bus name")
+            .into_string()
+            .expect("UTF-8 bus name");
+        assert!(args.next().is_none());
+        std::io::stdout()
+            .write_all(&tuna_shell_control::encode_frame(
+                &tuna_shell_control::Message::Command {
+                    id,
+                    kind: tuna_shell_control::CommandKind::DeclareBusName { unique_name },
                 },
             ))
             .unwrap();

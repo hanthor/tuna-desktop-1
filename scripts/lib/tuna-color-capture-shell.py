@@ -176,7 +176,7 @@ def control_event(predicate, label):
 
 
 def connect_control():
-    global CONTROL
+    global CONTROL, CONTROL_COMMAND_ID
     CONTROL = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     CONTROL.connect(os.environ['TUNA_CONTROL_SOCKET'])
     CONTROL.sendall(control_codec('--shell-hello'))
@@ -207,6 +207,15 @@ def connect_control():
     hello = control_event(lambda event: event['kind'] == 'hello', 'canonical control Hello')
     snapshot = control_event(lambda event: event['kind'] == 'snapshot', 'canonical control Snapshot')
     assert not snapshot['locked'], snapshot
+    # The compositor admits this process's Screenshot/ScreenCast calls as the
+    # shell only once its pinned control session declares the session-bus
+    # unique name those calls come from (protocol 0.52), as tuna-shell-gtk does.
+    CONTROL_COMMAND_ID += 1
+    CONTROL.sendall(control_codec('--declare-bus-name', str(CONTROL_COMMAND_ID), BUS.get_unique_name()))
+    declared = control_event(
+        lambda event: event['kind'] == 'command-result' and event['id'] == CONTROL_COMMAND_ID,
+        'actual bus name declaration result')
+    assert declared['applied'], declared
     return hello
 
 
