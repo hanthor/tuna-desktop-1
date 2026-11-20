@@ -1874,7 +1874,16 @@ x11_iconic_gate() {
     cstate ".focused != null and (.focused as \$f | $iconic_before | index(\$f) == null)" "X11 probe focused" ||
         fail G-X11-ICONIC "the X11 probe never took focus"
     iconic_id="$(jq -r .focused "$CSTATE")"
-    iconic_window="$(DISPLAY="$x11_display" xdotool search --name '^Tuna Iconic Probe$' | head -1)"
+    # Its frame (P-WM-10) carries the same title and has no WM_STATE: the
+    # client is the window of that name which is no frames-client frame.
+    iconic_window=""
+    for iconic_candidate in $(DISPLAY="$x11_display" xdotool search --name '^Tuna Iconic Probe$'); do
+        if DISPLAY="$x11_display" xprop -id "$iconic_candidate" _MUTTER_FRAME_FOR 2>/dev/null | grep -q 'window id'; then
+            continue
+        fi
+        iconic_window="$iconic_candidate"
+        break
+    done
     [ -n "$iconic_window" ] || fail G-X11-ICONIC "the X11 probe's window was not found"
     x11_iconic_state Normal mapped ||
         fail G-X11-ICONIC "the mapped X11 window is not NormalState without _NET_WM_STATE_HIDDEN"
