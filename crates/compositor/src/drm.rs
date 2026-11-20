@@ -80,7 +80,7 @@ pub struct DrmOutput {
     /// CRTC driving the connector.
     pub crtc: crtc::Handle,
     pub connector: connector::Handle,
-    native_owner: Option<tuna_shell_control::NativeOutputInfo>,
+    native_owner: Option<tuna_output::NativeOutputInfo>,
     /// GBM swapchain bound to the CRTC.
     pub surface: ScanoutSurface,
     /// Protocol output advertised to clients.
@@ -111,6 +111,9 @@ pub struct DrmOutput {
     /// A refused commit restored the previous mode since the runtime
     /// last looked ([`DrmBackend::take_mode_reverted`]).
     mode_reverted: bool,
+    /// Whether its scanout shows a frame drawn locked, for the sleep
+    /// delay ([`DrmBackend::shows_locked`]).
+    pub(crate) scanout_lock: crate::sleep::Scanout,
     /// A frame is queued and its page flip has not completed yet.
     pub pending: bool,
     pub(crate) last_frame: Option<crate::native_repaint::FrameSignature>,
@@ -224,6 +227,7 @@ impl DrmOutput {
         self.mirror_of = None;
         self.rollback_mode = None;
         self.pending = false;
+        self.scanout_lock.reset();
         self.last_frame = None;
         self.damage_tracker = None;
     }
@@ -549,6 +553,7 @@ impl Lighting<'_> {
             rollback_mode: None,
             mode_reverted: false,
             pending: false,
+            scanout_lock: Default::default(),
             last_frame: None,
             damage_tracker: None,
             wake_trace: false,
@@ -562,7 +567,7 @@ impl Lighting<'_> {
 }
 
 impl DrmBackend {
-    pub fn native_outputs(&self) -> Vec<tuna_shell_control::NativeOutputInfo> {
+    pub fn native_outputs(&self) -> Vec<tuna_output::NativeOutputInfo> {
         use std::os::fd::AsFd;
         if !self.active || !self.drm.is_active() {
             return Vec::new();
@@ -997,6 +1002,7 @@ impl DrmBackend {
             if !out.enabled {
                 out.surface.reset_buffers();
                 out.pending = false;
+                out.scanout_lock.reset();
                 out.rollback_mode = None;
             } else if replaced.is_some() {
                 out.rollback_mode = replaced;
@@ -1365,6 +1371,10 @@ impl DrmBackend {
                 self.active = false;
                 self.libinput.suspend();
                 self.drm.pause();
+                // Another VT owns the screen now.
+                for out in &mut self.outputs {
+                    out.scanout_lock.reset();
+                }
             }
             SessionEvent::ActivateSession => {
                 eprintln!("tuna-compositor: drm: session activated");
@@ -1379,6 +1389,7 @@ impl DrmBackend {
                 for out in &mut self.outputs {
                     out.surface.reset_buffers();
                     out.pending = false;
+                    out.scanout_lock.reset();
                     out.last_frame = None;
                     out.damage_tracker = None;
                     // Another VT owner may have changed the ramp
@@ -1441,6 +1452,7 @@ impl DrmBackend {
             }
             out.surface.reset_buffers();
             out.pending = false;
+            out.scanout_lock.reset();
             out.last_frame = None;
             out.damage_tracker = None;
             out.wake_trace = trace;
@@ -1501,6 +1513,21 @@ impl DrmBackend {
         self.active && !self.wake_scanout_blocked && !self.powered_off
     }
 
+    /// Whether what every lit output scans out was drawn locked, so the
+    /// lock is what stays on screen if the system sleeps now. CRTCs
+    /// display power saving turned off show nothing. Another VT's or a
+    /// failed reset's scanout is not ours to vouch for.
+    pub fn shows_locked(&self) -> bool {
+        self.active
+            && !self.wake_scanout_blocked
+            && (self.outputs_disabled
+                || self
+                    .outputs
+                    .iter()
+                    .filter(|out| out.enabled)
+                    .all(|out| out.scanout_lock.shows_locked()))
+    }
+
     /// Page flip completion: the output may render again, and what its
     /// frame drew has been presented.
     pub fn on_drm_event(
@@ -1526,6 +1553,7 @@ impl DrmBackend {
                     }
                 };
                 out.pending = false;
+                out.scanout_lock.flipped();
                 let (time, sequence) = match metadata.as_ref() {
                     Some(meta) => (
                         match meta.time {

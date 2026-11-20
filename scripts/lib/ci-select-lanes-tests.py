@@ -62,6 +62,16 @@ class Selection(unittest.TestCase):
         self.assertEqual(pr("scripts/tuna-orca-speech-proof"), ["orca-speech"])
         self.assertEqual(pr("scripts/lib/tuna-orca-speech.py"), ["orca-speech"])
 
+    def test_protocol_gate_inputs_run_the_gtk_shell_proof(self):
+        # The Mutter 51 protocol gates (--protocols-only) and G-WAYLAND-INFO
+        # run in the gtk-shell job: their client and references select it.
+        for run in range(len(m.ROTATION)):
+            for path in ("crates/compositor/examples/protocol-probe.rs",
+                         "tests/protocols/gnome51-globals.tsv",
+                         "tests/protocols/marlin-gnome51-globals.tsv"):
+                self.assertIn("gtk-shell", pr(path, run=run), (path, run))
+        self.assertEqual(pr("scripts/tuna-wayland-info-compare"), ["gtk-shell"])
+
 
     def test_transition_policy_and_suite_always_run_journey(self):
         for path in ('scripts/lib/transition-package-policy.py',
@@ -96,7 +106,7 @@ class Selection(unittest.TestCase):
         for run in range(len(m.ROTATION)):
             with self.subTest(run=run):
                 self.assertEqual(pr("share/pam.d/tuna-lock", run=run), [
-                    'fprint-phase-proof', 'journey', 'grid-cancel-comparison', 'gtk-shell',
+                    'journey', 'grid-cancel-comparison', 'gtk-shell',
                     'portal-security', 'remote-security', 'niri-parity', 'arch-package',
                     'marlin-image', 'marlin-vm'])
         # Control: other shipped runtime data still rotates journey.

@@ -227,13 +227,23 @@ impl ProtocolVersion {
     /// `HideCloseDialog`, and the shell-to-compositor `RespondCloseDialog`
     /// (gnome-shell's Force Quit / Wait). Positional postcard peers must
     /// ship together.
-    /// `0.51` appends text-input-v3 version 2's input-panel OFF request:
+    /// `0.51` appends the compositor-to-shell `LockScreenShown` message
+    /// (the lock curtain has landed, screenShield.js `_lockScreenShown`):
+    /// the shell reports the screen saver active only then, because
+    /// gnome-settings-daemon blanks the screen on `ActiveChanged(true)`.
+    /// Positional postcard peers must ship together.
+    /// `0.52` appends the shell-to-compositor `DeclareBusName` command: the
+    /// supervised shell names its session-bus connection over this
+    /// pidfd-pinned socket, and the compositor recognises the shell on
+    /// D-Bus by that unique name only (ADR 0010). Positional postcard peers
+    /// must ship together.
+    /// `0.53` appends text-input-v3 version 2's input-panel OFF request:
     /// compositor-to-shell `HideInputPanel`, sent after the
     /// `OnScreenKeyboard` update it belongs to. Positional postcard peers
     /// must ship together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 51,
+        minor: 53,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -306,20 +316,10 @@ pub struct OutputInfo {
     pub primary: bool,
 }
 
-/// Actual selected native DRM output authority. Missing inventory means no
-/// authority, including nested sessions; connector text alone is insufficient.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NativeOutputInfo {
-    pub name: String,
-    /// Actual char-device rdev from the compositor-owned KMS FD.
-    pub drm_device: u64,
-    /// Actual DRM connector object ID, checked against kernel sysfs.
-    pub connector_id: u32,
-    /// Canonical sysfs DRM connector directory under that owned device.
-    pub connector_sysfs: String,
-    pub connector_device: u64,
-    pub connector_inode: u64,
-}
+/// Actual selected native DRM output authority, owned by `tuna-output` so
+/// hardware-facing crates need not depend on this wire protocol (#784).
+/// Re-exported here because `Message::NativeOutputInventory` carries it.
+pub use tuna_output::NativeOutputInfo;
 
 /// One ordered state mutation between two snapshot revisions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -534,6 +534,13 @@ pub enum CommandKind {
         window: WindowId,
         response: CloseDialogResponse,
     },
+    /// Since 0.52: the unique name (`:1.N`) of the shell's session-bus
+    /// connection. The compositor admits D-Bus calls as the shell only
+    /// from the names its supervised, pidfd-pinned control session
+    /// declared, and forgets them when that session or process ends. A
+    /// session that is not the supervised shell is denied. A later
+    /// declaration replaces the earlier one.
+    DeclareBusName { unique_name: String },
 }
 
 /// mutter 51 `MetaCloseDialogResponse`: what the user chose in the dialog
@@ -1196,12 +1203,23 @@ pub enum Message {
     /// (`meta_window_set_alive (TRUE)`), went away, left the screen, or
     /// the session locked. Sent only to peers advertising minor >= 50.
     HideCloseDialog { window: WindowId },
-    /// Since 0.51: the focused text input asked to hide the input panel
+    /// Since 0.51: whether the lock screen is shown: the session is
+    /// locked and the lock curtain has landed over it (GNOME 51
+    /// `screenShield.js` `_lockScreenShown`, after the
+    /// `Overview.ANIMATION_TIME` lowering). The shell reports the screen
+    /// saver active (`GetActive`, `ActiveChanged(true)`) only from here,
+    /// as gnome-shell does: gnome-settings-daemon blanks the screen on
+    /// `ActiveChanged(true)`, and blanking mid-slide freezes the curtain
+    /// off screen. `false` once the session unlocks. Sent on change and in
+    /// each handshake snapshot while shown, only to peers advertising
+    /// minor >= 51.
+    LockScreenShown { shown: bool },
+    /// Since 0.53: the focused text input asked to hide the input panel
     /// (text-input-v3 version 2 `hide_input_panel`; mutter's
     /// `clutter_input_focus_set_input_panel_state (OFF)`). Follows the
     /// `OnScreenKeyboard` update it belongs to; GNOME's keyboard closes at
     /// once (`_onKeyboardStateChanged`). Sent only to peers advertising
-    /// minor >= 51.
+    /// minor >= 53.
     HideInputPanel,
 }
 
@@ -2441,7 +2459,7 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
                 ));
             }
         }
-        Message::HideCloseDialog { .. } => {}
+        Message::HideCloseDialog { .. } | Message::LockScreenShown { .. } => {}
     }
     Ok(())
 }
@@ -2660,11 +2678,11 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_51() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 51));
-        // A 0.50 shell still negotiates; a newer minor does not.
-        assert!(ProtocolVersion::new(0, 50).is_compatible_with(&CURRENT_VERSION));
-        assert!(!ProtocolVersion::new(0, 52).is_compatible_with(&CURRENT_VERSION));
+    fn current_version_is_0_53() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 53));
+        // A 0.52 shell still negotiates; a newer minor does not.
+        assert!(ProtocolVersion::new(0, 52).is_compatible_with(&CURRENT_VERSION));
+        assert!(!ProtocolVersion::new(0, 54).is_compatible_with(&CURRENT_VERSION));
     }
 
     #[test]
@@ -4228,6 +4246,45 @@ mod close_dialog_wire_tests {
             assert_eq!(decode_frame(&encode_frame(&command)).unwrap(), command);
         }
     }
+
+    #[test]
+    fn lock_screen_shown_follows_hide_close_dialog() {
+        let tag = |bytes: &[u8]| bytes[0];
+        let mut buffer = [0_u8; 64];
+        let hide =
+            tag(postcard::to_slice(&Message::HideCloseDialog { window: 7 }, &mut buffer).unwrap());
+        for shown in [true, false] {
+            let message = Message::LockScreenShown { shown };
+            assert_eq!(
+                tag(postcard::to_slice(&message, &mut buffer).unwrap()),
+                hide + 1
+            );
+            assert_eq!(decode_frame(&encode_frame(&message)).unwrap(), message);
+        }
+    }
+
+    #[test]
+    fn declare_bus_name_follows_respond_close_dialog() {
+        let tag = |bytes: &[u8]| bytes[0];
+        let mut buffer = [0_u8; 64];
+        let respond = tag(postcard::to_slice(
+            &CommandKind::RespondCloseDialog {
+                window: 3,
+                response: CloseDialogResponse::Wait,
+            },
+            &mut buffer,
+        )
+        .unwrap());
+        let kind = CommandKind::DeclareBusName {
+            unique_name: ":1.42".into(),
+        };
+        assert_eq!(
+            tag(postcard::to_slice(&kind, &mut buffer).unwrap()),
+            respond + 1
+        );
+        let command = Message::Command { id: 12, kind };
+        assert_eq!(decode_frame(&encode_frame(&command)).unwrap(), command);
+    }
 }
 
 #[cfg(test)]
@@ -4235,13 +4292,13 @@ mod input_panel_wire_tests {
     use super::*;
 
     #[test]
-    fn hide_input_panel_follows_the_0_50_close_dialog_and_round_trips() {
+    fn hide_input_panel_follows_the_0_51_lock_screen_shown_and_round_trips() {
         let mut buffer = [0_u8; 64];
-        let hide_close =
-            postcard::to_slice(&Message::HideCloseDialog { window: 7 }, &mut buffer).unwrap()[0];
+        let shown =
+            postcard::to_slice(&Message::LockScreenShown { shown: true }, &mut buffer).unwrap()[0];
         let frame = encode_frame(&Message::HideInputPanel);
         // A bare variant tag after the length prefix: nothing else rides.
-        assert_eq!(&frame[4..], &[hide_close + 1]);
+        assert_eq!(&frame[4..], &[shown + 1]);
         assert_eq!(decode_frame(&frame).unwrap(), Message::HideInputPanel);
         // The 0.43 update keeps its positional shape for older shells.
         let update = Message::OnScreenKeyboard {

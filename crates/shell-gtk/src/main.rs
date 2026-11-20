@@ -98,6 +98,7 @@ pub(crate) fn test_dispatch_guard() -> TestDispatchGuard {
 
 mod accessibility;
 mod anim_clock;
+mod app_integration;
 mod audio_selection;
 mod audio_state;
 mod background_settings;
@@ -107,6 +108,7 @@ mod bt_menu;
 mod calendar;
 mod captive_portal;
 mod close_dialog;
+mod dash_motion;
 mod display_change;
 mod events;
 mod fd_watch;
@@ -128,6 +130,7 @@ mod location;
 mod lock;
 mod lock_auth;
 mod lock_curtain;
+mod lock_notifications;
 mod lock_wiggle;
 mod lockdown;
 mod logic;
@@ -177,10 +180,13 @@ mod transient;
 mod tray;
 mod user_switch;
 mod wall_clock;
+mod weather;
+mod weather_section;
 mod wellbeing;
 mod wifi;
 mod window_menu;
 mod wired;
+mod world_clocks;
 mod ws_dots;
 mod ws_popup;
 mod wwan;
@@ -271,7 +277,7 @@ struct Drained {
 enum OskUpdate {
     /// Focus, the input-panel ON request, touch-mode auto-show (0.43).
     State(Option<tuna_shell_control::TextFieldFocus>, bool, bool),
-    /// The input-panel OFF request (0.51).
+    /// The input-panel OFF request (0.53).
     HidePanel,
 }
 
@@ -422,6 +428,9 @@ fn drain(
             }
             Handled::ClosePadOsd { pad } => out.tablet.push(TabletUi::Close(pad)),
             Handled::SeatTouchMode(touch_mode) => out.touch_mode = Some(touch_mode),
+            // Read back through `lock_screen_shown`; a frame was handled,
+            // so the screen saver syncs after this drain.
+            Handled::LockScreenShown(_) => {}
             Handled::CommandResult { id, status } => out.results.push((
                 id,
                 matches!(status, tuna_shell_control::CommandStatus::Applied),
@@ -822,22 +831,51 @@ fn render_pills(shell: &mut Shell) {
     shell.pill_state = wanted;
 }
 
+/// What the date menu draws above and below its calendar column
+/// (style.css): the popup's 6px gap from the panel and from the screen
+/// edge, its 1px border and 6px padding, and the calendar area's 4px
+/// padding, each twice.
+const DATE_MENU_CHROME: i32 = 2 * (6 + 1 + 6 + 4);
+
 /// GNOME 51's date menu: the notification list beside the calendar
 /// column, back on today each time it opens (dateMenu.js).
-fn calendar_popover(notes: &gtk::Box) -> (gtk::Popover, Rc<calendar::CalendarUi>) {
+fn calendar_popover(
+    notes: &gtk::Box,
+    apps: &Rc<live_apps::LiveApps>,
+) -> (gtk::Popover, Rc<calendar::CalendarUi>) {
     let popover = transient::MenuPopover::new_popover();
     popover.add_css_class("tuna-shell-popover");
     popover.add_css_class("tuna-cal");
     popover.set_has_arrow(false);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     row.add_css_class("calendar-area");
-    let cal = calendar::CalendarUi::new(wall_clock::now().date());
+    let cal = calendar::CalendarUi::new(wall_clock::now().date(), apps);
     row.append(notes);
     row.append(&cal.column);
     popover.set_child(Some(&row));
     {
         let cal = cal.clone();
-        popover.connect_show(move |_| cal.reset());
+        popover.connect_show(move |popup| {
+            cal.reset();
+            // Keep the menu on its monitor. GNOME caps a panel menu at
+            // the work area (panelMenu.js `_onOpenStateChanged`), so the
+            // column may take what is left under the panel.
+            let parent = popup.parent();
+            let surface = parent
+                .as_ref()
+                .and_then(|widget| widget.native())
+                .and_then(|native| native.surface());
+            if let Some(monitor) = surface.as_ref().and_then(|surface| {
+                gtk::prelude::WidgetExt::display(popup).monitor_at_surface(surface)
+            }) {
+                let panel_height = parent
+                    .as_ref()
+                    .map_or(tuna_shell_control::PANEL_HEIGHT as i32, |widget| {
+                        widget.height()
+                    });
+                cal.fit_height(monitor.geometry().height() - panel_height - DATE_MENU_CHROME);
+            }
+        });
     }
     {
         let popover = popover.downgrade();
@@ -2137,6 +2175,28 @@ fn build(app: &adw::Application) {
     }));
     render_pills(&mut shell.borrow_mut());
     orca::start(shell.clone());
+    // The compositor knows the shell on the session bus only by the unique
+    // name of GIO's shared session connection (the one every shell D-Bus
+    // call and the org.gnome.Shell name use), declared over the pinned
+    // control socket and again after every redial (ADR 0010).
+    {
+        let shell = shell.clone();
+        gio::bus_get(
+            gio::BusType::Session,
+            None::<&gio::Cancellable>,
+            move |conn| {
+                let Some(name) = conn.ok().and_then(|conn| conn.unique_name()) else {
+                    eprintln!("tuna-shell-gtk: no session bus name to declare");
+                    return;
+                };
+                if let Some(control) = shell.borrow_mut().control.as_mut() {
+                    if let Err(e) = control.declare_bus_name(name.to_string()) {
+                        eprintln!("tuna-shell-gtk: declaring the session bus name failed: {e}");
+                    }
+                }
+            },
+        );
+    }
 
     // The compositor toggles the overview on presses over the
     // Activities control (ACTIVITIES_WIDTH_PX); sending a toggle here
@@ -2154,7 +2214,10 @@ fn build(app: &adw::Application) {
 
     let notify = notify::NotifyUi::new(app.upcast_ref());
     let clock_label = gtk::Label::new(None);
-    let (cal_popover, calendar_ui) = calendar_popover(notify.pane());
+    // Installed apps, kept current: the date menu's Clocks and Weather
+    // cards, the overview and the switcher all follow them.
+    let apps = live_apps::LiveApps::new();
+    let (cal_popover, calendar_ui) = calendar_popover(notify.pane(), &apps);
     // GNOME's calendar events through its calendar server.
     calendar_ui.set_event_source(events::EventSource::new());
     let clock = panel_menu_button(&clock_label, "Date and Time", &cal_popover);
@@ -2295,6 +2358,20 @@ fn build(app: &adw::Application) {
             }),
         )
     };
+    // GNOME's lock screen lists unseen notifications by their policy
+    // (unlockDialog.js NotificationsBox, #348), live while locked.
+    {
+        let notify = notify.clone();
+        lock_ui.set_notifications(Rc::new(move || notify.lock_entries()));
+    }
+    {
+        let lock_ui = Rc::downgrade(&lock_ui);
+        notify.connect_lock_changed(move || {
+            if let Some(lock_ui) = lock_ui.upgrade() {
+                lock_ui.refresh_notifications();
+            }
+        });
+    }
     let brightness_policy_settings =
         settings("org.gnome.settings-daemon.plugins.power").filter(|s| {
             s.settings_schema()
@@ -2709,6 +2786,7 @@ fn build(app: &adw::Application) {
             }
             calendar_ui.set_clock_format(format);
             calendar_ui.set_today(now.date());
+            calendar_ui.clock_tick();
         })
     };
     refresh_clock();
@@ -2760,7 +2838,6 @@ fn build(app: &adw::Application) {
                 .collect()
         }
     };
-    let apps = live_apps::LiveApps::new();
     let dash_apps = favorites.clone();
     let overview_ui = overview::OverviewUi::new(
         app.upcast_ref(),
@@ -2895,7 +2972,13 @@ fn build(app: &adw::Application) {
         },
         {
             let shell = shell.clone();
-            Rc::new(move || shell.borrow().control.as_ref().is_some_and(|c| c.locked()))
+            Rc::new(move || {
+                shell
+                    .borrow()
+                    .control
+                    .as_ref()
+                    .is_some_and(|c| c.lock_screen_shown())
+            })
         },
     );
     // Wellbeing (#354): screen-time history/limits and break reminders.
@@ -3513,15 +3596,15 @@ fn build(app: &adw::Application) {
                 }
             };
             let vanished = owner_changed.clone();
-            // Watched for the whole session (a WatcherId unwatches
+            // Watched for the whole session (a NameWatch unwatches
             // nothing when it drops): a restarted daemon takes its keys
             // back, a crashed one leaves the native subset.
-            let _ = gio::bus_watch_name(
-                gio::BusType::Session,
+            let _ = services::bus_watch_name(
+                services::WatchBus::Type(gio::BusType::Session),
                 keybindings::MEDIA_KEYS_DAEMON,
                 gio::BusNameWatcherFlags::NONE,
-                move |_, _, _| owner_changed(true),
-                move |_, _| vanished(false),
+                move || owner_changed(true),
+                move || vanished(false),
             );
         }
         for settings in [settings, wm_settings, mutter_settings, media_settings]
@@ -4043,6 +4126,10 @@ fn build(app: &adw::Application) {
                 } = drained;
                 let mut shell = shell.borrow_mut();
                 let locked = shell.control.as_ref().is_some_and(|c| c.locked());
+                let lock_shown = shell
+                    .control
+                    .as_ref()
+                    .is_some_and(|c| c.lock_screen_shown());
                 let auth_generation = shell.control.as_ref().map(|c| c.connection_generation());
                 let authoritative_lock = shell
                     .control
@@ -4094,6 +4181,9 @@ fn build(app: &adw::Application) {
                 };
                 drop(shell);
                 input_sources.focus(holder);
+                // No banners while locked (GNOME's lock screen session
+                // mode); the lock screen lists what arrives instead.
+                notify.set_locked(locked);
                 if locked {
                     notify.release_focus();
                     release_panel_focus(&panel_focus_window, &panel_focus_held);
@@ -4114,7 +4204,12 @@ fn build(app: &adw::Application) {
                 }
                 // Thunderbolt devices enrol only in an unlocked session.
                 thunderbolt.sync_lock(authoritative_lock);
-                screensaver.sync(locked);
+                // Active once the curtain has landed, as gnome-shell's
+                // `_lockScreenShown`: gnome-settings-daemon blanks the
+                // screen on ActiveChanged(true), which mid-slide would
+                // freeze the curtain off screen. Each confirmed unlock
+                // wakes the screen first, as `_continueDeactivate` does.
+                screensaver.sync(authoritative_lock, lock_shown);
                 // The session keyboard never shows over the lock screen.
                 osk.set_locked(locked);
                 for update in osk_updates {

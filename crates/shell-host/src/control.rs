@@ -149,6 +149,10 @@ pub enum Handled {
     /// Hide this window's close dialog (it answered, went away or left
     /// the screen, or the session locked).
     HideCloseDialog(u64),
+    /// Whether the lock screen is shown: the curtain has landed on the
+    /// locked session (0.51). Read it back through
+    /// [`ControlClient::lock_screen_shown`].
+    LockScreenShown(bool),
     /// The keyboard switched Sticky or Slow Keys: save and confirm.
     KeyboardAidToggled {
         aid: tuna_shell_control::KeyboardAid,
@@ -163,7 +167,7 @@ pub enum Handled {
         show: bool,
         touch_auto: bool,
     },
-    /// The focused text input asked to hide the input panel (0.51,
+    /// The focused text input asked to hide the input panel (0.53,
     /// mutter's input-panel OFF); follows the `OnScreenKeyboard` update it
     /// belongs to.
     HideInputPanel,
@@ -298,12 +302,15 @@ pub struct ControlClient {
     /// snapshot. Read-only here: the flag lives in the compositor,
     /// never the shell.
     locked: bool,
+    /// The compositor's latest `LockScreenShown`, cleared by an unlocked
+    /// snapshot so a new lock waits for its own curtain.
+    lock_shown: bool,
     /// Output inventory from the latest `Outputs` message (empty
     /// before the first one): name, size, and dock anchor per output.
     /// Read-only here; the shell reconciles its surfaces against it
     /// and never edits it.
     outputs: Vec<OutputInfo>,
-    native_outputs: Vec<tuna_shell_control::NativeOutputInfo>,
+    native_outputs: Vec<tuna_output::NativeOutputInfo>,
     pointer_output: Option<String>,
     /// Session environment from the compositor (#59).
     environment: Vec<(String, String)>,
@@ -317,6 +324,10 @@ pub struct ControlClient {
     /// The read half reached end-of-file or failed: nothing more will
     /// arrive on this connection.
     closed: bool,
+    /// The session-bus unique name declared with
+    /// [`declare_bus_name`](Self::declare_bus_name), declared again on
+    /// every redial: the compositor forgets it with the old session.
+    bus_name: Option<String>,
 }
 
 impl ControlClient {
@@ -353,6 +364,7 @@ impl ControlClient {
             shadow_windows: Vec::new(),
             shadow_workspaces: Vec::new(),
             locked: false,
+            lock_shown: false,
             outputs: Vec::new(),
             native_outputs: Vec::new(),
             pointer_output: None,
@@ -364,6 +376,7 @@ impl ControlClient {
             wellbeing_applied: None,
             wellbeing_pending: None,
             closed: false,
+            bus_name: None,
         })
     }
 
@@ -425,6 +438,14 @@ impl ControlClient {
         self.locked
     }
 
+    /// Whether the lock screen is shown: the session is locked and the
+    /// compositor says its curtain has landed (screenShield.js
+    /// `_lockScreenShown`). GNOME reports the screen saver active only
+    /// from here, because gnome-settings-daemon blanks the screen then.
+    pub fn lock_screen_shown(&self) -> bool {
+        self.locked && self.lock_shown
+    }
+
     /// Whether an input-method menu may dispatch an action. The current peer
     /// must have supplied a compatible Hello followed by a snapshot, that
     /// snapshot must still be current, and its session must be unlocked.
@@ -452,7 +473,7 @@ impl ControlClient {
         self.pointer_output.as_deref()
     }
 
-    pub fn native_outputs(&self) -> &[tuna_shell_control::NativeOutputInfo] {
+    pub fn native_outputs(&self) -> &[tuna_output::NativeOutputInfo] {
         &self.native_outputs
     }
 
@@ -837,6 +858,20 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Name this shell's session-bus connection (its unique name, `:1.N`)
+    /// to the compositor, which then admits D-Bus calls as the shell from
+    /// that connection only (0.52, ADR 0010). Kept and declared again
+    /// after every redial. Returns the request id.
+    pub fn declare_bus_name(&mut self, unique_name: String) -> Result<u64, ControlError> {
+        self.bus_name = Some(unique_name.clone());
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::DeclareBusName { unique_name },
+        })?;
+        Ok(id)
+    }
+
     /// Carry out one of GNOME's window-menu actions. Returns the request id.
     pub fn window_action(
         &mut self,
@@ -1122,6 +1157,7 @@ impl ControlClient {
                 self.shadow_windows = windows;
                 self.shadow_workspaces = workspaces;
                 self.locked = locked;
+                self.lock_shown &= locked;
                 self.model.apply_snapshot_view(snapshot_view(
                     &self.shadow_windows,
                     &self.shadow_workspaces,
@@ -1269,6 +1305,10 @@ impl ControlClient {
                 height,
             })),
             Message::HideCloseDialog { window } => Ok(Handled::HideCloseDialog(window)),
+            Message::LockScreenShown { shown } => {
+                self.lock_shown = shown;
+                Ok(Handled::LockScreenShown(shown))
+            }
             Message::KeyboardAidToggled { aid, enabled } => {
                 Ok(Handled::KeyboardAidToggled { aid, enabled })
             }
@@ -1446,9 +1486,17 @@ impl ControlClient {
         self.read_buf.clear();
         self.revision = None;
         self.needs_snapshot = true;
-        let frame = tuna_shell_control::encode_frame(&Message::Hello {
+        let mut frame = tuna_shell_control::encode_frame(&Message::Hello {
             version: CURRENT_VERSION,
         });
+        // The new session knows no bus name: declare it right behind Hello.
+        if let Some(unique_name) = self.bus_name.clone() {
+            let id = self.alloc_request_id();
+            frame.extend(tuna_shell_control::encode_frame(&Message::Command {
+                id,
+                kind: CommandKind::DeclareBusName { unique_name },
+            }));
+        }
         self.stream.write_all(&frame)?;
         Ok(())
     }
@@ -1594,6 +1642,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::OverviewSwipe { .. } => "OverviewSwipe",
         Message::ShowCloseDialog { .. } => "ShowCloseDialog",
         Message::HideCloseDialog { .. } => "HideCloseDialog",
+        Message::LockScreenShown { .. } => "LockScreenShown",
     }
 }
 
@@ -2279,7 +2328,7 @@ mod tests {
         let (mut client, mut peer) = handshook();
         server_write(&mut peer, &snapshot_rev7());
         client.poll().unwrap();
-        let owner = tuna_shell_control::NativeOutputInfo {
+        let owner = tuna_output::NativeOutputInfo {
             name: "eDP-1".into(),
             drm_device: 226,
             connector_id: 39,
@@ -2332,7 +2381,7 @@ mod tests {
             },
         );
         client.await_hello().expect("await hello");
-        let owner = tuna_shell_control::NativeOutputInfo {
+        let owner = tuna_output::NativeOutputInfo {
             name: "eDP-1".into(),
             drm_device: 226,
             connector_id: 39,
@@ -2388,7 +2437,7 @@ mod tests {
             },
         );
         client.await_hello().expect("await hello");
-        let owner = tuna_shell_control::NativeOutputInfo {
+        let owner = tuna_output::NativeOutputInfo {
             name: "eDP-1".into(),
             drm_device: 226,
             connector_id: 39,
@@ -2448,7 +2497,7 @@ mod tests {
     #[test]
     fn native_outputs_cleared_immediately_on_eof() {
         let (mut client, mut peer) = handshook();
-        let owner = tuna_shell_control::NativeOutputInfo {
+        let owner = tuna_output::NativeOutputInfo {
             name: "eDP-1".into(),
             drm_device: 226,
             connector_id: 39,
@@ -2762,6 +2811,43 @@ mod tests {
         ));
         assert!(!client.locked());
         assert_eq!(client.model().windows().len(), 2);
+    }
+
+    /// The screen saver goes active only once the compositor says the
+    /// curtain landed, and each lock waits for its own landing.
+    #[test]
+    fn lock_screen_shown_needs_the_lock_and_its_own_landing() {
+        let (mut client, mut peer) = handshook();
+        let locked = |revision| Message::Snapshot {
+            revision,
+            windows: vec![],
+            workspaces: vec![workspace(1, true)],
+            locked: true,
+        };
+        server_write(&mut peer, &locked(8));
+        client.poll().expect("locked snapshot");
+        assert!(client.locked());
+        assert!(!client.lock_screen_shown(), "the curtain is still lowering");
+        server_write(&mut peer, &Message::LockScreenShown { shown: true });
+        assert_eq!(
+            client.poll().expect("shown"),
+            Handled::LockScreenShown(true)
+        );
+        assert!(client.lock_screen_shown());
+        // Unlocking hides it before the compositor's `false` arrives.
+        server_write(&mut peer, &snapshot_rev7());
+        client.poll().expect("unlocked snapshot");
+        assert!(!client.lock_screen_shown());
+        // A new lock does not inherit the last landing.
+        server_write(&mut peer, &locked(9));
+        client.poll().expect("locked again");
+        assert!(!client.lock_screen_shown());
+        server_write(&mut peer, &Message::LockScreenShown { shown: true });
+        client.poll().expect("shown again");
+        assert!(client.lock_screen_shown());
+        server_write(&mut peer, &Message::LockScreenShown { shown: false });
+        client.poll().expect("hidden");
+        assert!(!client.lock_screen_shown());
     }
 
     #[test]
@@ -3300,6 +3386,60 @@ mod tests {
         // lands through the normal poll path.
         assert!(client.needs_snapshot());
         assert_eq!(client.revision(), None);
+    }
+
+    /// The shell's bus name reaches the compositor, and a redialed session
+    /// (which starts without one) declares it again right behind Hello.
+    #[test]
+    fn the_bus_name_is_declared_and_declared_again_after_a_redial() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (path, listener) = listener_at(&dir);
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let mut client = ControlClient::connect(&path).expect("connect");
+        let (mut server1, _) = listener.accept().expect("accept one");
+        let id = client.declare_bus_name(":1.42".into()).expect("sent");
+        assert_eq!(
+            server_read(&mut server1),
+            Message::Command {
+                id,
+                kind: CommandKind::DeclareBusName {
+                    unique_name: ":1.42".into()
+                },
+            }
+        );
+        server1
+            .shutdown(std::net::Shutdown::Both)
+            .expect("evicted peer shutdown");
+        drop(server1);
+        client.toggle_overview().expect("resend after reconnect");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut server2 = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "reconnect redial timed out");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("accept: {e}"),
+            }
+        };
+        assert_eq!(
+            server_read(&mut server2),
+            Message::Hello {
+                version: CURRENT_VERSION
+            }
+        );
+        assert!(matches!(
+            server_read(&mut server2),
+            Message::Command {
+                kind: CommandKind::DeclareBusName { unique_name },
+                ..
+            } if unique_name == ":1.42"
+        ));
     }
 
     #[test]

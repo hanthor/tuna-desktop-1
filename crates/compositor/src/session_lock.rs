@@ -3,12 +3,14 @@
 //! (GPL-3.0-or-later, like Tuna Desktop).
 //!
 //! Authority stays with the compositor (ADR: the lock flag is
-//! compositor-owned). A lock request is granted only to the supervised
-//! shell (the runtime checks the client's pid), and a client's unlock
-//! never unlocks by itself: the session unlocks only once the
-//! compositor has verified the password through PAM and cleared its
-//! flag. Until then the lock surfaces are all that is drawn and all that
-//! takes input.
+//! compositor-owned). A lock request is considered only from the
+//! supervised shell's pidfd-pinned connection; any other client's is
+//! refused on arrival, so it can neither replace nor cancel the shell's.
+//! The runtime then grants it only while that pinned process is still the
+//! held shell child. A client's unlock never unlocks by itself: the
+//! session unlocks only once the compositor has verified the password
+//! through PAM and cleared its flag. Until then the lock surfaces are all
+//! that is drawn and all that takes input.
 
 use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::{
     ext_session_lock_manager_v1::ExtSessionLockManagerV1,
@@ -33,21 +35,23 @@ pub enum LockVerdict {
     /// The supervised shell asked, but administrative lockdown (#357)
     /// disabled the lock screen: no Wayland bypass of the policy.
     RefusedByPolicy,
-    /// Not the supervised shell (or its pid is unknown).
+    /// Not the supervised shell (or it is no longer the held child).
     RefusedForeign,
 }
 
-/// Only the supervised shell may lock: the requesting client's
-/// SO_PEERCRED pid must be the shell child the runtime spawned. An
-/// unknown pid on either side is never a match.
+/// Only the supervised shell may lock: `requester_pid` is the live
+/// `SO_PEERPIDFD`-pinned PID of a connection flagged as the shell's at
+/// accept ([`crate::ClientState::pinned_shell_pid`]), and it must still be
+/// the shell child the runtime holds. An unknown pid on either side is
+/// never a match.
 pub fn lock_request_verdict(
-    client_pid: Option<i32>,
+    requester_pid: Option<u32>,
     shell_pid: Option<u32>,
     lock_screen_allowed: bool,
 ) -> LockVerdict {
     let ours = matches!(
-        (client_pid, shell_pid),
-        (Some(pid), Some(shell)) if u32::try_from(pid).ok() == Some(shell)
+        (requester_pid, shell_pid),
+        (Some(pid), Some(shell)) if pid == shell
     );
     match (ours, lock_screen_allowed) {
         (true, true) => LockVerdict::Approved,
@@ -59,9 +63,9 @@ pub fn lock_request_verdict(
 /// Session-lock protocol state the handler and the runtime share.
 pub(crate) struct LockProtocol {
     pub(crate) state: SessionLockManagerState,
-    /// A lock request awaiting the runtime's decision, with the
-    /// requesting client's pid.
-    pub(crate) pending: Option<(SessionLocker, Option<i32>)>,
+    /// The supervised shell's lock request awaiting the runtime's
+    /// decision. Never another client's: those are refused on arrival.
+    pub(crate) pending: Option<SessionLocker>,
     /// Only this runtime-approved client may supply visible lock surfaces.
     pub(crate) owner: Option<ClientId>,
     /// Only the approved lock resource may request release.
@@ -89,33 +93,41 @@ impl LockProtocol {
     }
 }
 
+/// The client behind a lock request.
+fn locker_client(locker: &SessionLocker) -> Option<ClientId> {
+    locker.ext_session_lock().client().map(|c| c.id())
+}
+
 impl SessionLockHandler for State {
     fn lock_state(&mut self) -> &mut SessionLockManagerState {
         &mut self.lock_protocol.state
     }
 
     fn lock(&mut self, confirmation: SessionLocker) {
-        let pid = confirmation
+        if confirmation
             .ext_session_lock()
             .client()
-            .and_then(|client| client.get_credentials(&self.dh).ok())
-            .map(|credentials| credentials.pid);
-        // A newer request replaces an older one (dropping the old
-        // locker tells its client the lock failed).
-        let client = confirmation.ext_session_lock().client().map(|c| c.id());
-        let owner = self.lock_protocol.owner.as_ref();
-        // Replacement discards abandoned pending surfaces, while a foreign
-        // request cannot remove an already approved owner's surfaces.
-        self.lock_protocol.surfaces.retain(|(surface, _)| {
-            let surface_client = surface.wl_surface().client().map(|c| c.id());
-            surface_client
-                .as_ref()
-                .is_some_and(|id| Some(id) == owner || Some(id) == client.as_ref())
-        });
-        self.lock_protocol.pending = Some((confirmation, pid));
+            .as_ref()
+            .and_then(crate::ClientState::pinned_shell_pid)
+            .is_none()
+        {
+            // Refused on arrival: dropping the locker sends `finished`,
+            // and the shell's pending request, the approved owner and
+            // their surfaces are untouched. So no other client's request
+            // can cancel the shell's before the runtime judges it.
+            return;
+        }
+        // A newer request from the shell replaces its older one (dropping
+        // the old locker tells it that lock failed), and with it any
+        // abandoned pending surfaces, but never an approved owner's.
+        self.lock_protocol.pending = Some(confirmation);
+        self.retain_claimed_surfaces();
     }
 
     fn unlock(&mut self) {
+        // This is protocol-resource cleanup, not the security transition.
+        // Runtime::release_lock has already quarantined physical holds and
+        // restored the session keyboard owner before permitting this request.
         self.lock_protocol.client_unlocked = true;
         self.lock_protocol.owner = None;
         self.lock_protocol.approved_lock = None;
@@ -126,16 +138,14 @@ impl SessionLockHandler for State {
         let Some(client) = surface.wl_surface().client().map(|c| c.id()) else {
             return;
         };
-        let pending_client = self
+        let pending = self
             .lock_protocol
             .pending
             .as_ref()
-            .and_then(|(locker, _)| locker.ext_session_lock().client().map(|c| c.id()));
+            .is_some_and(|locker| locker_client(locker).as_ref() == Some(&client));
         // Protocol clients may create surfaces before Locked. Keep those
         // pending surfaces, but expose them only after runtime approval.
-        if self.lock_protocol.owner.as_ref() != Some(&client)
-            && pending_client.as_ref() != Some(&client)
-        {
+        if self.lock_protocol.owner.as_ref() != Some(&client) && !pending {
             return;
         }
         let Some(output) = smithay::output::Output::from_resource(&output) else {
@@ -201,10 +211,29 @@ impl Dispatch<ExtSessionLockV1, SessionLockState> for State {
 }
 
 impl State {
-    /// A lock request the runtime has not yet decided on, with the
-    /// requesting client's pid.
-    pub fn take_lock_request(&mut self) -> Option<(SessionLocker, Option<i32>)> {
-        self.lock_protocol.pending.take()
+    /// The shell's lock request the runtime has not yet decided on, with
+    /// the live pinned pid of its connection, read now: `None` once the
+    /// process that opened the connection has exited.
+    pub fn take_lock_request(&mut self) -> Option<(SessionLocker, Option<u32>)> {
+        let locker = self.lock_protocol.pending.take()?;
+        let pid = locker
+            .ext_session_lock()
+            .client()
+            .as_ref()
+            .and_then(crate::ClientState::pinned_shell_pid);
+        Some((locker, pid))
+    }
+
+    /// Drop the lock surfaces nobody may still show: those of a client
+    /// that is neither the approved owner nor waiting on a lock request.
+    fn retain_claimed_surfaces(&mut self) {
+        let lock = &mut self.lock_protocol;
+        let pending = lock.pending.as_ref().and_then(locker_client);
+        let owner = &lock.owner;
+        lock.surfaces.retain(|(surface, _)| {
+            let client = surface.wl_surface().client().map(|c| c.id());
+            client.is_some() && (client == *owner || client == pending)
+        });
     }
 
     /// Resolve a request after the runtime has checked the supervised PID.
@@ -212,18 +241,10 @@ impl State {
     pub fn resolve_lock_request(&mut self, locker: SessionLocker, approved: bool) {
         if approved {
             self.lock_protocol.approved_lock = Some(locker.ext_session_lock().clone());
-            self.lock_protocol.owner = locker.ext_session_lock().client().map(|c| c.id());
+            self.lock_protocol.owner = locker_client(&locker);
             self.lock_protocol.client_unlocked = false;
         }
-        let owner = self.lock_protocol.owner.as_ref();
-        self.lock_protocol.surfaces.retain(|(surface, _)| {
-            surface
-                .wl_surface()
-                .client()
-                .map(|c| c.id())
-                .as_ref()
-                .is_some_and(|id| Some(id) == owner)
-        });
+        self.retain_claimed_surfaces();
         if approved {
             locker.lock();
         }
@@ -291,7 +312,7 @@ mod tests {
 
     #[test]
     fn an_unknown_pid_is_never_the_shell() {
-        // No SO_PEERCRED credentials, or no supervised shell running
+        // No live pinned shell connection, or no supervised shell running
         // (crashed, being restarted): nobody may lock.
         assert_eq!(
             lock_request_verdict(None, Some(4242), true),
@@ -303,20 +324,6 @@ mod tests {
         );
         assert_eq!(
             lock_request_verdict(None, None, true),
-            LockVerdict::RefusedForeign
-        );
-    }
-
-    #[test]
-    fn negative_pids_never_wrap_onto_the_shell_pid() {
-        // A bogus negative pid must not alias the shell's through an
-        // unsigned cast (-1 as u32 == u32::MAX).
-        assert_eq!(
-            lock_request_verdict(Some(-1), Some(u32::MAX), true),
-            LockVerdict::RefusedForeign
-        );
-        assert_eq!(
-            lock_request_verdict(Some(i32::MIN), Some(1 << 31), true),
             LockVerdict::RefusedForeign
         );
     }
