@@ -100,12 +100,12 @@ impl Policy {
 
     /// `allowed-failures` and `enable-{password,smartcard,switchable}-authentication`.
     fn read_auth(s: &gio::Settings) -> AuthPolicy {
-        AuthPolicy {
-            allowed_failures: u32::try_from(s.int("allowed-failures")).unwrap_or(0).max(1),
-            password: s.boolean("enable-password-authentication"),
-            smartcard: s.boolean("enable-smartcard-authentication"),
-            switchable: s.boolean("enable-switchable-authentication"),
-        }
+        auth_policy(
+            s.int("allowed-failures"),
+            s.boolean("enable-password-authentication"),
+            s.boolean("enable-smartcard-authentication"),
+            s.boolean("enable-switchable-authentication"),
+        )
     }
 }
 
@@ -666,13 +666,21 @@ impl Greeter {
         self.host.reset();
         self.host.set_user(None);
         *self.prompt_user.borrow_mut() = None;
-        if !self.host.needs_username() {
-            self.begin_without_user();
-            return;
-        }
-        if self.policy.disable_user_list || self.users.borrow().is_empty() {
-            self.ask_username();
-            return;
+        let have_users = !self.users.borrow().is_empty();
+        match landing(
+            self.host.needs_username(),
+            self.policy.disable_user_list,
+            have_users,
+        ) {
+            Landing::NoUser => {
+                self.begin_without_user();
+                return;
+            }
+            Landing::Username => {
+                self.ask_username();
+                return;
+            }
+            Landing::Users => {}
         }
         self.options.set_visible(false);
         self.stack.set_visible_child_name("users");
@@ -735,7 +743,8 @@ impl Greeter {
 
     fn back(self: &Rc<Self>) {
         if self.asking_username.get() {
-            if !self.policy.disable_user_list && !self.users.borrow().is_empty() {
+            let have_users = !self.users.borrow().is_empty();
+            if landing(true, self.policy.disable_user_list, have_users) == Landing::Users {
                 self.show_users();
             }
             return;
@@ -790,36 +799,18 @@ impl Greeter {
     }
 
     fn apply_input(self: &Rc<Self>, input: Input) {
-        match input {
-            Input::Event {
-                request,
-                service,
-                event,
-            } => self
-                .machine
-                .borrow_mut()
-                .event(&self.host, request, service, &event),
-            Input::Result { request, applied } => {
-                if applied && self.channels.is_reauth(request) {
+        let left = to_machine(&mut self.machine.borrow_mut(), &self.host, input);
+        match left {
+            Left::Nothing => {}
+            Left::Verified(request) => {
+                if self.channels.is_reauth(request) {
                     // GDM switches to the user's running session.
                     let user = self.prompt_user.borrow().clone().unwrap_or_default();
                     trace(&format!("greeter reauthenticated user={user}"));
                 }
-                self.machine
-                    .borrow_mut()
-                    .result(&self.host, request, applied);
             }
-            Input::Ask {
-                request,
-                sequence,
-                ask,
-            } => self
-                .machine
-                .borrow_mut()
-                .ask(&self.host, request, sequence, ask),
-            Input::Restart => self.machine.borrow_mut().restart(&self.host),
-            Input::Mechanisms => self.mechanisms_changed(),
-            Input::Timer { token, secs } => {
+            Left::Mechanisms => self.mechanisms_changed(),
+            Left::Timer { token, secs } => {
                 let weak = Rc::downgrade(self);
                 glib::timeout_add_seconds_local_once(
                     u32::try_from(secs).unwrap_or(u32::MAX),
@@ -880,15 +871,8 @@ impl Greeter {
         self.mechanism_box.set_visible(!list.is_empty());
         *self.mechanism_buttons.borrow_mut() = buttons;
         trace(&format!(
-            "greeter mechanisms list={} selected={}",
-            list.iter()
-                .map(|m| format!("{}:{}", m.service, m.role.name()))
-                .collect::<Vec<_>>()
-                .join(","),
-            selected
-                .as_ref()
-                .map(|m| format!("{}:{}", m.service, m.role.name()))
-                .unwrap_or_default()
+            "greeter mechanisms {}",
+            mechanisms_trace(&list, selected.as_ref())
         ));
         if let Some(default) = self.host.default_mechanism() {
             self.select_mechanism(&default);
@@ -898,19 +882,15 @@ impl Greeter {
     /// loginDialog.js `_selectAuthMechanism` → authPrompt.js
     /// `selectMechanism`.
     fn select_mechanism(self: &Rc<Self>, mechanism: &Mechanism) {
-        if !self.machine.borrow().can_select() {
-            return;
+        let mut machine = self.machine.borrow_mut();
+        if machine.can_select() {
+            trace(&format!(
+                "greeter select-mechanism service={} role={}",
+                mechanism.service,
+                mechanism.role.name()
+            ));
         }
-        trace(&format!(
-            "greeter select-mechanism service={} role={}",
-            mechanism.service,
-            mechanism.role.name()
-        ));
-        let old = self.machine.borrow().prompt_step();
-        self.machine.borrow_mut().set_prompt_step(0);
-        if !self.host.select(mechanism) {
-            self.machine.borrow_mut().set_prompt_step(old);
-        }
+        select_mechanism(&mut machine, &self.host, mechanism);
     }
 
     fn apply(&self, view: &View) {
@@ -1173,7 +1153,7 @@ impl Greeter {
                 return;
             };
             let was = greeter.own_active.replace(Some(session.active));
-            if session.active && was == Some(false) {
+            if login_screen_activated(was, session.active) {
                 trace("greeter login-screen-activated");
                 if greeter.machine.borrow().verifying() {
                     greeter.show_users();
@@ -1199,17 +1179,17 @@ impl Greeter {
     /// The user list's `logged-in` ring (`UserListItem._onUserChanged`).
     fn decorate_rows(&self) {
         let logged_in = self.logged_in.borrow();
-        for (index, user) in self.users.borrow().iter().enumerate() {
+        let marks = logged_in_rows(&self.users.borrow(), &logged_in);
+        for (index, on) in marks.into_iter().enumerate() {
             let Some(row) = i32::try_from(index)
                 .ok()
                 .and_then(|i| self.user_list.row_at_index(i))
             else {
                 continue;
             };
-            let on = logged_in.contains(&user.name);
             set_class(&row, "logged-in", on);
             row.update_property(&[gtk::accessible::Property::Description(if on {
-                "Logged in"
+                LOGGED_IN
             } else {
                 ""
             })]);
@@ -1302,6 +1282,127 @@ impl Greeter {
             trace("greeter registered");
         });
     }
+}
+
+/// A user row's description when the user has a session.
+const LOGGED_IN: &str = "Logged in";
+
+/// `allowed-failures` and `enable-{password,smartcard,switchable}-authentication`;
+/// every login gets at least one try.
+fn auth_policy(
+    allowed_failures: i32,
+    password: bool,
+    smartcard: bool,
+    switchable: bool,
+) -> AuthPolicy {
+    AuthPolicy {
+        allowed_failures: u32::try_from(allowed_failures).unwrap_or(0).max(1),
+        password,
+        smartcard,
+        switchable,
+    }
+}
+
+/// Where the login dialog lands on a reset (`_onReset`).
+#[derive(Debug, PartialEq, Eq)]
+enum Landing {
+    /// No username is needed (smartcard alone is allowed): verification
+    /// begins without one (`_hideUserListAndBeginVerification`).
+    NoUser,
+    /// "Not listed?"'s question: the list is disabled or empty.
+    Username,
+    Users,
+}
+
+fn landing(needs_username: bool, disable_user_list: bool, have_users: bool) -> Landing {
+    if !needs_username {
+        Landing::NoUser
+    } else if disable_user_list || !have_users {
+        Landing::Username
+    } else {
+        Landing::Users
+    }
+}
+
+/// What is left of a conversation input once the machine took its part.
+#[derive(Debug, PartialEq, Eq)]
+enum Left {
+    Nothing,
+    /// The request verified.
+    Verified(u64),
+    /// Login Options' mechanisms changed.
+    Mechanisms,
+    /// Call `Conversations::timeout(token)` after `secs`.
+    Timer {
+        token: u64,
+        secs: u64,
+    },
+}
+
+fn to_machine(machine: &mut AuthMachine, host: &Conversations, input: Input) -> Left {
+    match input {
+        Input::Event {
+            request,
+            service,
+            event,
+        } => machine.event(host, request, service, &event),
+        Input::Result { request, applied } => {
+            machine.result(host, request, applied);
+            if applied {
+                return Left::Verified(request);
+            }
+        }
+        Input::Ask {
+            request,
+            sequence,
+            ask,
+        } => machine.ask(host, request, sequence, ask),
+        Input::Restart => machine.restart(host),
+        Input::Mechanisms => return Left::Mechanisms,
+        Input::Timer { token, secs } => return Left::Timer { token, secs },
+    }
+    Left::Nothing
+}
+
+/// `list=SERVICE:ROLE,… selected=SERVICE:ROLE` of the mechanisms trace.
+fn mechanisms_trace(list: &[Mechanism], selected: Option<&Mechanism>) -> String {
+    let item = |m: &Mechanism| format!("{}:{}", m.service, m.role.name());
+    format!(
+        "list={} selected={}",
+        list.iter().map(item).collect::<Vec<_>>().join(","),
+        selected.map(item).unwrap_or_default()
+    )
+}
+
+/// authPrompt.js `selectMechanism`: unless verification succeeded or an
+/// answer is being checked, the chosen mechanism starts at step 0 (the old
+/// step stays when nothing changed). Whether it changed.
+fn select_mechanism(
+    machine: &mut AuthMachine,
+    host: &Conversations,
+    mechanism: &Mechanism,
+) -> bool {
+    if !machine.can_select() {
+        return false;
+    }
+    let old = machine.prompt_step();
+    machine.set_prompt_step(0);
+    if host.select(mechanism) {
+        return true;
+    }
+    machine.set_prompt_step(old);
+    false
+}
+
+/// loginDialog.js `_loginScreenSessionActivated`: the login screen's own
+/// session became active again (back from a user's session).
+fn login_screen_activated(was: Option<bool>, active: bool) -> bool {
+    active && was == Some(false)
+}
+
+/// Each listed user's `logged-in` ring (`UserListItem._onUserChanged`).
+fn logged_in_rows(users: &[accounts::User], logged_in: &[String]) -> Vec<bool> {
+    users.iter().map(|u| logged_in.contains(&u.name)).collect()
 }
 
 fn set_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {
@@ -1397,4 +1498,222 @@ fn main() -> glib::ExitCode {
         GREETER.with(|g| *g.borrow_mut() = Some(greeter));
     });
     app.run_with_args::<&str>(&[])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use conversation::{PASSWORD_SERVICE, SMARTCARD_SERVICE};
+
+    /// GDM 51.1.1's own `org.gnome.login-screen`, as the proof installs it.
+    const SCHEMA: &str = include_str!("../../../scripts/lib/org.gnome.login-screen.gschema.xml");
+
+    fn schema_default(key: &str) -> &'static str {
+        let at = SCHEMA
+            .find(&format!("<key name=\"{key}\""))
+            .unwrap_or_else(|| panic!("{key} is not in the schema"));
+        let rest = &SCHEMA[at..];
+        let start = rest.find("<default>").unwrap() + "<default>".len();
+        let end = rest.find("</default>").unwrap();
+        rest[start..end].trim()
+    }
+
+    #[test]
+    fn the_schemas_defaults_are_the_default_policy() {
+        let on = |key| schema_default(key) == "true";
+        assert_eq!(
+            auth_policy(
+                schema_default("allowed-failures").parse().unwrap(),
+                on("enable-password-authentication"),
+                on("enable-smartcard-authentication"),
+                on("enable-switchable-authentication"),
+            ),
+            AuthPolicy::default()
+        );
+    }
+
+    #[test]
+    fn allowed_failures_leaves_at_least_one_try() {
+        assert_eq!(auth_policy(5, true, true, true).allowed_failures, 5);
+        assert_eq!(auth_policy(1, true, true, true).allowed_failures, 1);
+        assert_eq!(auth_policy(0, true, true, true).allowed_failures, 1);
+        assert_eq!(auth_policy(-3, true, true, true).allowed_failures, 1);
+        assert_eq!(
+            auth_policy(3, false, true, false),
+            AuthPolicy {
+                allowed_failures: 3,
+                password: false,
+                smartcard: true,
+                switchable: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_reset_lands_on_the_list_the_question_or_no_user() {
+        assert_eq!(landing(true, false, true), Landing::Users);
+        assert_eq!(
+            landing(true, true, true),
+            Landing::Username,
+            "disable-user-list"
+        );
+        assert_eq!(
+            landing(true, false, false),
+            Landing::Username,
+            "nobody listed"
+        );
+        for (list_off, users) in [(false, true), (true, true), (false, false)] {
+            assert_eq!(
+                landing(false, list_off, users),
+                Landing::NoUser,
+                "smartcard alone needs no username"
+            );
+        }
+        // Only smartcard allowed, switchable off: no username.
+        let host = Conversations::new(auth_policy(3, false, true, false));
+        assert_eq!(landing(host.needs_username(), false, true), Landing::NoUser);
+        let host = Conversations::new(auth_policy(3, false, true, true));
+        assert_eq!(landing(host.needs_username(), false, true), Landing::Users);
+    }
+
+    #[test]
+    fn only_a_return_to_an_active_login_screen_starts_over() {
+        assert!(login_screen_activated(Some(false), true));
+        assert!(!login_screen_activated(None, true), "first look");
+        assert!(!login_screen_activated(Some(true), true));
+        assert!(!login_screen_activated(Some(true), false));
+        assert!(!login_screen_activated(Some(false), false));
+    }
+
+    #[test]
+    fn users_with_a_session_are_ringed() {
+        let user = |name: &str| accounts::User {
+            path: format!("/org/freedesktop/Accounts/User{name}"),
+            name: name.into(),
+            real_name: String::new(),
+            icon_file: String::new(),
+            system_account: false,
+            locked: false,
+        };
+        let users = [user("ada"), user("mary"), user("annie")];
+        assert_eq!(
+            logged_in_rows(&users, &["annie".into(), "mary".into(), "root".into()]),
+            vec![false, true, true]
+        );
+        assert_eq!(logged_in_rows(&users, &[]), vec![false; 3]);
+        assert_eq!(LOGGED_IN, "Logged in");
+    }
+
+    /// The login dialog's loop: the machine takes the conversations'
+    /// inputs; what is left of them comes back.
+    fn pump(machine: &mut AuthMachine, host: &Conversations, inputs: Vec<Input>) -> Vec<Left> {
+        let mut left: Vec<Left> = inputs
+            .into_iter()
+            .map(|input| to_machine(machine, host, input))
+            .collect();
+        loop {
+            let inputs = host.take_inputs();
+            if inputs.is_empty() {
+                return left;
+            }
+            left.extend(inputs.into_iter().map(|i| to_machine(machine, host, i)));
+        }
+    }
+
+    fn calls(host: &Conversations) -> Vec<Call> {
+        host.take_outgoing().into_iter().map(|(c, _)| c).collect()
+    }
+
+    #[test]
+    fn login_options_select_the_first_mechanism_and_start_it() {
+        let host = Conversations::new(auth_policy(3, true, true, false));
+        let mut machine = AuthMachine::new(1.0);
+        host.set_user(Some("hedy".into()));
+        machine.show_prompt(&host, false);
+        assert_eq!(
+            pump(&mut machine, &host, Vec::new()),
+            vec![Left::Mechanisms]
+        );
+        assert!(calls(&host).is_empty(), "nothing selected yet");
+        let (list, selected) = host.mechanisms();
+        assert_eq!(
+            mechanisms_trace(&list, selected.as_ref()),
+            "list=gdm-password:password,gdm-smartcard:smartcard selected="
+        );
+        let default = host.default_mechanism().unwrap();
+        assert!(select_mechanism(&mut machine, &host, &default));
+        assert_eq!(machine.prompt_step(), 0);
+        assert!(pump(&mut machine, &host, Vec::new()).contains(&Left::Mechanisms));
+        let sent = calls(&host);
+        assert_eq!(
+            sent.last(),
+            Some(&Call::BeginVerificationForUser {
+                service: PASSWORD_SERVICE.into(),
+                user: "hedy".into()
+            }),
+            "{sent:?}"
+        );
+        let (list, selected) = host.mechanisms();
+        assert_eq!(
+            mechanisms_trace(&list, selected.as_ref()),
+            "list=gdm-password:password,gdm-smartcard:smartcard selected=gdm-password:password"
+        );
+        assert_eq!(host.default_mechanism(), None, "one is selected");
+        // The selected one again changes nothing and keeps the step.
+        let step = machine.prompt_step();
+        assert!(!select_mechanism(&mut machine, &host, &list[0]));
+        assert_eq!(machine.prompt_step(), step);
+        assert!(host.take_inputs().is_empty());
+        // Smartcard: a soft reset begins gdm-smartcard once gdm-password
+        // stopped.
+        assert!(select_mechanism(&mut machine, &host, &list[1]));
+        pump(&mut machine, &host, Vec::new());
+        let inputs = host.on_signal(&Signal::ConversationStopped {
+            service: PASSWORD_SERVICE.into(),
+        });
+        pump(&mut machine, &host, inputs);
+        let sent = calls(&host);
+        assert_eq!(
+            sent.last(),
+            Some(&Call::BeginVerificationForUser {
+                service: SMARTCARD_SERVICE.into(),
+                user: "hedy".into()
+            }),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn no_mechanism_is_chosen_while_an_answer_is_checked() {
+        let host = Conversations::new(auth_policy(3, true, true, false));
+        let mut machine = AuthMachine::new(1.0);
+        host.set_user(Some("ada".into()));
+        machine.show_prompt(&host, false);
+        pump(&mut machine, &host, Vec::new());
+        select_mechanism(&mut machine, &host, &host.default_mechanism().unwrap());
+        pump(&mut machine, &host, Vec::new());
+        calls(&host);
+        let inputs = host.on_signal(&Signal::SecretInfoQuery {
+            service: PASSWORD_SERVICE.into(),
+            query: "Password: ".into(),
+        });
+        pump(&mut machine, &host, inputs);
+        machine.submit(&host, "secret".into());
+        assert!(matches!(
+            calls(&host).as_slice(),
+            [Call::AnswerQuery { .. }]
+        ));
+        assert!(!machine.can_select());
+        let smartcard = host.mechanisms().0[1].clone();
+        assert!(!select_mechanism(&mut machine, &host, &smartcard));
+        assert_eq!(host.mechanisms().1.unwrap().service, PASSWORD_SERVICE);
+        // Verified: what is left says so (a re-authentication's trace).
+        let inputs = host.on_signal(&Signal::VerificationComplete {
+            service: PASSWORD_SERVICE.into(),
+        });
+        let left = pump(&mut machine, &host, inputs);
+        assert!(matches!(left.as_slice(), [Left::Verified(_)]), "{left:?}");
+        assert!(machine.succeeded());
+        assert!(!select_mechanism(&mut machine, &host, &smartcard));
+    }
 }

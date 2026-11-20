@@ -1767,6 +1767,11 @@ mod tests {
         "priority": ["eidp", "password"]}}"#;
 
     fn found(c: &Conversations) -> (u64, Vec<Input>) {
+        found_json(c, SELECTION)
+    }
+
+    /// A begin whose switchable conversation got SSSD's `json`.
+    fn found_json(c: &Conversations, json: &str) -> (u64, Vec<Input>) {
         c.set_user(Some(USER.into()));
         let request = c.begin(AuthService::Password).unwrap();
         c.take_calls();
@@ -1774,10 +1779,222 @@ mod tests {
             service: s(SWITCHABLE_SERVICE),
             protocol: s("auth-mechanisms"),
             version: 1,
-            json: s(SELECTION),
+            json: s(json),
         });
         assert!(inputs.is_empty());
         (request, c.take_inputs())
+    }
+
+    /// SSSD's passkey mechanism (pam_sss's JSON).
+    fn passkey(connected: bool, attempts: i64) -> String {
+        json!({"authSelection": {"mechanisms": {"passkey": {
+            "name": "Passkey", "role": "passkey", "selectable": true,
+            "initInstruction": "Insert your passkey device, then press ENTER.",
+            "keyConnected": connected, "pinRequest": true, "pinAttempts": attempts,
+            "pinPrompt": "Security key PIN", "touchInstruction": "Touch security key",
+            "kerberos": true, "cryptoChallenge": "6uDMvRKj3W5xJV3HaQjZrtXMNmUUAjRGklFG2MIhN5s="}},
+            "priority": ["passkey"]}})
+        .to_string()
+    }
+
+    fn instruction(inputs: &[Input]) -> (u32, String) {
+        inputs
+            .iter()
+            .find_map(|i| match i {
+                Input::Ask {
+                    sequence,
+                    ask: Ask::Choices { prompt, choices },
+                    ..
+                } if choices.is_empty() => Some((*sequence, prompt.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no instruction in {inputs:?}"))
+    }
+
+    #[test]
+    fn sssd_passkey_without_the_key_asks_for_it() {
+        let c = Conversations::new(AuthPolicy::default());
+        let (_, inputs) = found_json(&c, &passkey(false, 8));
+        let (list, selected) = c.mechanisms();
+        assert_eq!(list.len(), 1);
+        assert_eq!(selected.unwrap().role, Role::Passkey);
+        let (sequence, prompt) = instruction(&inputs);
+        assert_eq!(prompt, "Insert your passkey device, then press ENTER.");
+        assert_eq!(
+            c.answer(AuthService::Password, sequence, String::new()),
+            None,
+            "nothing answers an instruction"
+        );
+        assert!(c.take_calls().is_empty());
+        assert!(!c.cancel_requested(), "Back at the key prompt resets hard");
+        assert!(c.take_inputs().is_empty());
+    }
+
+    #[test]
+    fn sssd_passkey_pin_then_touch_replies_json() {
+        let c = Conversations::new(AuthPolicy::default());
+        let (request, inputs) = found_json(&c, &passkey(true, 2));
+        let pin = query_sequence(&inputs);
+        assert!(inputs.contains(&Input::Event {
+            request,
+            service: AuthService::Password,
+            event: AuthEvent::Query {
+                sequence: pin,
+                question: s("Security key PIN"),
+                secret: true
+            }
+        }));
+        assert!(
+            inputs.contains(&Input::Event {
+                request,
+                service: AuthService::Password,
+                event: AuthEvent::Info {
+                    text: s("You have 2 attempts left. If the passkey gets locked, you may not able to access your account.")
+                }
+            }),
+            "{inputs:?}"
+        );
+        assert!(!c.cancel_requested(), "Back at the PIN resets hard");
+        assert_eq!(
+            c.answer(AuthService::Password, pin, "4711".into()),
+            Some(request)
+        );
+        let calls = c.take_calls();
+        let [Call::JsonReply { service, json }] = calls.as_slice() else {
+            panic!("{calls:?}")
+        };
+        assert_eq!(service, SWITCHABLE_SERVICE);
+        assert_eq!(
+            serde_json::from_str::<Value>(json).unwrap(),
+            json!({"authSelection": {"status": "Ok", "passkey": {
+                "pin": "4711", "kerberos": true,
+                "cryptoChallenge": "6uDMvRKj3W5xJV3HaQjZrtXMNmUUAjRGklFG2MIhN5s="}}})
+        );
+        assert!(!format!("{calls:?}").contains("4711"));
+        let (touch, prompt) = instruction(&c.take_inputs());
+        assert_eq!(prompt, "Touch security key");
+        assert_eq!(c.answer(AuthService::Password, touch, String::new()), None);
+        // Back at the touch: the PIN went out, a soft reset asks again.
+        assert!(c.cancel_requested());
+        assert_eq!(c.take_inputs(), vec![Input::Restart]);
+        assert_eq!(
+            c.on_signal(&Signal::VerificationComplete {
+                service: s(SWITCHABLE_SERVICE)
+            }),
+            vec![Input::Result {
+                request,
+                applied: true
+            }]
+        );
+    }
+
+    #[test]
+    fn sssd_passkey_warns_only_of_its_last_three_attempts() {
+        for (attempts, warned) in [(0, false), (1, true), (3, true), (4, false), (8, false)] {
+            let c = Conversations::new(AuthPolicy::default());
+            let (_, inputs) = found_json(&c, &passkey(true, attempts));
+            let warning = inputs.iter().any(|i| {
+                matches!(i, Input::Event { event: AuthEvent::Info { text }, .. }
+                    if text.contains("attempts left"))
+            });
+            assert_eq!(warning, warned, "pinAttempts {attempts}");
+        }
+    }
+
+    const PASSWORD_ONLY: &str = r#"{"authSelection": {"mechanisms": {
+        "password": {"name": "Password", "role": "password", "selectable": true, "prompt": "Password"}},
+        "priority": ["password"]}}"#;
+
+    #[test]
+    fn an_expired_sssd_password_is_changed_through_pam_queries() {
+        let c = Conversations::new(AuthPolicy::default());
+        let (request, inputs) = found_json(&c, PASSWORD_ONLY);
+        let password = query_sequence(&inputs);
+        c.answer(AuthService::Password, password, "old".into());
+        assert!(matches!(
+            c.take_calls().as_slice(),
+            [Call::JsonReply { .. }]
+        ));
+        // Before SSSD says the password expired, PAM queries are not its.
+        let query = |question: &str| {
+            c.on_signal(&Signal::SecretInfoQuery {
+                service: s(SWITCHABLE_SERVICE),
+                query: s(question),
+            })
+        };
+        assert!(query("New Password: ").is_empty());
+        assert_eq!(
+            c.on_signal(&Signal::Info {
+                service: s(SWITCHABLE_SERVICE),
+                text: s("Password expired. Change your password now.")
+            }),
+            vec![Input::Event {
+                request,
+                service: AuthService::Password,
+                event: AuthEvent::Info {
+                    text: s("Password expired. Change your password now.")
+                }
+            }]
+        );
+        // The new password, twice, as PAM answers (not JSON).
+        for (question, answer) in [("New Password: ", "new"), ("Reenter new Password: ", "new")] {
+            let inputs = query(question);
+            let sequence = query_sequence(&inputs);
+            assert!(matches!(
+                &inputs[0],
+                Input::Event { event: AuthEvent::Query { question: q, secret: true, .. }, .. }
+                    if q == question
+            ));
+            assert_eq!(
+                c.answer(AuthService::Password, sequence, answer.into()),
+                Some(request)
+            );
+            assert_eq!(
+                c.take_calls(),
+                vec![Call::AnswerQuery {
+                    service: s(SWITCHABLE_SERVICE),
+                    answer: s(answer)
+                }]
+            );
+        }
+        assert!(
+            c.on_signal(&Signal::InfoQuery {
+                service: s(SWITCHABLE_SERVICE),
+                query: s("x")
+            })
+            .is_empty(),
+            "`_handleOnInfoQuery` shows nothing"
+        );
+        assert_eq!(
+            c.on_signal(&Signal::VerificationComplete {
+                service: s(SWITCHABLE_SERVICE)
+            }),
+            vec![Input::Result {
+                request,
+                applied: true
+            }]
+        );
+        // A new begin forgets the reset.
+        c.reset();
+        let (_, inputs) = found_json(&c, PASSWORD_ONLY);
+        c.answer(AuthService::Password, query_sequence(&inputs), "old".into());
+        assert!(query("New Password: ").is_empty());
+    }
+
+    #[test]
+    fn only_the_password_mechanism_takes_the_expiry_notice() {
+        let c = Conversations::new(AuthPolicy::default());
+        found_json(&c, &passkey(true, 8));
+        c.on_signal(&Signal::Info {
+            service: s(SWITCHABLE_SERVICE),
+            text: s("Password expired. Change your password now."),
+        });
+        assert!(c
+            .on_signal(&Signal::SecretInfoQuery {
+                service: s(SWITCHABLE_SERVICE),
+                query: s("New Password: ")
+            })
+            .is_empty());
     }
 
     #[test]

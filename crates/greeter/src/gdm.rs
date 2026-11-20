@@ -830,4 +830,109 @@ mod tests {
             })
             .unwrap();
     }
+
+    #[test]
+    fn access_denied_is_gdms_refusal_only() {
+        assert!(access_denied(&gio::DBusError::new_for_dbus_error(
+            "org.freedesktop.DBus.Error.AccessDenied",
+            "Login screen only allowed to open reauthentication channels for running sessions",
+        )));
+        assert!(access_denied(&glib::Error::new(
+            gio::DBusError::AccessDenied,
+            "denied"
+        )));
+        assert!(!access_denied(&gio::DBusError::new_for_dbus_error(
+            "org.gnome.DisplayManager.Manager.Error.NotSupported",
+            "no"
+        )));
+        assert!(!access_denied(&gio::DBusError::new_for_dbus_error(
+            "org.freedesktop.DBus.Error.ServiceUnknown",
+            "GDM is not running"
+        )));
+        assert!(!access_denied(&glib::Error::new(
+            gio::IOErrorEnum::NotConnected,
+            "closed"
+        )));
+    }
+
+    /// GDM's Manager on a private message bus: `OpenReauthenticationChannel`
+    /// answers mary (a running session) with her channel's address and
+    /// refuses ada as gdm-manager.c does.
+    #[test]
+    fn reauthentication_channels_are_opened_for_running_sessions_only() {
+        use std::io::BufRead;
+        let mut daemon = std::process::Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("dbus-daemon starts");
+        let mut address = String::new();
+        std::io::BufReader::new(daemon.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        let address = address.trim().to_owned();
+        let context = glib::MainContext::new();
+        let answers = context
+            .with_thread_default(|| {
+                context.block_on(async {
+                    let flags = gio::DBusConnectionFlags::AUTHENTICATION_CLIENT
+                        | gio::DBusConnectionFlags::MESSAGE_BUS_CONNECTION;
+                    let gdm = gio::DBusConnection::for_address_future(&address, flags, None)
+                        .await
+                        .unwrap();
+                    let node = gio::DBusNodeInfo::for_xml(&format!(
+                        r#"<node><interface name="{MANAGER_INTERFACE}">
+                        <method name="OpenReauthenticationChannel">
+                          <arg name="username" direction="in" type="s"/>
+                          <arg name="address" direction="out" type="s"/>
+                        </method></interface></node>"#
+                    ))
+                    .unwrap();
+                    let _object = gdm
+                        .register_object(
+                            MANAGER_PATH,
+                            &node.lookup_interface(MANAGER_INTERFACE).unwrap(),
+                        )
+                        .method_call(|_, _, _, _, _, params, invocation| {
+                            match params.get::<(String,)>().map(|(user,)| user).as_deref() {
+                                Some("mary") => invocation.return_value(Some(
+                                    &("unix:path=/run/gdm/dbus/dbus-mary",).to_variant(),
+                                )),
+                                _ => invocation.return_dbus_error(
+                                    "org.freedesktop.DBus.Error.AccessDenied",
+                                    "Login screen only allowed to open reauthentication \
+                                     channels for running sessions",
+                                ),
+                            }
+                        })
+                        .build()
+                        .unwrap();
+                    gdm.call_future(
+                        Some("org.freedesktop.DBus"),
+                        "/org/freedesktop/DBus",
+                        "org.freedesktop.DBus",
+                        "RequestName",
+                        Some(&(MANAGER_NAME, 4u32).to_variant()),
+                        None,
+                        gio::DBusCallFlags::NONE,
+                        -1,
+                    )
+                    .await
+                    .unwrap();
+                    let greeter = gio::DBusConnection::for_address_future(&address, flags, None)
+                        .await
+                        .unwrap();
+                    (
+                        open_reauthentication_channel(&greeter, "mary").await,
+                        open_reauthentication_channel(&greeter, "ada").await,
+                    )
+                })
+            })
+            .unwrap();
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        assert_eq!(answers.0.unwrap(), "unix:path=/run/gdm/dbus/dbus-mary");
+        let refused = answers.1.unwrap_err();
+        assert!(access_denied(&refused), "{refused:?}");
+    }
 }

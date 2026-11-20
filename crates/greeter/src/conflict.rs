@@ -10,7 +10,7 @@
 //! the dialog closes with "Login Attempt Timed Out" and the prompt
 //! resets.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -25,6 +25,52 @@ use crate::{trace, Greeter};
 
 /// loginDialog.js `_CONFLICTING_SESSION_DIALOG_TIMEOUT`.
 const DIALOG_TIMEOUT_SECS: u32 = 60;
+/// `_notifyConflictingSessionDialogClosed`'s title and body.
+const TIMED_OUT: &str = "Login Attempt Timed Out: login took too long, please try again";
+
+/// The dialog's state: the login it holds back and its timer's run.
+#[derive(Debug, Default)]
+struct Pending {
+    /// The open dialog: the GDM service to start and the conflicting
+    /// session's id.
+    open: Option<(String, String)>,
+    /// Bumped on every open and close: a timer of an older run is stale
+    /// (`closed` removes `closeDialogTimeoutId`).
+    generation: u64,
+}
+
+impl Pending {
+    /// The dialog opens; its timer's run.
+    fn open(&mut self, service: String, session: String) -> u64 {
+        self.generation += 1;
+        self.open = Some((service, session));
+        self.generation
+    }
+
+    fn close(&mut self) -> Option<(String, String)> {
+        self.generation += 1;
+        self.open.take()
+    }
+
+    /// The timer of `run` fired: whether the dialog closes for it ("Login
+    /// Attempt Timed Out", the prompt resets).
+    fn timed_out(&mut self, run: u64) -> bool {
+        if self.generation != run || self.open.is_none() {
+            return false;
+        }
+        self.close();
+        true
+    }
+
+    /// logind removed session `id`: the service to start when it was the
+    /// conflicting one.
+    fn removed(&mut self, id: &str) -> Option<String> {
+        if self.open.as_ref().is_none_or(|(_, session)| session != id) {
+            return None;
+        }
+        self.close().map(|(service, _)| service)
+    }
+}
 
 /// conflictingSessionDialog.js's text for the four local/remote cases.
 pub fn banner_text(greeter_remote: bool, conflicting_remote: bool, user: &str) -> String {
@@ -45,10 +91,7 @@ pub struct Conflict {
     cancel: gtk::Button,
     force: gtk::Button,
     spinner: gtk::Spinner,
-    /// The open dialog: the GDM service to start and the conflicting
-    /// session's id.
-    open: RefCell<Option<(String, String)>>,
-    generation: Cell<u64>,
+    pending: RefCell<Pending>,
 }
 
 impl Conflict {
@@ -104,22 +147,24 @@ impl Conflict {
             cancel,
             force,
             spinner,
-            open: RefCell::default(),
-            generation: Cell::new(0),
+            pending: RefCell::default(),
         })
     }
 
     pub fn is_open(&self) -> bool {
-        self.open.borrow().is_some()
+        self.pending.borrow().open.is_some()
     }
 
-    fn close(&self) -> Option<(String, String)> {
-        self.generation.set(self.generation.get() + 1);
+    fn hide(&self) {
         self.dialog.set_visible(false);
         self.content.set_sensitive(true);
         self.spinner.set_visible(false);
         self.spinner.set_spinning(false);
-        self.open.borrow_mut().take()
+    }
+
+    fn close(&self) -> Option<(String, String)> {
+        self.hide();
+        self.pending.borrow_mut().close()
     }
 }
 
@@ -223,9 +268,7 @@ impl Greeter {
         c.content.set_sensitive(false);
         c.dialog.set_visible(true);
         c.cancel.grab_focus();
-        *c.open.borrow_mut() = Some((service, session.id));
-        let generation = c.generation.get() + 1;
-        c.generation.set(generation);
+        let run = c.pending.borrow_mut().open(service, session.id);
         let weak = Rc::downgrade(self);
         glib::timeout_add_local_once(
             Duration::from_secs(u64::from(DIALOG_TIMEOUT_SECS)),
@@ -233,14 +276,15 @@ impl Greeter {
                 let Some(greeter) = weak.upgrade() else {
                     return;
                 };
-                if greeter.conflict.generation.get() != generation {
+                if !greeter.conflict.pending.borrow_mut().timed_out(run) {
                     return;
                 }
-                greeter.conflict.close();
+                greeter.conflict.hide();
                 trace("greeter conflict timed-out");
-                let toast = adw::Toast::new(
-                    "Login Attempt Timed Out: login took too long, please try again",
-                );
+                let toast = adw::Toast::new(TIMED_OUT);
+                // `Urgency.CRITICAL`: messageTray.js never times its
+                // banner out; it stays until dismissed.
+                toast.set_timeout(0);
                 greeter.conflict.toasts.add_toast(toast);
                 greeter.abandon_opened();
             },
@@ -249,13 +293,11 @@ impl Greeter {
 
     /// logind removed a session: the conflicting one's end starts ours.
     pub(crate) fn session_removed(self: &Rc<Self>, id: &str) {
-        let open = self.conflict.open.borrow().clone();
-        if let Some((service, conflicting)) = open {
-            if conflicting == id {
-                self.conflict.close();
-                trace(&format!("greeter conflict stopped session={id}"));
-                self.start_session(&service);
-            }
+        let service = self.conflict.pending.borrow_mut().removed(id);
+        if let Some(service) = service {
+            self.conflict.hide();
+            trace(&format!("greeter conflict stopped session={id}"));
+            self.start_session(&service);
         }
     }
 }
@@ -272,5 +314,47 @@ mod tests {
         assert!(banner_text(true, false, "ada")
             .starts_with("Remote login is not possible because a local session"));
         assert!(banner_text(true, true, "ada").contains("log out from the remote session"));
+    }
+
+    #[test]
+    fn an_unanswered_dialog_times_out_after_a_minute() {
+        assert_eq!(DIALOG_TIMEOUT_SECS, 60, "loginDialog.js");
+        assert!(TIMED_OUT.starts_with("Login Attempt Timed Out"));
+        let mut pending = Pending::default();
+        let run = pending.open("gdm-password".into(), "9".into());
+        assert!(pending.timed_out(run));
+        assert!(pending.open.is_none(), "the dialog closed");
+        assert!(!pending.timed_out(run), "once");
+    }
+
+    #[test]
+    fn a_closed_dialogs_timer_does_nothing() {
+        let mut pending = Pending::default();
+        let run = pending.open("gdm-password".into(), "9".into());
+        assert_eq!(
+            pending.close(),
+            Some(("gdm-password".into(), "9".into())),
+            "Cancel"
+        );
+        assert!(!pending.timed_out(run));
+        // A later dialog is not closed by the first one's timer.
+        let first = pending.open("gdm-password".into(), "9".into());
+        pending.close();
+        let second = pending.open("gdm-password".into(), "9".into());
+        assert!(!pending.timed_out(first));
+        assert!(pending.open.is_some());
+        assert!(pending.timed_out(second));
+    }
+
+    #[test]
+    fn the_conflicting_sessions_end_starts_the_login_and_stops_the_timer() {
+        let mut pending = Pending::default();
+        assert_eq!(pending.removed("9"), None, "no dialog");
+        let run = pending.open("gdm-password".into(), "9".into());
+        assert_eq!(pending.removed("c42"), None, "another session");
+        assert_eq!(pending.removed("9"), Some("gdm-password".into()));
+        assert!(pending.open.is_none());
+        assert!(!pending.timed_out(run));
+        assert_eq!(pending.removed("9"), None, "started once");
     }
 }
