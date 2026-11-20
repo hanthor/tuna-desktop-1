@@ -885,6 +885,13 @@ pub struct Runtime {
     /// Signature of the last presented nested frame; unchanged means
     /// no client, cursor, or effect moved, so the tick submits nothing.
     winit_signature: Option<crate::native_repaint::FrameSignature>,
+    /// Buffer age of the nested window's next back buffer, read right
+    /// after each swap. EGL defines it only while the window's surface is
+    /// current; the commits uploaded before a frame (#1084) leave the
+    /// context current without it, where Smithay's query fails and reads
+    /// as 0, so every client commit (the panel clock's minute) repainted
+    /// the whole output (#1154).
+    winit_age: usize,
     /// When hidden windows last got their throttled frame callbacks
     /// ([`HIDDEN_FRAME_INTERVAL`](crate::occlusion::HIDDEN_FRAME_INTERVAL)).
     hidden_beat: Option<Instant>,
@@ -921,6 +928,9 @@ pub struct Runtime {
     unlock_worker: Option<UnlockWorker>,
     unlock_quarantined: Option<crate::auth_owner::Attempt>,
     unlock_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// logind's sleep delay inhibitor, held until the lock shows (G3).
+    #[cfg(feature = "drm")]
+    sleep_delay: crate::sleep::Delay,
     /// The lock screen's password and fingerprint conversations (#366).
     auth: auth::Conversations,
     /// org.gnome.Mutter.IdleMonitor.
@@ -1289,7 +1299,7 @@ impl Runtime {
             |stream, runtime: &mut Runtime| {
                 let mut client_data = ClientState::native_connection(&stream);
                 // Layer-shell is the supervised shell's alone (#1048).
-                client_data.admit_supervised_shell(&stream, runtime.shell.child_pid());
+                client_data.admit_supervised_shell(runtime.shell.child_pid());
                 if runtime
                     .display
                     .handle()
@@ -1598,6 +1608,7 @@ impl Runtime {
             frame_costs: std::collections::BTreeMap::new(),
             winit_tracker: None,
             winit_signature: None,
+            winit_age: 0,
             hidden_beat: None,
             hidden_waiting: false,
             active_at: Instant::now(),
@@ -1650,6 +1661,8 @@ impl Runtime {
             unlock_worker: None,
             unlock_quarantined: None,
             unlock_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(feature = "drm")]
+            sleep_delay: crate::sleep::Delay::default(),
             auth: auth::Conversations::default(),
             idle_monitor: crate::idle_monitor::start(),
             session_manager: crate::session_manager::start(),
@@ -1874,6 +1887,43 @@ impl Runtime {
         }
     }
 
+    /// Surface trees on screen, each where it sits: what a frame draws,
+    /// less the windows nothing on screen shows (#503).
+    fn shown_surfaces(
+        &self,
+    ) -> Vec<(
+        smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        Point<i32, Logical>,
+    )> {
+        let clones_shown = self.overview_motion.progress() > 0.0
+            || !self.switcher_thumbnails.is_empty()
+            || !self.casts.is_empty();
+        let shown_ids = shown_ids(
+            &self.manager,
+            &self.frame_costs,
+            clones_shown,
+            self.is_locked(),
+        );
+        let hidden = hidden_surfaces(&self.manager, &shown_ids);
+        let mut shown =
+            crate::frame_timing::drawn_roots(&self.state, &self.manager, self.is_locked());
+        shown.retain(|(surface, _)| !hidden.contains(surface));
+        shown
+    }
+
+    /// logind's sleep delay (see [`crate::sleep`]): held while the session
+    /// owns its VT and may lock, and given up during a sleep once it is
+    /// locked and every lit output scans out a locked frame.
+    #[cfg(feature = "drm")]
+    fn sync_sleep_delay(&mut self, monitor: &crate::sleep::Monitor) {
+        let (active, shown) = match &self.backend {
+            Backend::Drm(drm) => (drm.active, self.is_locked() && drm.shows_locked()),
+            Backend::Winit(_) => (false, false),
+        };
+        let allowed = self.control.lock_screen_allowed();
+        self.sleep_delay.sync(monitor, active, allowed, shown);
+    }
+
     #[cfg(feature = "drm")]
     fn on_session_event(&mut self, event: smithay::backend::session::Event) {
         let activated = matches!(event, smithay::backend::session::Event::ActivateSession);
@@ -1927,7 +1977,8 @@ impl Runtime {
         }
         // Input capture never survives the lock (#1040).
         self.input_capture.revoke_all();
-        self.capture_authority.publish(true, self.shell.child_pid());
+        self.capture_authority
+            .publish(true, self.control.shell_bus_names());
         self.state.set_shortcut_inhibition_locked(true);
         // A three-finger swipe under way is the unlocked session's: end
         // it cancelled, so its overview or workspace slide never resumes
@@ -1935,6 +1986,14 @@ impl Runtime {
         // swipeTracker.js `_updateTouchpadGesture`/`_endTouchpadGesture`).
         self.interrupt_shell_swipe(crate::state::system_millis() as u32);
         self.control.set_overview(false);
+        // GNOME's lock closes its own shell menus and their grabs: a
+        // shell menu left open behind the lock kept the lock screen's
+        // keys. An application's popup grab outlives the lock.
+        self.state.dismiss_shell_popup_grab_for_lock();
+        // A client drag ends cancelled: its icon would draw above the
+        // lock, as nothing else may.
+        self.state
+            .cancel_client_dnd(crate::state::system_millis() as u32);
         // The shield covers GNOME's switcher popup and its window clones;
         // no window image may draw over the lock.
         self.switcher_thumbnails.clear();
@@ -2109,11 +2168,17 @@ impl Runtime {
         self.lock.unlock(self.lock_now_ms());
         self.control.set_locked(false);
         self.state.set_shortcut_inhibition_locked(false);
+        // This is the sole authoritative locked -> unlocked transition.
+        // The lock held the keyboard (`hold_lock_focus`): quarantine
+        // lock-origin holds, then hand it back to the session's owner
+        // without raising, as GNOME's unlock returns focus to the
+        // focused window. The lock dismissed the shell's popup grabs
+        // (`dismiss_shell_popup_grab_for_lock`); an application's grab
+        // outlived it and is returned to. A second
+        // `restore_keyboard_owner` here would raise that window and take
+        // the keyboard from a grabbing popup.
+        self.manager.unlock_input(&mut self.state);
         self.overlay.hide();
-        // The lock held the keyboard (`hold_lock_focus`); hand it back,
-        // as GNOME's unlock returns focus to the focused window: to a
-        // popup grab that outlived the lock first.
-        self.manager.refocus_after_lock(&mut self.state);
     }
 
     /// logind's `Lock` signal (`loginctl lock-session`): `screenShield.js`
@@ -2322,6 +2387,15 @@ impl Runtime {
             self.cursor
                 .locate
                 .feed_matched(&input, matches_key, self.manager.pointer_pos(), now);
+        }
+        // Trusted AT already received the genuine event above. Session
+        // shortcuts, grabs and clients must not see a lock-origin hold.
+        if !self.is_locked()
+            && self
+                .manager
+                .discard_quarantined_key_input(&mut self.state, &input)
+        {
+            return;
         }
         if self.is_locked() {
             // Locking ends the session's action mode mid-swipe: GNOME's
@@ -2943,27 +3017,25 @@ impl Runtime {
             .map(|(name, cost)| (name.clone(), cost.to_json()))
             .collect::<serde_json::Map<_, _>>()
             .into();
-        // Windows whose frame callbacks run at the hidden rate.
-        doc["throttled_windows"] = if self.overview_motion.progress() > 0.0
+        // Windows whose frame callbacks run at the hidden rate, or not at
+        // all once suspended.
+        let clones_shown = self.overview_motion.progress() > 0.0
             || !self.switcher_thumbnails.is_empty()
-            || !self.casts.is_empty()
-        {
-            serde_json::json!([])
-        } else {
-            let scene: Vec<u64> = self
-                .manager
-                .render_entries()
-                .iter()
-                .map(|(id, _, _)| *id)
-                .collect();
-            let shown = crate::occlusion::shown_windows(&scene, self.frame_costs.values());
-            serde_json::json!(snapshot
-                .windows
-                .iter()
-                .map(|w| w.id)
-                .filter(|id| !shown.contains(id))
-                .collect::<Vec<_>>())
-        };
+            || !self.casts.is_empty();
+        let shown = shown_ids(
+            &self.manager,
+            &self.frame_costs,
+            clones_shown,
+            self.is_locked(),
+        );
+        doc["throttled_windows"] = serde_json::json!(snapshot
+            .windows
+            .iter()
+            .map(|w| w.id)
+            .filter(|id| !shown.contains(id))
+            .collect::<Vec<_>>());
+        // Windows in Mutter's suspend state (xdg_toplevel `suspended`).
+        doc["suspended_windows"] = serde_json::json!(self.manager.suspended_windows());
         doc["wallpaper_diagnostics"] = if self.is_locked() {
             serde_json::Value::Null
         } else {
@@ -3092,6 +3164,10 @@ impl Runtime {
         } else {
             serde_json::Value::Null
         };
+        #[cfg(feature = "drm")]
+        {
+            doc["sleep_delay"] = serde_json::json!(self.sleep_delay.record());
+        }
         doc["pointer_fullscreen_blocked"] = serde_json::json!(
             (!self.is_locked()).then(|| self.manager.fullscreen_at(self.manager.pointer_pos()))
         );
@@ -3157,6 +3233,7 @@ impl Runtime {
             self.overview_dragged(),
             self.manager.pointer_pos(),
             output,
+            crate::windows::WORK_AREA_TOP,
             &self.manager.overview_windows(),
         )
     }
@@ -5118,6 +5195,8 @@ impl Runtime {
             self.state.protocols.idle_notifier.next_deadline(),
             self.orca.next_deadline(),
             self.manager.workspace_lease_deadline(),
+            // Mutter's 3 s from hidden to suspended (#503).
+            self.manager.suspend_deadline(),
             self.wallpaper.maintenance_deadline(),
             // Night Light (#339): exact preview expiry (or its past-due
             // restoring obligation) and the bounded settings re-read.
@@ -5513,7 +5592,8 @@ impl Runtime {
         // ext-session-lock-v1: only the supervised shell may lock, and
         // locking through the protocol engages the compositor's own
         // flag. Anyone else's locker is dropped, which tells it the
-        // lock failed.
+        // lock failed. Only the shell's request is ever pending (others
+        // are refused on arrival), so there is at most one to judge.
         if let Some((locker, pid)) = self.state.take_lock_request() {
             use crate::session_lock::{lock_request_verdict, LockVerdict};
             let verdict = lock_request_verdict(
@@ -5531,7 +5611,7 @@ impl Runtime {
                     eprintln!("tuna-compositor: session lock refused by administrator policy");
                 }
                 LockVerdict::RefusedForeign => {
-                    eprintln!("tuna-compositor: session lock refused for pid {pid:?}");
+                    eprintln!("tuna-compositor: session lock refused for pinned pid {pid:?}");
                 }
             }
             self.state
@@ -5584,13 +5664,20 @@ impl Runtime {
         }
         self.idle_monitor.tick();
         // Idle timeout from input timestamps: lock the untouched session.
-        // A live idle inhibitor (video, presentation) counts as activity,
-        // and so does its end: the loop may have slept through the
-        // inhibited stretch, so the idle clock restarts when it ends
-        // instead of the session locking at once (#503). An idle
-        // inhibitor held through org.gnome.SessionManager (a portal or
+        // An idle inhibitor on a surface the user sees (video,
+        // presentation) counts as activity, and so does its end: the loop
+        // may have slept through the inhibited stretch, so the idle clock
+        // restarts when it ends instead of the session locking at once
+        // (#503). An unmapped, hidden or occluded surface's inhibitor
+        // lapses, as zwp_idle_inhibit_v1 says. An idle inhibitor held
+        // through org.gnome.SessionManager (a portal or
         // org.freedesktop.ScreenSaver caller) counts the same way.
-        let inhibited = self.state.idle_inhibited() || self.session_manager.idle_inhibited();
+        let shown = if self.state.protocols.inhibitors.is_empty() {
+            Vec::new()
+        } else {
+            self.shown_surfaces()
+        };
+        let inhibited = self.state.idle_inhibited(&shown) || self.session_manager.idle_inhibited();
         if self
             .lock
             .inhibitor_activity(self.idle_inhibited, inhibited, self.lock_now_ms())
@@ -5667,8 +5754,6 @@ impl Runtime {
         }
         // Only the supervised shell may hold a control session (#30):
         // between restarts nobody may.
-        self.capture_authority
-            .publish(self.is_locked(), self.shell.child_pid());
         self.control.set_auth_owner(
             self.shell
                 .child_pid()
@@ -5679,6 +5764,10 @@ impl Runtime {
             Some(pid) => PeerGate::Pid(pid),
             None => PeerGate::Closed,
         });
+        // The shell is known on the session bus only by the unique names its
+        // current pinned control session declared (ADR 0010).
+        self.capture_authority
+            .publish(self.is_locked(), self.control.shell_bus_names());
         // Control EOF, manual/protocol/idle gates and shell PID gating are now current.
         // Never grant from a channel callback before those changes are observed.
         self.cancel_invalid_unlock();
@@ -6242,6 +6331,10 @@ impl Runtime {
         self.wallpaper.set_time(now);
         self.transitions
             .advance(now, locked, lock_ready, shell_ready);
+        // The shell reports the screen saver active only once the
+        // curtain has landed: gnome-settings-daemon blanks on it.
+        self.control
+            .set_lock_screen_shown(self.transitions.lock_shown());
         // While locked the curtain carries the lock surface and its
         // background; it never uncovers content (`show_content`).
         let lock_curtain = self.transitions.curtain().filter(|_| locked);
@@ -6362,6 +6455,12 @@ impl Runtime {
         // scene hides: their frame callbacks keep full rate then.
         let clones_shown =
             overview.is_some() || !self.switcher_thumbnails.is_empty() || !self.casts.is_empty();
+        // Mutter's suspend state (#503): a window this frame is about to
+        // show (a workspace slide or the overview starting, unminimized,
+        // unlocked) resumes before the frame draws it. Culling is the
+        // last frame's; the update after drawing catches what it changed.
+        let shown = shown_ids(&self.manager, &self.frame_costs, clones_shown, locked);
+        self.manager.update_suspended(&shown, Instant::now());
         // The pointer is the compositor's to draw (#342): hidden while
         // locked or blanked, as the software pointer always was.
         let cursor_shown = !locked && blank_alpha < 1.0;
@@ -6397,10 +6496,7 @@ impl Runtime {
         // Hidden windows' frame callbacks wait for the hidden beat; by
         // themselves they never make an unchanged output repaint.
         #[cfg(feature = "drm")]
-        let throttled = throttled_surfaces(
-            &self.state,
-            &hidden_surfaces(&self.manager, &self.frame_costs, clones_shown),
-        );
+        let throttled = throttled_surfaces(&self.state, &hidden_surfaces(&self.manager, &shown));
         // DisplayConfig PowerSaveMode (#355): the scene advanced above as
         // Mutter's stage does, but nothing is scanned out; frames complete
         // on the slow dummy page flip instead.
@@ -6420,7 +6516,7 @@ impl Runtime {
             Backend::Winit(backend) => {
                 backend.window().set_cursor_visible(false);
                 let size = backend.window_size();
-                let age = backend.buffer_age().unwrap_or(0);
+                let age = self.winit_age;
                 let mut presented: PresentedFrame = None;
                 {
                     let (renderer, mut framebuffer) = backend
@@ -6464,12 +6560,14 @@ impl Runtime {
                         view,
                         &switcher_previews(&self.manager, &self.switcher_thumbnails),
                     );
-                    elements.top.extend(dnd_icon_elements(
-                        renderer,
-                        &self.state,
-                        view,
-                        self.manager.pointer_pos(),
-                    ));
+                    if !locked {
+                        elements.top.extend(dnd_icon_elements(
+                            renderer,
+                            &self.state,
+                            view,
+                            self.manager.pointer_pos(),
+                        ));
+                    }
                     elements.flashes = screenshot_flash_elements(&flashes, view);
                     install_bell(&mut elements, view, bell, desktop);
                     let decor = decor_for_output(&decor_global, view);
@@ -6715,9 +6813,13 @@ impl Runtime {
                 if let Some((damage, drawn, presented_cursor)) = presented {
                     self.frame_costs.insert("winit".to_owned(), drawn);
                     send_surface_scales(&self.state, &self.manager);
+                    // Unknown until the swap succeeds: a failed one leaves
+                    // the back buffer's contents unknown.
+                    self.winit_age = 0;
                     backend
                         .submit(Some(&damage))
                         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                    self.winit_age = backend.buffer_age().unwrap_or(0);
                     if let Some(surface) = &presented_cursor {
                         crate::cursor::Cursor::frame_done(
                             &crate::cursor::Pointer::Surface(surface.clone()),
@@ -6830,12 +6932,14 @@ impl Runtime {
                         view,
                         &switcher_previews(&self.manager, &self.switcher_thumbnails),
                     );
-                    elements.top.extend(dnd_icon_elements(
-                        renderer,
-                        &self.state,
-                        view,
-                        self.manager.pointer_pos(),
-                    ));
+                    if !locked {
+                        elements.top.extend(dnd_icon_elements(
+                            renderer,
+                            &self.state,
+                            view,
+                            self.manager.pointer_pos(),
+                        ));
+                    }
                     elements.flashes = screenshot_flash_elements(&flashes, view);
                     install_bell(&mut elements, view, bell, desktop);
                     let decor = decor_for_output(&decor_global, view);
@@ -7114,6 +7218,7 @@ impl Runtime {
                     out.mode_committed();
                     out.trace_wake_submission();
                     out.pending = true;
+                    out.scanout_lock.queued(locked);
                     if index == 0 {
                         self.performance_trace.queued(
                             Duration::from(self.state.presentation_now()),
@@ -7149,7 +7254,9 @@ impl Runtime {
                 queued
             }
         };
-        let hidden = hidden_surfaces(&self.manager, &self.frame_costs, clones_shown);
+        let shown = shown_ids(&self.manager, &self.frame_costs, clones_shown, locked);
+        self.manager.update_suspended(&shown, Instant::now());
+        let hidden = hidden_surfaces(&self.manager, &shown);
         let throttled = throttled_surfaces(&self.state, &hidden);
         if queued {
             // A pending page flip is not another rendered frame.
@@ -7167,13 +7274,21 @@ impl Runtime {
     /// [`HIDDEN_FRAME_INTERVAL`](crate::occlusion::HIDDEN_FRAME_INTERVAL),
     /// without a scanout (#503). Mutter sends an obscured surface none;
     /// the slow beat keeps clients live that wait on a callback before
-    /// acting on anything.
+    /// acting on anything, until they are told they are suspended: like
+    /// Mutter's, those get none until they resume (a configure they still
+    /// have to acknowledge keeps them at full rate meanwhile).
     fn hidden_frame_beat(
         &mut self,
         throttled: &[smithay::reexports::wayland_server::protocol::wl_surface::WlSurface],
     ) {
         let now = Instant::now();
-        self.hidden_waiting = crate::frame_timing::pending_callbacks(throttled);
+        let suspended = self.manager.told_suspended_surfaces();
+        let throttled: Vec<_> = throttled
+            .iter()
+            .filter(|surface| !suspended.contains(surface))
+            .cloned()
+            .collect();
+        self.hidden_waiting = crate::frame_timing::pending_callbacks(&throttled);
         if !self.hidden_waiting
             || self.hidden_beat.is_some_and(|last| {
                 now.saturating_duration_since(last) < crate::occlusion::HIDDEN_FRAME_INTERVAL
@@ -7185,7 +7300,7 @@ impl Runtime {
             return;
         };
         let time = Duration::from(self.state.presentation_now());
-        for surface in throttled {
+        for surface in &throttled {
             send_frames_surface_tree(surface, &output, time, Some(Duration::ZERO), |_, _| {
                 Some(output.clone())
             });
@@ -8632,25 +8747,39 @@ fn send_surface_scales(state: &State, manager: &WindowManager) {
     }
 }
 
-/// Root surfaces of the managed windows nothing on screen shows (#503),
-/// whose frame callbacks drop to [`HIDDEN_FRAME_INTERVAL`](crate::occlusion::HIDDEN_FRAME_INTERVAL).
-/// Empty while window clones or casts show every window. A toplevel the
-/// window manager does not track (not yet mapped, or not a managed
-/// window) is never throttled.
-fn hidden_surfaces(
+/// Windows something on screen shows (#503): none while locked (GNOME
+/// Shell hides its window group under the lock screen), every window
+/// while window clones (overview, switcher) or casts show them, else the
+/// scene less what the last frame wholly culled
+/// ([`shown_windows`](crate::occlusion::shown_windows)).
+fn shown_ids(
     manager: &WindowManager,
     costs: &std::collections::BTreeMap<String, FrameCost>,
     clones_shown: bool,
-) -> Vec<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface> {
-    if clones_shown {
+    locked: bool,
+) -> Vec<u64> {
+    if locked {
         return Vec::new();
+    }
+    if clones_shown {
+        return manager.window_ids().collect();
     }
     let scene: Vec<u64> = manager
         .render_entries()
         .iter()
         .map(|(id, _, _)| *id)
         .collect();
-    let shown = crate::occlusion::shown_windows(&scene, costs.values());
+    crate::occlusion::shown_windows(&scene, costs.values())
+}
+
+/// Root surfaces of the managed windows not `shown` (#503), whose frame
+/// callbacks drop to [`HIDDEN_FRAME_INTERVAL`](crate::occlusion::HIDDEN_FRAME_INTERVAL).
+/// A toplevel the window manager does not track (not yet mapped, or not
+/// a managed window) is never throttled.
+fn hidden_surfaces(
+    manager: &WindowManager,
+    shown: &[u64],
+) -> Vec<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface> {
     manager
         .window_ids()
         .filter(|id| !shown.contains(id))
@@ -8845,6 +8974,25 @@ fn run_loop(
     session: &NestedSession,
     mut probe: impl FnMut(&mut AuthOwnerProbe<'_>) -> Option<Duration>,
 ) -> Result<RunStats, RuntimeError> {
+    // Graceful shutdown on SIGTERM/SIGINT/SIGHUP: ending the loop drops the
+    // runtime, whose supervisor kills the shell child (ADR 0003 kill
+    // on exit). Without this a signal would bypass `Drop` and orphan
+    // the shell on a dead socket. logind creates session scopes with
+    // SendSIGHUP=yes, so a session stop sends SIGHUP right after SIGTERM;
+    // left at its default it killed the compositor before teardown, so the
+    // owned Orca was never retired (#836). The flag write is the only work
+    // done in the handler; the loop observes it below. Installed before
+    // `launch` binds the Wayland socket, so a session that is visible is
+    // already one a signal ends through teardown (#1174).
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    for signal in [
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGHUP,
+    ] {
+        signal_hook::flag::register(signal, std::sync::Arc::clone(&shutdown))
+            .map_err(|e| RuntimeError::Loop(format!("signal handler failed: {e}")))?;
+    }
     let (mut runtime, mut event_loop) = Runtime::launch(session)?;
     #[cfg(feature = "drm")]
     let _session_services = if matches!(runtime.backend, Backend::Drm(_)) {
@@ -8889,25 +9037,10 @@ fn run_loop(
     if let Some(session) = &logind_session {
         session.set_wake(&runtime.wake);
     }
-    // Graceful shutdown on SIGTERM/SIGINT/SIGHUP: ending the loop drops the
-    // runtime, whose supervisor kills the shell child (ADR 0003 kill
-    // on exit). Without this a signal would bypass `Drop` and orphan
-    // the shell on a dead socket. logind creates session scopes with
-    // SendSIGHUP=yes, so a session stop sends SIGHUP right after SIGTERM;
-    // left at its default it killed the compositor before teardown, so the
-    // owned Orca was never retired (#836). The flag write is the only work
-    // done in the handler; the loop observes it below.
-    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    for signal in [
-        signal_hook::consts::SIGTERM,
-        signal_hook::consts::SIGINT,
-        signal_hook::consts::SIGHUP,
-    ] {
-        signal_hook::flag::register(signal, std::sync::Arc::clone(&shutdown))
-            .map_err(|e| RuntimeError::Loop(format!("signal handler failed: {e}")))?;
-    }
     // The same signals, and child exits for the shell, IME and XWayland
-    // supervisors, wake a loop that may be sleeping (#503).
+    // supervisors, wake a loop that may be sleeping (#503). A signal taken
+    // before this source exists is still seen: the flag is read before the
+    // first wait.
     let signals = crate::wake::signal_source(&[
         signal_hook::consts::SIGCHLD,
         signal_hook::consts::SIGTERM,
@@ -8969,6 +9102,7 @@ fn run_loop(
         if let Some(monitor) = &sleep_monitor {
             let (lock, wake) = monitor.take();
             runtime.on_sleep_update(lock, wake);
+            runtime.sync_sleep_delay(monitor);
         }
         #[cfg(feature = "drm")]
         match logind_session.as_ref().and_then(|session| session.take()) {

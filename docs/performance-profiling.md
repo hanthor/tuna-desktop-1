@@ -139,13 +139,16 @@ drawn frame (`FrameCost` in `crates/compositor/src/occlusion.rs`):
 | `rendered` | Scene elements repainted in that frame |
 | `culled` | Elements skipped because they are wholly under opaque elements |
 | `damage_rects`, `damage_area` | Number and total area (physical pixels) of damaged rectangles |
+| `damage_bounds` | `[x, y, w, h]` box around the damaged rectangles (output pixels, before rotation), or `null` |
 | `output_area` | The output's area, for the damage ratio |
 | `drawn_windows` | Window ids with any element showing on the output, repainted or not |
 | `culled_windows` | Window ids entirely hidden behind opaque surfaces |
 
 `throttled_windows` sits next to it. It lists windows whose frame callbacks
-run at the hidden rate (about 1 Hz). [docs/testing.md](testing.md#frame-cost)
-covers both fields and the `G-OCCLUSION-CULL` proof that checks them.
+run at the hidden rate (about 1 Hz), or not at all once `suspended_windows`
+lists them and their client was told ([protocols](protocols.md#suspended-windows)).
+[docs/testing.md](testing.md#frame-cost) covers both fields and the
+`G-OCCLUSION-CULL` proof that checks them.
 
 ```bash
 TUNA_COMPOSITOR_STATE="$PWD/state.json" target/release/tuna-compositor \

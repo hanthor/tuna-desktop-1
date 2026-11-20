@@ -64,7 +64,7 @@ lists; its own tests assert that ordinary clients never see it.
 | wl_output | 4 | one per connected output |
 | wl_data_device_manager | 3 | |
 | zwp_primary_selection_device_manager_v1 | 1 | |
-| xdg_wm_base | 7 | popups with positioner constraints and grabs; edge states from Mutter's edge constraints: maximized is tiled and constrained on every edge, a half tile on its top, bottom and outer edge (Tuna Desktop pairs no tiles, so the inner edge stays free); constrained states only to version 7 binds |
+| xdg_wm_base | 7 | popups with positioner constraints and grabs; edge states from Mutter's edge constraints: maximized is tiled and constrained on every edge, a half tile on its top, bottom and outer edge (Tuna Desktop pairs no tiles, so the inner edge stays free); constrained states only to version 7 binds; toplevels are told `suspended` as in Mutter ([below](#suspended-windows)) |
 | zxdg_output_manager_v1 | 3 | |
 | zwlr_layer_shell_v1 | 4 | Tuna Desktop's own shell draws through it. Only the supervised shell's connection may bind it: the native connection whose peer pid is the shell child the compositor spawned and still holds (`tuna-shell-gtk`, or the legacy `tuna-shell-host`), the same identity the session lock and control socket check. Every other client's registry omits it and a blind bind by name is a protocol error (#1048; `ClientState::admit_supervised_shell`, `layer::is_shell_peer`) |
 | zwp_linux_dmabuf_v1 | 5 | only when the renderer reports formats; as Mutter, version 5 when the renderer's EGL device names a render node (else its DRM node), with default feedback naming that device and one tranche of the renderer's formats, and version 3 without one; no scanout tranche, since every surface is composited |
@@ -73,7 +73,7 @@ lists; its own tests assert that ordinary clients never see it.
 | wp_fractional_scale_manager_v1 | 1 | preferred scale 1 until #59 |
 | wp_single_pixel_buffer_manager_v1 | 1 | |
 | wp_cursor_shape_manager_v1 | 2 | shapes accepted; the compositor cursor is still the default arrow |
-| zwp_idle_inhibit_manager_v1 | 1 | a live inhibitor holds off the idle lock |
+| zwp_idle_inhibit_manager_v1 | 1 | an inhibitor holds off the idle lock while its surface is mapped and on screen: one on an unmapped surface, a window that never drew, a hidden or occluded window or one off every output lapses, as the protocol says |
 | zwp_text_input_manager_v3 | 1 | text fields reach the input method (#60) |
 | zwp_input_method_manager_v2 | 1 | private to the compositor-supervised IBus connection, using the same server-owned transport authorization as virtual keyboard; ordinary applications cannot discover or force-bind it. This is not a public GNOME IME API. One exact live input-method resource owns the seat; unavailable objects and their inert child IDs cannot type, observe surrounding text, reserve popup roles, take grabs or retire the owner |
 | zwp_pointer_gestures_v1 | 3 | swipes reach apps; three-finger swipes are the shell's (overview, workspaces) |
@@ -129,6 +129,33 @@ presentation-time, fifo and commit-timing follow the frame path
   primary output's page flip; nested, each frame) on every surface that
   receives frame callbacks, drawn or not, so a client on a hidden
   workspace never stalls.
+
+### Suspended windows
+
+The `xdg_toplevel` `suspended` state (xdg-shell v6) follows Mutter's
+window suspend state (`update_suspend_state` in `src/core/window.c`,
+`crates/compositor/src/suspend.rs`):
+
+- A window is shown while a frame draws any of it: on the active
+  workspace (or both during a workspace slide), not minimized, and not
+  wholly under opaque windows; while the overview, the window switcher
+  or a cast shows window clones, every window is. While the screen is
+  locked none is (GNOME Shell hides its window group under the lock).
+- A window not shown for 3 s (Mutter's `SUSPEND_HIDDEN_TIMEOUT_S`) gets a
+  configure with `suspended`. It gets one without it as soon as it is
+  shown again, before the frame that draws it (a culled window uncovered
+  by a moving window is told right after that frame).
+- Only a change of state is configured; a client older than v6 is never
+  told, and keeps the hidden windows' frame callbacks.
+- A hidden window gets frame callbacks about once a second; once told it
+  is suspended, none, as Mutter sends hidden surfaces none, until it is
+  shown again. A configure it has not acknowledged keeps full-rate
+  callbacks meanwhile.
+- `suspended_windows` in the compositor state lists the suspended
+  windows.
+
+Activation changes are configured the same way: a window losing focus
+gets one configure, never a second identical one.
 
 ### Keyboard shortcuts inhibit
 

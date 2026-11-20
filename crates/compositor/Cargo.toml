@@ -17,8 +17,12 @@ libloading = "0.9"
 roxmltree = "0.21"
 # org.gnome.Shell.Screenshot (#61): D-Bus service and PNG output.
 zbus = { workspace = true }
+# Capture-owner checks (#657) run as detached tasks on zbus's runtime.
+zruntime = { version = "0.2", features = ["helper"] }
 # Fingerprint setup race (#366): the async builder build bounded by the
-# attempt deadline (Timer + race), via zbus's own async-io/futures-lite.
+# attempt deadline (Timer + race). zbus 6 runs on its own runtime, so the
+# async-io timer (own reactor) and futures-lite combinators/StreamExt
+# are direct dependencies.
 async-io = "2.6"
 futures-lite = "2.6.1"
 xkbcommon.workspace = true
@@ -45,6 +49,7 @@ wayland-protocols.workspace = true
 wayland-server.workspace = true
 wayland-scanner = "=0.31.11"
 tuna-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
+tuna-output = { path = "../output", version = "0.1.0" }
 image.workspace = true
 tempfile = "3"
 tuna-wallpaper = { path = "../wallpaper" }
