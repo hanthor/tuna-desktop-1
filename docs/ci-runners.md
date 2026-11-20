@@ -301,10 +301,13 @@ code as root inside its pod.
    address), the kubelet, other namespaces' pods and Services (corral-web,
    punjab, KubeVirt) and link-local metadata are unreachable.
 5. **Headroom.** ResourceQuota `runner-ceiling` caps the namespace at 14 pods,
-   56 CPU / 196 GiB limits, 28 CPU / 82 GiB requests: up to 14 runners
-   run at once (karnataka: 28 CPU / 125 GiB allocatable; punjab is sized at
-   12 cores / 24 GiB). Each runner asks for
-   1.5 CPU / 5 GiB and is limited to 4 CPU / 14 GiB. The 45 GiB
+   56 CPU / 276 GiB limits, 28 CPU / 82 GiB requests (karnataka: 28 CPU /
+   125 GiB allocatable; punjab is sized at 12 cores / 24 GiB). Each runner
+   asks for 1.5 CPU / 5 GiB and is limited to 4 CPU / 24 GiB (shellcheck on
+   `scripts/tuna-gtk-shell-proof` peaks near 14 GiB). The limit quota fits
+   every configured runner at its own limit: 8 tuna-desktop runners at 24 GiB
+   and 3 iso-gpu runners at 28 GiB; when it does not, ARC logs "exceeded
+   quota", creates no pod, and jobs queue behind idle slots. The 45 GiB
    ephemeral-storage limit covers the container writable layer/logs, **not**
    the separate scratch PVCs (see below). Runner pods use PriorityClass
    `tuna-ci-runner` (-100, never preempts): new VMs and cluster services
