@@ -10920,8 +10920,9 @@ portal_probe() {
         fail G-SCREENSHOT-WINDOWS-DENY "the probe did not run inside $PORTAL_BACKEND: $(tail -3 "$ARTIFACTS/portal-probe-$1.log")"
 }
 portal_probe control org.gnome.Shell.Screenshot.Screenshot "(false, false, '$ARTIFACTS/portal-probe-control.png')"
-grep -q '^accepted (true, ' "$ARTIFACTS/portal-probe-control.txt" && [ -s "$ARTIFACTS/portal-probe-control.png" ] ||
+if ! { grep -q '^accepted (true, ' "$ARTIFACTS/portal-probe-control.txt" && [ -s "$ARTIFACTS/portal-probe-control.png" ]; }; then
     fail G-SCREENSHOT-WINDOWS-DENY "the portal identity was not admitted to Screenshot: $(cat "$ARTIFACTS/portal-probe-control.txt")"
+fi
 portal_probe windows org.tuna.Screenshot.ScreenshotWindows "('$windows_dir',)"
 grep -q '^error org.freedesktop.DBus.Error.AccessDenied ' "$ARTIFACTS/portal-probe-windows.txt" ||
     fail G-SCREENSHOT-WINDOWS-DENY "the portal identity took window screenshots: $(cat "$ARTIFACTS/portal-probe-windows.txt")"
