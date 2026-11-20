@@ -1823,7 +1823,7 @@ mod auth_transport_ui_tests {
             Box::new(|| logic::ClockFormat::TwentyFourHour),
         );
         ui.sync_connection_generation(Some(0));
-        let window = ui.screen(None);
+        let window = ui.screen(None, None);
         window.set_default_size(1280, 800);
         window.present();
         assert!(pump_until(Duration::from_secs(5), || window.is_mapped()
