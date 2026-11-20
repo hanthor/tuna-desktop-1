@@ -1265,7 +1265,7 @@ PSS split by mapping kind (heap, anonymous, shared memory, GPU, files), in
 the process and kind that grew. Final PSS must stay within
 warmup × 1.25 + 64 MiB, fds within warmup + 32 and mappings within
 warmup × 1.25 + 1024. These diagnostic bounds catch unbounded growth;
-they are separate from the GNOME performance targets in #73. A panic,
+they are separate from the GNOME performance targets in #503. A panic,
 compositor exit, lost input response, orphaned window or hung worker
 fails the lane. Pull requests touching the suite run ten churn rounds;
 the nightly run uses 300.
@@ -1299,9 +1299,9 @@ regression test in the protocol crate before its fix is merged.
 To reproduce locally, install the pinned tool and toolchain, then run:
 
 ```sh
-rustup toolchain install nightly-2026-08-28
+rustup toolchain install nightly-2026-11-13
 cargo install cargo-fuzz --version 0.13.2 --locked
-cargo +nightly-2026-08-28 fuzz run control_body -- -max_total_time=60 -max_len=1048580 -timeout=5 -rss_limit_mb=2048
+cargo +nightly-2026-11-13 fuzz run control_body -- -max_total_time=60 -max_len=1048580 -timeout=5 -rss_limit_mb=2048
 ```
 
 This covers the control decoders of #203; Wayland request handlers are
