@@ -290,6 +290,13 @@ pub struct LockUi {
     screens: RefCell<Vec<Screen>>,
     /// A lock was asked of the compositor and not yet released.
     requested: Cell<bool>,
+    /// The compositor's lock flag as last synced: a refused lock request
+    /// is retried only while it still says locked.
+    wants_lock: Cell<bool>,
+    /// Refused lock requests since the last granted one, for the backoff.
+    lock_attempts: Cell<u32>,
+    /// A retry is scheduled.
+    retry_pending: Cell<bool>,
     connection_generation: Cell<Option<u64>>,
     clock_format: Box<dyn Fn() -> logic::ClockFormat>,
     /// Wakes the clock on the minute while the lock screens are up.
@@ -320,6 +327,9 @@ impl LockUi {
             applying: Cell::new(false),
             screens: RefCell::new(Vec::new()),
             requested: Cell::new(false),
+            wants_lock: Cell::new(false),
+            lock_attempts: Cell::new(0),
+            retry_pending: Cell::new(false),
             connection_generation: Cell::new(None),
             clock_format,
             wall_clock: RefCell::new(None),
@@ -328,11 +338,24 @@ impl LockUi {
             notifications: RefCell::new(None),
         });
         {
+            // A refused request (ext_session_lock_v1.finished) leaves the
+            // session locked without a prompt unless the shell asks again:
+            // retry with backoff while the compositor still says locked.
             let weak = Rc::downgrade(&ui);
             ui.instance.connect_failed(move |_| {
                 eprintln!("tuna-shell-gtk: the compositor refused the session lock");
                 if let Some(ui) = weak.upgrade() {
                     ui.release_screens();
+                    ui.requested.set(false);
+                    ui.retry_lock();
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(&ui);
+            ui.instance.connect_locked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.lock_attempts.set(0);
                 }
             });
         }
@@ -404,6 +427,10 @@ impl LockUi {
     /// Follow the compositor's lock flag: lock when it says locked,
     /// release when it says unlocked.
     pub fn sync(self: &Rc<Self>, locked: bool) {
+        self.wants_lock.set(locked);
+        if !locked {
+            self.lock_attempts.set(0);
+        }
         if locked && !self.requested.get() {
             self.requested.set(true);
             if !self.instance.lock() {
@@ -441,6 +468,25 @@ impl LockUi {
             self.requested.set(false);
             self.instance.unlock();
         }
+    }
+
+    /// Ask for the lock again after a refusal, once the backoff for this
+    /// attempt has passed, if the compositor still says locked by then.
+    fn retry_lock(self: &Rc<Self>) {
+        if self.retry_pending.replace(true) {
+            return;
+        }
+        let attempt = self.lock_attempts.get();
+        self.lock_attempts.set(attempt.saturating_add(1));
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local_once(lock_retry_delay(attempt), move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.retry_pending.set(false);
+                if ui.wants_lock.get() {
+                    ui.sync(true);
+                }
+            }
+        });
     }
 
     /// A transport generation change aborts local entry only. It never releases
@@ -809,28 +855,47 @@ impl LockUi {
         // Vertical placement: GNOME puts the stack a third of the way
         // down (UnlockDialogLayout), which lands the 1280x800 clock at
         // y 275 and the prompt at y 205. The notifications take the
-        // bottom, never reaching up into the clock.
+        // bottom, never reaching up into the clock. Followed on every
+        // surface layout, never on a tick callback: one that never ends
+        // keeps the frame clock (and the session's frame callbacks)
+        // running at the refresh rate for as long as the lock screen is
+        // up, blanked or not (#1122). GTK's own layout handler, connected
+        // while the window realizes, runs first, so the window is already
+        // allocated; a widget queueing a resize (the clock's text) lays
+        // the surface out again.
         {
             let (clock_box, prompt) = (clock_box.clone(), prompt.clone());
             let scroller = notifications.widget().clone();
-            let last = Cell::new(-1);
-            window.add_tick_callback(move |w, _| {
-                let height = w.height();
-                let (clock_top, prompt_top) = logic::lock_offsets(height);
-                if height != last.get() {
-                    last.set(height);
-                    clock_box.set_margin_top(clock_top);
-                    prompt.set_margin_top(prompt_top);
-                }
-                // The measure includes margins, and may still hold the old
-                // ones for a frame: take the clock's own height.
-                let (_, natural, _, _) = clock_box.measure(gtk::Orientation::Vertical, -1);
-                let clock = natural - clock_box.margin_top() - clock_box.margin_bottom();
-                let room = (height - clock_top - clock).max(0);
-                if scroller.max_content_height() != room {
-                    scroller.set_max_content_height(room);
-                }
-                glib::ControlFlow::Continue
+            let last = Rc::new(Cell::new(-1));
+            window.connect_realize(move |w| {
+                let Some(surface) = w.surface() else {
+                    return;
+                };
+                let (window, clock_box, prompt, scroller, last) = (
+                    w.downgrade(),
+                    clock_box.clone(),
+                    prompt.clone(),
+                    scroller.clone(),
+                    last.clone(),
+                );
+                surface.connect_layout(move |_, _, _| {
+                    let Some(height) = window.upgrade().map(|w| w.height()) else {
+                        return;
+                    };
+                    let (clock_top, prompt_top) = logic::lock_offsets(height);
+                    if height != last.replace(height) {
+                        clock_box.set_margin_top(clock_top);
+                        prompt.set_margin_top(prompt_top);
+                    }
+                    // The measure includes margins, and may still hold the
+                    // old ones for a layout: take the clock's own height.
+                    let (_, natural, _, _) = clock_box.measure(gtk::Orientation::Vertical, -1);
+                    let clock = natural - clock_box.margin_top() - clock_box.margin_bottom();
+                    let room = (height - clock_top - clock).max(0);
+                    if scroller.max_content_height() != room {
+                        scroller.set_max_content_height(room);
+                    }
+                });
             });
         }
 
@@ -1220,6 +1285,14 @@ impl Drop for Screen {
     }
 }
 
+/// The wait before lock request `attempt` (0 = first retry) after a
+/// refusal: 100 ms, doubling, at most 5 s.
+fn lock_retry_delay(attempt: u32) -> std::time::Duration {
+    const FIRST_MS: u64 = 100;
+    const MAX_MS: u64 = 5_000;
+    std::time::Duration::from_millis(FIRST_MS.saturating_mul(1 << attempt.min(16)).min(MAX_MS))
+}
+
 fn generation_changed(current: &Cell<Option<u64>>, next: Option<u64>) -> bool {
     let previous = current.replace(next);
     previous.is_some() && previous != next
@@ -1600,5 +1673,93 @@ mod auth_transport_ui_tests {
             "the lock window is destroyed"
         );
         assert_eq!(entry.text.text(), "", "nothing typed survives");
+    }
+
+    fn by_class(root: &gtk::Widget, class: &str) -> Option<gtk::Widget> {
+        if root.has_css_class(class) {
+            return Some(root.clone());
+        }
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            if let Some(found) = by_class(&widget, class) {
+                return Some(found);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+
+    /// #1122: a settled lock screen asks its frame clock for nothing, so
+    /// the session owes it no frame callbacks while it sits (blanked or
+    /// not), and the clock and prompt still sit a third of the way down.
+    #[test]
+    #[ignore = "requires owned Xvfb/private D-Bus and explicit lock idle-frames admission"]
+    fn actual_gtk_settled_lock_screen_requests_no_frames() {
+        assert_eq!(
+            std::env::var("TUNA_REQUIRE_LOCK_IDLE_FRAMES").as_deref(),
+            Ok("1")
+        );
+        assert!(std::env::var_os("WAYLAND_DISPLAY").is_none());
+        gtk::init().expect("actual GTK display required");
+        let calls = Rc::new(Calls::default());
+        let app = gtk::Application::new(None::<&str>, gtk::gio::ApplicationFlags::NON_UNIQUE);
+        let ui = LockUi::new(
+            &app,
+            port(&calls),
+            Box::new(|| logic::ClockFormat::TwentyFourHour),
+        );
+        ui.sync_connection_generation(Some(0));
+        let window = ui.screen(None);
+        window.set_default_size(1280, 800);
+        window.present();
+        assert!(pump_until(Duration::from_secs(5), || window.is_mapped()
+            && window.height() > 0));
+        // Whatever the first frames ease settles well within this.
+        pump_until(Duration::from_secs(2), || false);
+        let (clock_top, prompt_top) = logic::lock_offsets(window.height());
+        let clock_box = by_class(window.upcast_ref(), "unlock-dialog-clock").unwrap();
+        let prompt = by_class(window.upcast_ref(), "login-dialog-prompt-layout").unwrap();
+        // Not the unallocated window's: the placement followed the layout.
+        assert_ne!(clock_top, logic::lock_offsets(0).0);
+        assert_eq!(clock_box.margin_top(), clock_top);
+        assert_eq!(prompt.margin_top(), prompt_top);
+
+        let clock = window
+            .frame_clock()
+            .expect("a realized window has a frame clock");
+        let frames = Rc::new(Cell::new(0u32));
+        let counter = {
+            let frames = frames.clone();
+            clock.connect_after_paint(move |_| frames.set(frames.get() + 1))
+        };
+        pump_until(Duration::from_millis(1500), || false);
+        assert_eq!(frames.get(), 0, "a settled lock screen runs no frames");
+        // The counter sees a frame the window does ask for.
+        window.queue_draw();
+        assert!(pump_until(Duration::from_secs(2), || frames.get() > 0));
+        pump_until(Duration::from_millis(500), || false);
+        let drawn = frames.get();
+        pump_until(Duration::from_millis(1000), || false);
+        assert_eq!(frames.get(), drawn, "and stops again after it");
+        clock.disconnect(counter);
+        println!(
+            "LOCK-IDLE-FRAMES pass a settled lock screen runs no frame clock; clock and prompt at GNOME's offsets"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lock_retry_tests {
+    use super::lock_retry_delay;
+    use std::time::Duration;
+
+    #[test]
+    fn refused_locks_are_retried_with_a_bounded_backoff() {
+        let delays: Vec<_> = (0..8).map(lock_retry_delay).collect();
+        assert_eq!(
+            delays,
+            [100, 200, 400, 800, 1600, 3200, 5000, 5000].map(Duration::from_millis)
+        );
+        assert_eq!(lock_retry_delay(u32::MAX), Duration::from_secs(5));
     }
 }
