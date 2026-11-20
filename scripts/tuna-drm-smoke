@@ -1345,10 +1345,12 @@ pass D-TOUCH-MULTI "two sequences, (0.4, 0.5) -> (0.3, 0.5) and (0.6, 0.5) -> (0
 
 # GNOME Shell's three-finger horizontal swipe (Clutter.PanGesture, 16 px)
 # claims the touches from the client, which gets wl_touch.cancel. Fingers
-# moving right at the first workspace have nowhere to go: it snaps back.
+# moving right at the first workspace have nowhere to go: the workspace
+# swipe tracker settles back where it began (a finished gesture slide).
 swipes=$(jq -r '.touch.gestures.workspace_swipe' "$CSTATE")
 cancels=$(jq -r '.touch.client_cancels' "$CSTATE")
 workspace=$(jq -r '.active_workspace' "$CSTATE")
+prev_slide="$(jq -c '.workspace_slide.history[-1]' "$CSTATE")"
 mark
 emu frame down 0 0.3 0.5 down 1 0.4 0.5 down 2 0.5 0.4
 records "len(set(seqs('touch-begin'))) == 3" ||
@@ -1362,8 +1364,11 @@ state ".touch.gestures.workspace_swipe > $swipes and .touch.client_cancels > $ca
     fail D-TOUCH-CANCEL "a three-finger horizontal swipe was not recognized as GNOME's workspace swipe with the client cancelled: $(jq -c .touch "$CSTATE")"
 emu frame up 0 up 1 up 2
 state '.touch.sequences == 0' || fail D-TOUCH-CANCEL "touch sequences stayed live after lifting three fingers: $(jq -c .touch "$CSTATE")"
-state ".active_workspace == $workspace" ||
-    fail D-TOUCH-CANCEL "the swipe past the first workspace did not snap back to workspace $workspace: $(jq -c .active_workspace "$CSTATE")"
+state ".workspace_slide.history[-1] != $prev_slide
+       and (.workspace_slide.history[-1] | .gesture and .from == $workspace and .to == $workspace)
+       and .workspace_slide.in_flight == null and .active_workspace == $workspace" 10 ||
+    fail D-TOUCH-CANCEL "the swipe past the first workspace did not settle back on workspace $workspace through the swipe tracker: $(jq -c '{active_workspace, workspace_slide}' "$CSTATE")"
+! grep -q panicked "$TOUCH_LOG" || fail D-TOUCH-CANCEL "the compositor panicked during the swipe: $(grep -m1 -A1 panicked "$TOUCH_LOG" | tr '\n' ' ')"
 records "len(set(seqs('touch-begin'))) == 3 and all(cancelled(s) for s in set(seqs('touch-begin')))" ||
     fail D-TOUCH-CANCEL "the client's three sequences were not cancelled, or touch events followed the cancel: $(raw_tail)"
 client_mark=$TOUCH_START

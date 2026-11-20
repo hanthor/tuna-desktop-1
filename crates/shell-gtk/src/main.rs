@@ -228,6 +228,19 @@ fn settings(schema: &str) -> Option<gio::Settings> {
     Some(gio::Settings::new(schema))
 }
 
+/// Mutter 51's orientation lock (`meta-orientation-manager.c` reads
+/// `orientation-lock` from gnome-settings-daemon's touchscreen schema),
+/// published to the compositor as `InputSettings.orientation_lock`.
+/// Without the schema or the key the panel is unlocked, the default.
+fn orientation_lock(touchscreen: Option<&gio::Settings>) -> bool {
+    touchscreen.is_some_and(|settings| {
+        settings
+            .settings_schema()
+            .is_some_and(|schema| schema.has_key("orientation-lock"))
+            && settings.boolean("orientation-lock")
+    })
+}
+
 /// Nothing to read now: the socket would block, or the client deferred
 /// (or just made) a redial whose answer is still on its way.
 fn is_would_block(e: &ControlError) -> bool {
@@ -269,7 +282,7 @@ struct Drained {
     /// The compositor's on-screen keyboard updates, in order: focus, the
     /// input-panel request, touch-mode auto-show.
     osk: Vec<(Option<tuna_shell_control::TextFieldFocus>, bool, bool)>,
-    /// The compositor's bottom-edge OSK drag phases, in order (wire 0.48).
+    /// The compositor's bottom-edge OSK drag phases, in order (wire 0.61).
     osk_gestures: Vec<tuna_shell_control::OskGesturePhase>,
     /// Drawing-tablet OSD messages, in arrival order.
     tablet: Vec<TabletUi>,
@@ -3902,10 +3915,7 @@ fn build(app: &adw::Application) {
                 }
                 out.keyboard_aids = kbd_a11y::read(all[9].as_ref());
                 out.pointer_aids = pointer_a11y::read(all[10].as_ref());
-                // Mutter's orientation lock (gnome-settings-daemon schema).
-                if let Some(touch) = all[13].as_ref() {
-                    out.orientation_lock = touch.boolean("orientation-lock");
-                }
+                out.orientation_lock = orientation_lock(all[13].as_ref());
                 let keymap = (
                     out.xkb_layout.clone(),
                     out.xkb_variant.clone(),
@@ -4634,4 +4644,27 @@ fn main() -> glib::ExitCode {
     app.connect_startup(privacy_portal::start);
     app.connect_activate(build);
     app.run_with_args::<&str>(&[])
+}
+
+#[cfg(test)]
+mod orientation_lock_tests {
+    use super::*;
+    use crate::test_settings::SettingsFixture;
+
+    #[test]
+    fn orientation_lock_reads_the_settings_daemon_key() {
+        let fixture = SettingsFixture::new(include_str!(
+            "../../../tests/settings/gnome51-peripherals-touchscreen.gschema.xml"
+        ));
+        let touch = fixture.settings(TOUCHSCREEN_SCHEMA);
+        assert!(
+            !orientation_lock(Some(&touch)),
+            "GNOME's default is unlocked"
+        );
+        touch.set_boolean("orientation-lock", true).unwrap();
+        assert!(orientation_lock(Some(&touch)));
+        touch.set_boolean("orientation-lock", false).unwrap();
+        assert!(!orientation_lock(Some(&touch)));
+        assert!(!orientation_lock(None), "no schema: unlocked");
+    }
 }
