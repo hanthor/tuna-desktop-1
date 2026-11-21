@@ -217,6 +217,34 @@ subsurface, a grabbing popup and uploaded shm buffers, closed by destroying
 every object or by disconnecting, must drop every surface's server-side
 data, and the window manager must name the window nowhere.
 
+`scripts/tuna-gtk-shell-proof --dnd-overview-only --artifacts DIR` runs
+G-DND-OVERVIEW (#1189), the same function the full GTK proof calls after
+G-OV-DND: a client drag through the overview as GNOME 51 handles it
+(`overview.js` `_onDragBegin`/`_onDragMotion`/`_onDragEnd`, `panel.js`
+`ActivitiesButton.handleDragOver`, `layout.js` `HotCorner.handleDragOver`,
+`workspaceThumbnail.js` `handleDragOverInternal`). The drags are real:
+`scripts/lib/tuna-test-window.py` with `TUNA_TEST_DRAG=LOG` is a GTK 4 window
+whose label starts a `Gtk.DragSource` drag and takes its drop, and every
+button and move is X11 input through the nested window. Gates:
+G-DND-HOT-CORNER (the pointer to the corner opens the overview and the drag
+survives it), G-DND-WINDOW-SWITCH (a drag resting on the target window's
+preview activates and raises it no sooner than 750 ms after the last motion,
+and the drop lands in it), G-DND-ACTIVITIES (resting on the Activities button
+opens the overview no sooner than 250 ms after the last motion),
+G-DND-CANCEL-RETURNS and G-DND-DROP-RETURNS (a workspace activated by
+hovering a thumbnail is left for the starting workspace, the overview
+closing, when Escape cancels the drag or the button is released). Elapsed
+times are lower bounds from just before the last motion: the compositor's
+timer cannot fire sooner, and the state file is polled, so nothing tighter
+is claimed. The nested session opens its corner by hover (a native seat by
+barrier pressure), so G-DND-HOT-CORNER guards the end-to-end path and the
+hover-under-pressure rule is tested by `cargo test -p tuna-compositor --test
+data_device` (`a_client_drag_opens_the_hot_corner_even_where_only_pressure_does`,
+driving real `wl_data_device` drags between two clients, as the other rules
+are: the Activities and window-preview timers, the thumbnail switch, the
+return on cancel and on drop, and the supervised shell's own drags
+being left alone).
+
 `scripts/tuna-gtk-shell-proof --grid-hover-only --artifacts DIR` runs the same
 held-button hover and persisted reorder assertions as the full GTK proof,
 without the unrelated earlier gates. It adds no target motion or timing
@@ -243,6 +271,19 @@ artifacts. The compositor side is `cargo test -p tuna-compositor --test
 buffer_release`: an uploaded `wl_shm` buffer comes back with
 `wl_buffer.release` at once, as Mutter's do, and its pool closes once the
 client destroys it and the surface moves on to another buffer.
+
+`scripts/tuna-gtk-shell-proof --subsurface-only --artifacts DIR` runs
+G-SUBSURFACE-STACKING: `tuna-subsurface-client` (a compositor example)
+maps an opaque red 400x300 window with an opaque green subsurface placed
+above it and an opaque blue one placed below it, half past its right
+edge. On the desktop, in the overview's preview and in its Alt+Print
+window screenshot the green one must show over the parent and the parent
+over the blue one, which shows past the parent's edge only; every sampled
+pixel is kept in `subsurface-pixels.txt` with `subsurface-desktop.png`,
+`subsurface-overview.png` and `subsurface-window-capture.png`. It takes
+under a minute. The compositor side is `cargo test -p tuna-compositor --lib
+surface_order_tests`: windows, popups and layer surfaces append their
+trees bottom to top, a drag icon keeps Smithay's front-to-back order.
 
 Every build uses its own checkout's `target/` (an inherited
 `CARGO_TARGET_DIR` is ignored; set `TUNA_TARGET_DIR` to choose one) and no
@@ -533,16 +574,19 @@ TUNA_REQUIRE_PAM_WRAPPER=1 scripts/tuna-gtk-shell-proof --artifacts gtk-shell-ar
 ```
 
 `--notify-lock-only` stops after panel readiness and runs just the
-lock-screen notification, notification sound and disabled-app restore
-gates (G-NOTIFY-LOCK, G-NOTIFY-LOCK-PIXELS, G-NOTIFY-LOCK-LIVE,
-G-NOTIFY-SOUND, G-NOTIFY-RESTORE); it needs pam_wrapper to unlock. The
-proof's `canberra-gtk-play` stand-in records every event sound the shell
-asks for in `canberra-calls`.
+lock-screen notification, notification sound, disabled-app restore and
+banner expansion gates (G-NOTIFY-LOCK, G-NOTIFY-LOCK-PIXELS,
+G-NOTIFY-LOCK-LIVE, G-NOTIFY-SOUND, G-NOTIFY-RESTORE, G-NOTIFY-EXPANDED);
+it needs pam_wrapper to unlock. The proof's `canberra-gtk-play` stand-in
+records every event sound the shell asks for in `canberra-calls`.
 The restore gate opens the real message-tray binding after retaining the
 long-word redaction-test notifications in history. Card text must wrap at
 character boundaries when needed, and collapsed groups must measure only
 their visible page horizontally, so hidden expanded content cannot force
 the date popup wider than the nested output.
+The full proof expands wellbeing banners with the real Super+N binding
+before pressing Take, Delay or Skip: non-critical notices open collapsed
+and keep their action rows hidden until the user expands them.
 
 The full GTK proof's media callback barrier waits at most 25 seconds:
 one key can execute four serialized `wpctl` subprocesses with five-second
@@ -1206,7 +1250,7 @@ PSS split by mapping kind (heap, anonymous, shared memory, GPU, files), in
 the process and kind that grew. Final PSS must stay within
 warmup × 1.25 + 64 MiB, fds within warmup + 32 and mappings within
 warmup × 1.25 + 1024. These diagnostic bounds catch unbounded growth;
-they are separate from the GNOME performance targets in #73. A panic,
+they are separate from the GNOME performance targets in #503. A panic,
 compositor exit, lost input response, orphaned window or hung worker
 fails the lane. Pull requests touching the suite run ten churn rounds;
 the nightly run uses 300.
@@ -1240,9 +1284,9 @@ regression test in the protocol crate before its fix is merged.
 To reproduce locally, install the pinned tool and toolchain, then run:
 
 ```sh
-rustup toolchain install nightly-2026-08-28
+rustup toolchain install nightly-2026-11-13
 cargo install cargo-fuzz --version 0.13.2 --locked
-cargo +nightly-2026-08-28 fuzz run control_body -- -max_total_time=60 -max_len=1048580 -timeout=5 -rss_limit_mb=2048
+cargo +nightly-2026-11-13 fuzz run control_body -- -max_total_time=60 -max_len=1048580 -timeout=5 -rss_limit_mb=2048
 ```
 
 This covers the control decoders of #203; Wayland request handlers are

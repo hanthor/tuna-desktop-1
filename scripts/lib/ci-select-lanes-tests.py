@@ -53,6 +53,8 @@ class Selection(unittest.TestCase):
 
     def test_owned_paths_run_their_lane_without_rotation(self):
         self.assertEqual(pr("scripts/tuna-scroll-proof"), ["scroll-proof"])
+        # The vkms gates (D-*) live in the DRM smoke.
+        self.assertEqual(pr("scripts/tuna-drm-smoke"), ["drm-smoke"])
         self.assertEqual(pr("docs/walkthrough.tsv"), ["gtk-shell"])
         self.assertEqual(pr("packaging/marlin/vm-lane/Containerfile"),
                          ["arch-package", "marlin-image", "marlin-vm"])
@@ -127,6 +129,18 @@ class Selection(unittest.TestCase):
         # Control: a test only the always-on check job runs adds no lane.
         self.assertEqual(pr("scripts/tests/test_disk_guard.py"), [])
 
+    def test_proof_example_clients_run_the_lane_that_runs_them(self):
+        # G-SUBSURFACE-STACKING's client runs only in the gtk-shell job's
+        # --subsurface-only slice; the check job compiles it.
+        for run in (0, 4, 19):
+            with self.subTest(run=run):
+                self.assertEqual(pr("crates/compositor/examples/tuna-subsurface-client.rs", run=run),
+                                 ["gtk-shell"])
+        # Control: the compositor code it proves still rotates lanes.
+        lanes = pr("crates/compositor/src/runtime_surface_order_tests.rs", run=3)
+        self.assertIn("gtk-shell", lanes)
+        self.assertGreater(len(lanes), 1)
+
     def test_pull_requests_never_rotate_the_push_only_image_lane(self):
         self.assertNotIn("marlin-image", m.ROTATION)
         for run in range(len(m.ROTATION)):
@@ -197,7 +211,9 @@ class WorkflowSync(unittest.TestCase):
 
     def test_gate_waits_for_every_job(self):
         gate = self.jobs["ci-gate"]
-        self.assertEqual(gate.get("if"), "always()")
+        # Every run but a cancelled (superseded) one: failed and skipped jobs
+        # still reach the gate.
+        self.assertEqual(gate.get("if"), "${{ !cancelled() }}")
         self.assertEqual(set(self.needs(gate)), set(self.jobs) - {"ci-gate"})
 
     def test_no_lane_scripts_are_not_run_by_a_lane(self):
