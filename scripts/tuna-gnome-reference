@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Capture GNOME 51 itself in the states Tuna Desktop recreates, for pixel parity.
 #
 # Usage: tuna-gnome-reference [--motion] [--out DIR]
@@ -29,19 +29,18 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$OUT" ] || if [ "$SCRIPT" = motion.js ]; then OUT="$ROOT/target/gnome-reference-motion"; else OUT="$ROOT/target/gnome-reference"; fi
 PODMAN="${PODMAN:-podman}"
-# shellcheck disable=SC2086 # PODMAN may carry a wrapper such as sudo
-command -v ${PODMAN%% *} >/dev/null 2>&1 || { echo "tuna-gnome-reference: needs podman" >&2; exit 1; }
+# PODMAN may carry a wrapper such as sudo: split it into words once.
+read -ra podman <<<"$PODMAN"
+command -v "${podman[0]:-}" >/dev/null 2>&1 || { echo "tuna-gnome-reference: needs podman" >&2; exit 1; }
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 IMAGE=localhost/tuna-gnome51-reference
-# shellcheck disable=SC2086
-$PODMAN build -q -t "$IMAGE" "$ROOT/tests/gnome-reference" >/dev/null
+"${podman[@]}" build -q -t "$IMAGE" "$ROOT/tests/gnome-reference" >/dev/null
 rm -rf "$OUT"/*.png "$OUT"/*.json "$OUT/share"
 # The image identity and GNOME package versions behind these frames.
-# shellcheck disable=SC2086
 {
-    printf 'image %s\n' "$($PODMAN image inspect --format '{{.Id}}' "$IMAGE")"
-    $PODMAN run --rm "$IMAGE" rpm -q gnome-shell mutter gtk4 mesa-dri-drivers
+    printf 'image %s\n' "$("${podman[@]}" image inspect --format '{{.Id}}' "$IMAGE")"
+    "${podman[@]}" run --rm "$IMAGE" rpm -q gnome-shell mutter gtk4 mesa-dri-drivers
 } >"$OUT/image.txt"
 # The unlock prompt shows the user's name; use the one Tuna Desktop's lock
 # screen will show for whoever runs the comparison (GECOS, else login).
@@ -52,9 +51,9 @@ USER_NAME="$(getent passwd "$(id -un)" | cut -d: -f5 | cut -d, -f1)"
 # namespaces the default container profile denies. GREF_PODMAN_FLAGS
 # overrides these run flags.
 GREF_PODMAN_FLAGS="${GREF_PODMAN_FLAGS:---security-opt seccomp=unconfined --security-opt apparmor=unconfined --cap-add SYS_ADMIN}"
+read -ra gref_podman_flags <<<"$GREF_PODMAN_FLAGS"
 capture() {
-    # shellcheck disable=SC2086
-    $PODMAN run --rm $GREF_PODMAN_FLAGS \
+    "${podman[@]}" run --rm "${gref_podman_flags[@]}" \
         -e GREF_USER_NAME="$USER_NAME" \
         -e GREF_SCRIPT="$SCRIPT" \
         -v "$ROOT/tests/gnome-reference:/gref:ro,Z" \
