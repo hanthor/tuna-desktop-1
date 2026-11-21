@@ -321,6 +321,19 @@ def check_frame_rate(name, frames, seconds, shown, shown_min, hidden_max):
     return []
 
 
+def frames_between(beats, start, end):
+    """Frames a client drew between CLOCK_MONOTONIC `start` and `end`
+    from its heartbeats ({"t", "frames"}, ten a second): the counter at
+    the last beat by `end` minus the one at the last beat by `start`.
+    None when the beats do not reach both ends, so a missing window
+    cannot read as a quiet one."""
+    before = [b for b in beats if b["t"] <= start]
+    by_end = [b for b in beats if b["t"] <= end]
+    if not before or not by_end or by_end[-1]["t"] < end - 0.3:
+        return None
+    return by_end[-1]["frames"] - before[-1]["frames"]
+
+
 def screenshot_layers(state):
     return sorted(layer["rect"] for layer in state.get("layers", [])
                   if layer.get("namespace") == SCREENSHOT_NAMESPACE)

@@ -660,7 +660,10 @@ old behaviour produces:
   Super+Page_Down hides A's window (throttled frame callbacks) while B's
   stays on the active workspace and keeps drawing; with the key false
   both hide; a window Alt-dragged from B onto A stays on the workspace
-  it was carried on;
+  it was carried on. Client frame rates (a shown window at least 10/s,
+  a hidden one at most 3/s against the compositor's 995 ms hidden-frame
+  interval) are counted from the clients' heartbeats over 3 s starting
+  1.5 s after each switch ends, past the callbacks owed from the slide;
 - `D-SCALE-MIXED` (P-SY-03): a GNOME `monitors.xml` gives A a fractional
   scale and B scale 2 in the smallest mode Mutter allows both in; a GTK
   window Alt-dragged to span them gets B's scale over
