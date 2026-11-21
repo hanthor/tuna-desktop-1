@@ -747,9 +747,19 @@ jobs:
           PY
           cp "$RUNNER_TEMP/colour-build.json" colour-native-artifacts/
           tar -cf "$RUNNER_TEMP/colour-payload.tar" -C "$payload" .
+      # The HDR guest falls back to TCG when /dev/kvm is not runner-accessible;
+      # under TCG llvmpipe FP16 composition and the vkms vblank timer run so
+      # slowly that no client accrues 500 ms of presented frames (run
+      # 44851956404). Grant access and require KVM so it cannot fall back.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
       - name: Prove admitted HDR scanout signaling and negotiated capture on an emulated KMS sink
         run: |
-          python3 scripts/ci-hdr-vkms-guest --work-dir "$RUNNER_TEMP/colour-hdr-vm" --artifacts "$(pwd)/colour-native-artifacts/hdr" --payload-tar "$RUNNER_TEMP/colour-payload.tar" --prepare-command 'sudo apt-get install -y python3-pil' --guest-command 'python3 scripts/tuna-color-capture-proof --backend drm --hdr --cast-consumer target/debug/examples/tuna-color-cast-client --compositor target/debug/tuna-compositor --color-client target/debug/examples/tuna-color-pixel-client --source-receipt source.json --artifacts "$ARTIFACTS/colour-hdr"' --negative-command 'python3 scripts/tuna-color-capture-proof --backend drm --expect-unsupported-hdr --compositor target/debug/tuna-compositor --color-client target/debug/examples/tuna-color-pixel-client --source-receipt source.json --artifacts "$ARTIFACTS/colour-unsupported"'
+          python3 scripts/ci-hdr-vkms-guest --work-dir "$RUNNER_TEMP/colour-hdr-vm" --artifacts "$(pwd)/colour-native-artifacts/hdr" --payload-tar "$RUNNER_TEMP/colour-payload.tar" --accel kvm --prepare-command 'sudo apt-get install -y python3-pil' --guest-command 'python3 scripts/tuna-color-capture-proof --backend drm --hdr --cast-consumer target/debug/examples/tuna-color-cast-client --compositor target/debug/tuna-compositor --color-client target/debug/examples/tuna-color-pixel-client --source-receipt source.json --artifacts "$ARTIFACTS/colour-hdr"' --negative-command 'python3 scripts/tuna-color-capture-proof --backend drm --expect-unsupported-hdr --compositor target/debug/tuna-compositor --color-client target/debug/examples/tuna-color-pixel-client --source-receipt source.json --artifacts "$ARTIFACTS/colour-unsupported"'
       - name: Retain only bounded known guest assertion files
         run: |
           python3 - <<'PY'
@@ -1904,7 +1914,9 @@ jobs:
       - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-system-modules-opengl qemu-utils ovmf ffmpeg python3-pil fonts-dejavu-core zstd dbus-daemon libglib2.0-bin
       - name: Install the owned virgl DEV launcher
         if: matrix.profile == 'colour'
-        run: sudo apt-get install -y --no-install-recommends qemu-system-gui xvfb xauth libgl1-mesa-dri libegl-mesa0
+        # libegl-mesa0 is only the Mesa vendor ICD; QEMU's gtk,gl=on display
+        # loads libglvnd's libEGL.so.1 through libepoxy, which aborts without it.
+        run: sudo apt-get install -y --no-install-recommends qemu-system-gui xvfb xauth libgl1-mesa-dri libegl-mesa0 libegl1
       - uses: sigstore/cosign-installer@v4.1.3
         with:
           cosign-release: v3.1.4

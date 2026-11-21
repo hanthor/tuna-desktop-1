@@ -2416,6 +2416,15 @@ class BootApi(unittest.TestCase):
         self.assertEqual(wire, {"execute": "trace-event-set-state", "arguments": {
             "name": "virtio_gpu_cmd_set_scanout", "enable": True}})
 
+    def test_qmp_raises_connect_error_when_qemu_never_creates_its_socket(self):
+        # Run 44851956404: QEMU aborted before -qmp existed and the old loop
+        # fell through to a read on an unconnected socket (Errno 22 EINVAL).
+        with tempfile.TemporaryDirectory() as scratch, \
+                patch.object(lane.baseline.time, "sleep") as sleep:
+            with self.assertRaises(FileNotFoundError):
+                lane.baseline.Qmp(os.path.join(scratch, "qmp.sock"))
+        self.assertEqual(sleep.call_count, 99)
+
     def test_existing_four_value_performance_call_keeps_original_devices(self):
         with patch.object(lane.os.path, "exists", return_value=True), patch.object(lane.os, "access", return_value=True), patch.object(lane.subprocess, "Popen") as spawn:
             process, qmp, serial, kvm = lane.boot("disk.raw", "/out", "/scratch", 30)
