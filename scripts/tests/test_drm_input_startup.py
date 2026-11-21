@@ -63,5 +63,57 @@ class Check(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
 
 
+SMOKE = ROOT / "scripts/tuna-drm-smoke"
+OPEN_PIPE = 'exec 7>"$ARTIFACTS/startup-device.fifo"'
+
+
+def background_jobs_while_the_pipe_is_open(text):
+    """Every command tuna-drm-smoke starts in the background between
+    opening the startup mouse's pipe (fd 7) and closing it, as one logical
+    line (backslash continuations joined)."""
+    logical, current = [], ""
+    for line in text.splitlines():
+        if line.endswith("\\"):
+            current += line[:-1].rstrip() + " "
+            continue
+        logical.append((current + line).strip())
+        current = ""
+    start = logical.index(OPEN_PIPE)
+    end = next(i for i in range(start + 1, len(logical)) if logical[i] == "exec 7>&-")
+    return [line for line in logical[start + 1:end]
+            if line.endswith("&") and not line.endswith("&&")]
+
+
+class PipeHolders(unittest.TestCase):
+    """The holder unplugs the mouse when the pipe reaches end-of-file, so a
+    background process started while fd 7 is open must not inherit it: on
+    run 44875566230 the compositor and its shell kept it open, the mouse
+    never unplugged and the job hung until it was cancelled."""
+
+    def test_background_jobs_close_the_startup_pipe(self):
+        jobs = background_jobs_while_the_pipe_is_open(SMOKE.read_text())
+        self.assertTrue(any("tuna-compositor" in job for job in jobs), jobs)
+        for job in jobs:
+            with self.subTest(job=job[:80]):
+                self.assertIn("7>&-", job)
+
+    def test_the_check_catches_an_inherited_pipe(self):
+        hung = "\n".join([
+            OPEN_PIPE,
+            'env A=1 \\',
+            '    "$ROOT/target/debug/tuna-compositor" --backend drm >"$LOG" 2>&1 &',
+            'exec 7>&-',
+        ])
+        jobs = background_jobs_while_the_pipe_is_open(hung)
+        self.assertEqual(len(jobs), 1)
+        self.assertNotIn("7>&-", jobs[0])
+
+    def test_the_unplug_wait_is_bounded(self):
+        text = SMOKE.read_text()
+        unplug = text[text.index("# Unplug it now"):text.index('sleep 2\n[ -s "$CSTATE" ]')]
+        self.assertIn("not unplugged within 10 s", unplug)
+        self.assertLess(unplug.index('-gt "$end"'), unplug.index('wait "$STARTUP_DEVICE_PID"'))
+
+
 if __name__ == "__main__":
     unittest.main()
