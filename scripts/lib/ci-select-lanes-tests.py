@@ -72,6 +72,9 @@ class Selection(unittest.TestCase):
         # runs its checker (#1198, #1199).
         self.assertEqual(pr("scripts/lib/tuna-panel-dash-proof.sh"), ["journey", "gtk-shell"])
         self.assertEqual(pr("scripts/lib/tuna-panel-dash-check.py"), ["gtk-shell"])
+        # The guest's /usr/libexec/tuna-datetime-proof (G-DATETIME-*).
+        self.assertEqual(pr("scripts/lib/tuna-datetime-proof.py"),
+                         ["arch-package", "marlin-image", "marlin-vm"])
 
 
     def test_transition_policy_and_suite_always_run_journey(self):
