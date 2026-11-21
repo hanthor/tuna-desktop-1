@@ -786,7 +786,7 @@ jobs:
         with:
           tool: gtk4-layer-shell
           version: 4867d7b85cdf1e829fc1fd6f1d5f04c42cc99389
-      - run: shellcheck -x scripts/tuna-gtk-shell-proof scripts/tuna-walkthrough scripts/tuna-gtk-accessibility-proof scripts/tuna-slow-portal-proof scripts/lib/tuna-fade-match
+      - run: shellcheck -x scripts/tuna-gtk-shell-proof scripts/tuna-walkthrough scripts/tuna-gtk-accessibility-proof scripts/tuna-slow-portal-proof scripts/tuna-ibus-owner-proof scripts/lib/tuna-fade-match
       # docs/walkthrough.md must match its manifest (docs/walkthrough.tsv).
       - run: scripts/tuna-walkthrough check
       - name: Prove password origin and epoch ownership in the actual nested runtime
@@ -1085,6 +1085,10 @@ jobs:
       # dbus-daemon semantics: portal activation hangs instead of failing
       # fast, and the shell must still own org.gnome.Shell promptly.
       - run: scripts/tuna-slow-portal-proof --artifacts gtk-shell-artifacts/slow-portal
+      # One owner for the session's ibus-daemon (#1014): the bridge's own
+      # supervised child, or the session's unit, never both; session end
+      # leaves no ibus-* process of the display behind.
+      - run: scripts/tuna-ibus-owner-proof gtk-shell-artifacts/ibus-owner
       # Screen magnifier (#349): real GSettings writes, magnified pixels
       # in shell screenshot captures and live output frames. Independent
       # of the shell proof above, so it runs (and gates) even when that
@@ -2185,6 +2189,7 @@ jobs:
           --assertions ledger-in/gtk-shell/subsurface/assertions.txt
           --assertions ledger-in/gtk-shell/lock-auth/assertions.txt
           --assertions ledger-in/gtk-shell/panel-dash/assertions.txt
+          --assertions ledger-in/gtk-shell/ibus-owner/assertions.txt
           --assertions ledger-in/gtk-shell/lock-idle-frames/assertions.txt
           --assertions ledger-in/orca-speech/assertions.txt
           --assertions ledger-in/drm-smoke/assertions.txt
