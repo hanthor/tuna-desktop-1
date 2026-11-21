@@ -284,6 +284,19 @@ buffer_release`: an uploaded `wl_shm` buffer comes back with
 `wl_buffer.release` at once, as Mutter's do, and its pool closes once the
 client destroys it and the surface moves on to another buffer.
 
+`scripts/tuna-gtk-shell-proof --subsurface-only --artifacts DIR` runs
+G-SUBSURFACE-STACKING: `tuna-subsurface-client` (a compositor example)
+maps an opaque red 400x300 window with an opaque green subsurface placed
+above it and an opaque blue one placed below it, half past its right
+edge. On the desktop, in the overview's preview and in its Alt+Print
+window screenshot the green one must show over the parent and the parent
+over the blue one, which shows past the parent's edge only; every sampled
+pixel is kept in `subsurface-pixels.txt` with `subsurface-desktop.png`,
+`subsurface-overview.png` and `subsurface-window-capture.png`. It takes
+under a minute. The compositor side is `cargo test -p tuna-compositor --lib
+surface_order_tests`: windows, popups and layer surfaces append their
+trees bottom to top, a drag icon keeps Smithay's front-to-back order.
+
 Every build uses its own checkout's `target/` (an inherited
 `CARGO_TARGET_DIR` is ignored; set `TUNA_TARGET_DIR` to choose one) and no
 incremental state, with half the host's CPUs as jobs. Builds from every
