@@ -99,7 +99,18 @@ def field(desktop, actor, name=None):
 
 def replace_field(desktop, actor, value, name=None):
     node = field(desktop, actor, name)
-    desktop.click_path(actor, node["path"])
+    # Click only a field that does not hold focus yet, and type only once it
+    # does. A guest clipboard read maps wl-clipboard's own toplevel to take
+    # keyboard focus (no data-control protocol, as in GNOME). In run
+    # 44850865831 Epiphany's text input left and returned four times
+    # (windows 2 and 3 unmapped), the trees still showed the entry focused,
+    # and the next click on it ended its focus ("text field left", never
+    # re-entered), so ctrl+a and backspace never reached it.
+    if not node.get("focused"):
+        desktop.click_path(actor, node["path"])
+    desktop.await_state("actual-keyboard-field-focused", lambda: desktop.tree(actor),
+                        lambda row: any(n.get("path") == node["path"] and n.get("focused")
+                                        for n in nodes(row)))
     desktop.keys("ctrl", "a")
     if value:
         desktop.type_ascii(value)

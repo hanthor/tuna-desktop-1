@@ -666,14 +666,14 @@ class ImeFieldFocusSettle(unittest.TestCase):
     stays idle (one row, zero preedit rows) while the preedit await burns
     the budget (run 41865506509 attempts 1-2).
     """
-    def rig(self):
+    def rig(self, focused=False):
         import base64
         import tempfile
         from unittest import mock
         import types
         order = []
         field = {'path': [1], 'name': 'Search', 'text': '', 'role': 'text',
-                 'editable': True, 'showing': True, 'sensitive': True, 'focused': True}
+                 'editable': True, 'showing': True, 'sensitive': True, 'focused': focused}
         actor = {'id': 'org.example.app', 'kind': 'app'}
         desktop = core_apps.Desktop.__new__(core_apps.Desktop)
         desktop._ime = {}
@@ -702,7 +702,11 @@ class ImeFieldFocusSettle(unittest.TestCase):
 
         desktop.guest = guest
         desktop.await_state = await_state
-        desktop.click_path = lambda target, path: order.append('click')
+
+        def click(target, path):
+            order.append('click')
+            field['focused'] = True
+        desktop.click_path = click
         desktop.keys = lambda *chords: order.append(('keys',) + chords)
         desktop.type_ascii = lambda text: order.append(('type', text))
         pil = types.ModuleType('PIL')
@@ -725,6 +729,20 @@ class ImeFieldFocusSettle(unittest.TestCase):
                                      'keys', 'ime-monitor-start', 'type'])
         ocr.assert_called_once()
         self.assertIn('-l', ocr.call_args.args[0])
+
+    def test_a_field_already_holding_focus_is_not_clicked(self):
+        """Run 44850865831: after the guest clipboard read, clicking Epiphany's
+        still-focused entry ended its focus; a focused field is typed into as is."""
+        import sys
+        from unittest import mock
+        desktop, actor, field, order, pil, completed = self.rig(focused=True)
+        with mock.patch.dict(sys.modules, {'PIL': pil}), \
+             mock.patch.object(core_apps.subprocess, 'run', return_value=completed):
+            desktop.ime(actor, field['name'], field_path=field['path'])
+        legend = [entry[0] if isinstance(entry, tuple) else entry for entry in order]
+        self.assertNotIn('click', legend)
+        self.assertEqual(legend[:5], ['ime-engine', 'real-ime-field-focused',
+                                     'keys', 'ime-monitor-start', 'type'])
 
     def test_focus_predicate_rejects_wrong_unfocused_and_readonly_fields(self):
         from unittest import mock

@@ -737,7 +737,11 @@ class Desktop(NativeDesktop):
         engine = self.guest('desktop', 'ime-engine', select=True)
         monitor_started = False
         try:
-            self.click_path(actor, field['path'])
+            # A field that already holds focus is not clicked: after a guest
+            # clipboard read (wl-clipboard's focus-taking toplevel), clicking
+            # Epiphany's still-focused entry ended its focus (run 44850865831).
+            if not field['focused']:
+                self.click_path(actor, field['path'])
             # Keys typed before focus lands never reach the engine: no
             # preedit rows, and the engine idles while the await burns the
             # budget (run 41865506509 attempts 1-2). Settle the

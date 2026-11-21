@@ -74,5 +74,58 @@ class NestedProxyResolution(unittest.TestCase):
         self.assertEqual(calls['press'], ('Zoom to Specific Level', 'button'))
 
 
+class ReplaceFieldFocus(unittest.TestCase):
+    """Run 44850865831: after the guest clipboard read (wl-clipboard maps its
+    own toplevel for keyboard focus), clicking Epiphany's still-focused entry
+    ended its focus and ctrl+a/backspace never reached it."""
+
+    def rig(self, focused, click_blurs=False):
+        entry = dict(node('Qualification payload', 'entry', [0, 1]), editable=True,
+                     text='cobalt', focused=focused)
+        log = []
+
+        class Desktop:
+            def tree(self, actor):
+                return {'nodes': [DIALOG, dict(entry)]}
+
+            def click_path(self, actor, path):
+                log.append('click')
+                entry['focused'] = not click_blurs
+
+            def keys(self, *chord):
+                log.append(chord)
+                if chord == ('backspace',) and entry['focused']:
+                    entry['text'] = ''
+
+            def type_ascii(self, text):
+                log.append(('type', text))
+
+            def await_state(self, label, read, predicate, timeout=10):
+                value = read()
+                if not predicate(value):
+                    raise TimeoutError(label)
+                log.append(label)
+                return value
+        return Desktop(), log
+
+    def test_focused_field_is_typed_into_without_a_click(self):
+        from core_apps_web import replace_field
+        desktop, log = self.rig(focused=True, click_blurs=True)
+        replace_field(desktop, {'id': 'org.gnome.Epiphany'}, '', 'Qualification payload')
+        self.assertNotIn('click', log)
+        self.assertEqual(log[0], 'actual-keyboard-field-focused')
+        self.assertEqual(log[-1], 'actual-keyboard-field')
+
+    def test_unfocused_field_is_clicked_and_must_take_focus_before_typing(self):
+        from core_apps_web import replace_field
+        desktop, log = self.rig(focused=False)
+        replace_field(desktop, {'id': 'org.gnome.Epiphany'}, '', 'Qualification payload')
+        self.assertEqual(log[:2], ['click', 'actual-keyboard-field-focused'])
+        desktop, log = self.rig(focused=False, click_blurs=True)
+        with self.assertRaises(TimeoutError):
+            replace_field(desktop, {'id': 'org.gnome.Epiphany'}, '', 'Qualification payload')
+        self.assertNotIn(('ctrl', 'a'), log)
+
+
 if __name__ == '__main__':
     unittest.main()
