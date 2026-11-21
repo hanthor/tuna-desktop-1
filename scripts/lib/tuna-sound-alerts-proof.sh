@@ -206,6 +206,11 @@ sound_alerts_proof() {
     fi
 
     # --- G-QS-VOLUME-FEEDBACK: GNOME's drag-end feedback on the real slider.
+    # The feedback follows the default sink, and only the built-in sink
+    # (48) idles in the fixture; the full proof's G-QS-SOUND-MENU leaves
+    # the HDMI output (52), which always plays, as the default.
+    echo 48 >"$ARTIFACTS/default-sink"
+    "$PY" "$ROOT/scripts/lib/tuna-audio-fixture.py" "$ARTIFACTS" --event
     xdotool mousemove --window "$WID" $((WIDTH - 50)) 16 click 1
     sleep 2
     "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-qs-feedback.json" 20 \
@@ -271,10 +276,18 @@ TROUGH
         fail G-QS-VOLUME-FEEDBACK "the slider sounded $((drag_sounds - before)) times during the drag"
     [ "$(sound_alerts_feedback audio-volume-change)" = $((before + 1)) ] ||
         fail G-QS-VOLUME-FEEDBACK "drag end sounded $(($(sound_alerts_feedback audio-volume-change) - before)) times, not once"
-    # A scroll moves the level outside a drag: one sound.
+    # A scroll moves the level outside a drag: one sound. The one wheel
+    # notch enters through the compositor's proof input, the path a
+    # hardware wheel takes: the nested winit backend reports xdotool's
+    # button 5 press and its release as a notch each.
     before="$(sound_alerts_feedback audio-volume-change)"
     scroll_volume="$(cat "$VOLUME_FILE")"
-    xdotool mousemove --window "$WID" $(((trough_x0 + trough_x1) / 2)) "$trough_y" click 5
+    xdotool mousemove --window "$WID" $(((trough_x0 + trough_x1) / 2)) "$trough_y"
+    sleep 0.3
+    printf '{"phase":"scroll","dx":0,"dy":120,"sequence":9001}\n' >"$TUNA_PROOF_SWIPE_INPUT.tmp"
+    mv "$TUNA_PROOF_SWIPE_INPUT.tmp" "$TUNA_PROOF_SWIPE_INPUT"
+    cstate '.proof_swipe_sequence == 9001' "slider wheel notch read" 5 ||
+        fail G-QS-VOLUME-FEEDBACK "the compositor never read the wheel notch"
     sound_alerts_wait_feedback $((before + 1)) 8
     [ "$(cat "$VOLUME_FILE")" != "$scroll_volume" ] || fail G-QS-VOLUME-FEEDBACK "the scroll did not move the volume"
     [ "$(sound_alerts_feedback audio-volume-change)" = $((before + 1)) ] ||

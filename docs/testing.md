@@ -609,6 +609,11 @@ distribution gsd-xsettings owns XSETTINGS and publishes
 `input-feedback-sounds` as `Net/EnableInputFeedbackSounds`) and
 G-QS-VOLUME-FEEDBACK (a real drag of the quick-settings volume slider sounds
 once at its end, a scroll once, a playing sink or `event-sounds` off never).
+The feedback gate first makes the built-in sink, the one the fixture can
+idle, the default again: the full proof's G-QS-SOUND-MENU leaves the HDMI
+output selected. Its scroll is one wheel notch through the compositor's proof
+input, because the nested winit backend turns an `xdotool click 5` into two
+notches (button press and release).
 A `canberra-gtk-play` stand-in logs every event sound to `canberra-calls`;
 none of these gates plays or captures audio.
 The `gtk-shell` CI job runs this focused slice before the full shell proof,
