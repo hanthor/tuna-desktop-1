@@ -391,6 +391,8 @@ pub struct Session<'a> {
     /// The session-bus unique name the supervised shell declared over this
     /// session (`DeclareBusName`), read by [`ControlHub::shell_bus_names`].
     bus_name: Option<String>,
+    /// Admitted `BeginStartupSequence`s `(app_id, wm_class)`, drained by the hub.
+    startup_sequences: Vec<(String, Option<String>)>,
     /// The hub's published remote access grants a `StopRemoteAccess` may
     /// name (#1162 F2).
     remote_access: std::rc::Rc<Vec<tuna_shell_control::RemoteAccessHandle>>,
@@ -499,6 +501,7 @@ impl<'a> Session<'a> {
             close_menu_unanimated: false,
             close_dialog_responses: Vec::new(),
             bus_name: None,
+            startup_sequences: Vec::new(),
             remote_access: std::rc::Rc::default(),
             remote_access_stops: Vec::new(),
         };
@@ -1263,6 +1266,35 @@ impl<'a> Session<'a> {
             }
             Message::Command {
                 id,
+                kind: CommandKind::BeginStartupSequence { app_id, wm_class },
+            } => {
+                if self.peer_minor < 53 {
+                    self.conn.write_frame(&Message::Error {
+                        kind: ErrorKind::UnknownCommand,
+                        message: "startup sequences require negotiated minor 53".into(),
+                    })?;
+                    return Ok(Handled::ErrorSent {
+                        kind: ErrorKind::UnknownCommand,
+                    });
+                }
+                // Bounded like titles; the compositor holds at most a
+                // handful (see `startup::MAX_SEQUENCES`).
+                let fits = |s: &str| !s.is_empty() && s.len() <= tuna_shell_control::MAX_TITLE_LEN;
+                let status = if fits(&app_id) && wm_class.as_deref().is_none_or(fits) {
+                    self.startup_sequences.push((app_id, wm_class));
+                    CommandStatus::Applied
+                } else {
+                    CommandStatus::Denied {
+                        reason: "invalid startup sequence".into(),
+                    }
+                };
+                let applied = status == CommandStatus::Applied;
+                self.conn
+                    .write_frame(&Message::CommandResult { id, status })?;
+                Ok(Handled::CommandResult { id, applied })
+            }
+            Message::Command {
+                id,
                 kind: CommandKind::StopRemoteAccess { kind, id: grant },
             } => {
                 if self.peer_minor < 53 {
@@ -1689,6 +1721,7 @@ fn apply_command(
         | CommandKind::CloseMenuUnanimated
         | CommandKind::RespondCloseDialog { .. }
         | CommandKind::DeclareBusName { .. }
+        | CommandKind::BeginStartupSequence { .. }
         | CommandKind::StopRemoteAccess { .. }
         | CommandKind::SwitchInputSource { .. }
         | CommandKind::SetWindowIconGeometries { .. }
@@ -1771,6 +1804,9 @@ pub struct PollOutcome {
     pub close_menu_unanimated: bool,
     /// Close-dialog answers `(window, response)`, in order (#1035).
     pub close_dialog_responses: Vec<(u64, tuna_shell_control::CloseDialogResponse)>,
+    /// App launches' startup sequences `(app_id, wm_class)`, in order: the
+    /// busy cursor until their windows map (#1193).
+    pub startup_sequences: Vec<(String, Option<String>)>,
     /// Remote access grants the shell stopped, in order (#1162 F2).
     pub remote_access_stops: Vec<(tuna_shell_control::RemoteAccessKind, u64)>,
     /// Input-source switches to make (`true` backward), in order.
@@ -2644,6 +2680,9 @@ impl ControlHub {
                     outcome
                         .close_dialog_responses
                         .extend(std::mem::take(&mut session.close_dialog_responses));
+                    outcome
+                        .startup_sequences
+                        .extend(std::mem::take(&mut session.startup_sequences));
                     outcome
                         .remote_access_stops
                         .extend(std::mem::take(&mut session.remote_access_stops));
