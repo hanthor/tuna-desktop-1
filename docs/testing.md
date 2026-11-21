@@ -554,6 +554,11 @@ dragging one app onto another, opens it, and requires dragging the second
 app onto the shade to remove exactly that app. This slice does not qualify
 the rest of the GTK journey or installed-image behavior.
 
+The three actual-GTK grid cases below are ordinary tests that skip unless
+`TUNA_REQUIRE_GRID_ZOOM=1` admits them. The lane runs each one alone with
+`--exact --include-ignored` and fails unless its pass marker appears, so a
+skip cannot pass there.
+
 The GTK CI lane also runs
 `grid_animation::gtk_zoom_tests::actual_gtk_zoom_applies_all_properties_including_terminal_frame`
 on its admitted test binary under private Xvfb/D-Bus with

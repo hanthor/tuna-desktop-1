@@ -1106,13 +1106,26 @@ impl Zoom {
 }
 
 #[cfg(test)]
-mod gtk_zoom_tests {
+pub(crate) mod gtk_zoom_tests {
     use super::*;
 
+    /// The gtk-shell job runs the actual-GTK grid cases one at a time on
+    /// its admitted binary under private Xvfb/D-Bus with
+    /// `TUNA_REQUIRE_GRID_ZOOM=1`, and requires each one's pass marker, so
+    /// a skip there fails the job. Anywhere else they skip.
+    pub(crate) fn grid_zoom_admitted() -> bool {
+        let admitted = std::env::var("TUNA_REQUIRE_GRID_ZOOM").as_deref() == Ok("1");
+        if !admitted {
+            eprintln!("SKIP actual GTK grid proof: the gtk-shell job runs it with TUNA_REQUIRE_GRID_ZOOM=1");
+        }
+        admitted
+    }
+
     #[test]
-    #[ignore = "requires owned Xvfb/private D-Bus and explicit grid zoom admission"]
     fn actual_gtk_zoom_applies_all_properties_including_terminal_frame() {
-        assert_eq!(std::env::var("TUNA_REQUIRE_GRID_ZOOM").as_deref(), Ok("1"));
+        if !grid_zoom_admitted() {
+            return;
+        }
         assert!(std::env::var_os("WAYLAND_DISPLAY").is_none());
         gtk::init().expect("actual GTK display required");
         let zoom = Zoom::new(&gtk::Label::new(Some("Folder apps")));
@@ -1154,9 +1167,10 @@ mod gtk_zoom_tests {
     }
 
     #[test]
-    #[ignore = "requires owned Xvfb/private D-Bus and explicit grid zoom admission"]
     fn actual_gtk_page_tick_trace_records_real_clock_and_thread_scheduler() {
-        assert_eq!(std::env::var("TUNA_REQUIRE_GRID_ZOOM").as_deref(), Ok("1"));
+        if !grid_zoom_admitted() {
+            return;
+        }
         assert!(std::env::var_os("WAYLAND_DISPLAY").is_none());
         // This exact test runs alone in its admitted process, before GTK
         // or the trace's lazy environment reader starts.

@@ -3224,9 +3224,10 @@ mod gtk_page_dot_tests {
     use super::*;
 
     #[test]
-    #[ignore = "requires owned Xvfb/private D-Bus and explicit grid zoom admission"]
     fn actual_gtk_page_dot_samples_observe_stored_look() {
-        assert_eq!(std::env::var("TUNA_REQUIRE_GRID_ZOOM").as_deref(), Ok("1"));
+        if !crate::grid_animation::gtk_zoom_tests::grid_zoom_admitted() {
+            return;
+        }
         assert!(std::env::var_os("WAYLAND_DISPLAY").is_none());
         gtk::init().expect("actual GTK display required");
         for index in 0..2 {
