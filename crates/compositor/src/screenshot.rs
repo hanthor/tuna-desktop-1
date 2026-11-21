@@ -35,6 +35,13 @@ pub enum Request {
         directory: PathBuf,
         reply: mpsc::Sender<Vec<WindowShot>>,
     },
+    /// Every output's picture for the screenshot UI's frozen screen and
+    /// its per-monitor screen selectors, each saved into `directory`
+    /// (Tuna Desktop's `ScreenshotOutputs`).
+    Outputs {
+        directory: PathBuf,
+        reply: mpsc::Sender<Vec<OutputShot>>,
+    },
     /// Authorized screenshot feedback without a new capture (the shell UI).
     Flash {
         area: [i32; 4],
@@ -54,6 +61,22 @@ pub struct WindowShot {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    pub path: PathBuf,
+}
+
+/// One output as the screenshot UI freezes it: GNOME's stage screenshot
+/// (`screenshot_stage_to_content`) cut along one `UIMonitorBin`. The
+/// rectangle is in global logical pixels; the picture holds the output's
+/// own pixels, rendered at its scale.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutputShot {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub scale: f64,
+    pub primary: bool,
     pub path: PathBuf,
 }
 
@@ -80,9 +103,11 @@ struct Service {
 }
 
 /// Tuna Desktop's own addition on the same object: the screenshot UI's window
-/// selector needs every window's picture, which GNOME Shell takes
-/// in-process (`paint_to_content`). Window contents are no more private
-/// than the screen, which `org.gnome.Shell.Screenshot` already hands out.
+/// selector needs every window's picture, and its per-monitor screen
+/// selectors every output's, which GNOME Shell takes in-process
+/// (`paint_to_content`, `screenshot_stage_to_content`). Window and output
+/// contents are no more private than the screen, which
+/// `org.gnome.Shell.Screenshot` already hands out.
 struct WindowsService {
     authority: crate::capture_security::Authority,
     to_loop: calloop::channel::Sender<Request>,
@@ -91,6 +116,10 @@ struct WindowsService {
 /// One window as `ScreenshotWindows` answers it: id, title, focused,
 /// x, y, width, height, path.
 pub type WindowShotReply = (u64, String, bool, i32, i32, i32, i32, String);
+
+/// One output as `ScreenshotOutputs` answers it: name, x, y, width,
+/// height (global logical pixels), scale, primary, path.
+pub type OutputShotReply = (String, i32, i32, i32, i32, f64, bool, String);
 
 #[zbus::interface(name = "org.tuna.Screenshot")]
 impl WindowsService {
@@ -127,6 +156,47 @@ impl WindowsService {
                     s.y,
                     s.width,
                     s.height,
+                    s.path.to_string_lossy().into_owned(),
+                )
+            })
+            .collect())
+    }
+
+    /// `(directory) -> a(siiiidbs)`: every output's current picture, each
+    /// saved as a PNG into `directory` at the output's own scale, with its
+    /// logical rectangle and whether it is the primary. The screenshot
+    /// UI freezes each monitor with it, as GNOME 51's stage screenshot.
+    async fn screenshot_outputs(
+        &self,
+        directory: String,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<Vec<OutputShotReply>> {
+        self.authority.admit(conn, &header).await?;
+        let directory = PathBuf::from(directory);
+        if !directory.is_absolute() {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "directory must be absolute".into(),
+            ));
+        }
+        let (reply, answer) = mpsc::channel();
+        self.to_loop
+            .send(Request::Outputs { directory, reply })
+            .map_err(|_| zbus::fdo::Error::Failed("compositor gone".into()))?;
+        let shots = answer
+            .recv_timeout(DEADLINE)
+            .map_err(|_| zbus::fdo::Error::Failed("output screenshots failed".into()))?;
+        Ok(shots
+            .into_iter()
+            .map(|s| {
+                (
+                    s.name,
+                    s.x,
+                    s.y,
+                    s.width,
+                    s.height,
+                    s.scale,
+                    s.primary,
                     s.path.to_string_lossy().into_owned(),
                 )
             })
