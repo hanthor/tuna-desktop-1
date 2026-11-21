@@ -996,6 +996,12 @@ impl Drop for Runtime {
         // Every exit path drops the runtime, including SIGTERM from logind's
         // session stop or the supervisor.
         self.orca.shutdown();
+        // Likewise the IBus bridge's group and that of an ibus-daemon the
+        // bridge started itself: left running the daemon keeps logind's
+        // session scope, and the session, from ending (#1014).
+        if let Some(ime) = &mut self.ime {
+            ime.shutdown();
+        }
         // Window sessions (P-SY-08): record every window still in one and
         // write the store before the clients lose their windows, as
         // Mutter does when its display closes at logout.
