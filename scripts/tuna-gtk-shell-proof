@@ -12,6 +12,8 @@
 #   keyboard and X11 tray gates only.
 #   --x11-iconic-only runs panel readiness and G-X11-ICONIC (a minimized
 #   X11 window is IconicState with _NET_WM_STATE_HIDDEN, #1078) only.
+#   --subsurface-only runs panel readiness and G-SUBSURFACE-STACKING (a
+#   window's subsurfaces stack where the client placed them) only.
 #   --grid-hover-only runs panel readiness, G-GRID-HOVER, G-GRID-REORDER,
 #   G-GRID-ON-DEMAND and G-SHELL-STABLE only.
 #   --keyboard-routes-only runs panel readiness and the P-A11Y-02 keyboard
@@ -178,6 +180,9 @@
 #   G-X11-INPUT-FOCUS the X server's input focus is the focused X11 window
 #   G-X11-ICONIC a minimized X11 window is WM_STATE IconicState with
 #                  _NET_WM_STATE_HIDDEN, and NormalState without once restored
+#   G-SUBSURFACE-STACKING a subsurface placed above its window shows over
+#                  it and one placed below shows under it, on the desktop,
+#                  in the overview's preview and in the window's screenshot
 #   G-SETTINGS-CLOCK GNOME's clock-show-seconds key changes the panel clock
 #   G-SETTINGS-INPUT GNOME's input sources set the keymap (Super+Space
 #                  switches), repeat-interval the repeat rate, and
@@ -555,6 +560,7 @@ A11Y_FOCUS_ONLY=0
 NOTIFY_LOCK_ONLY=0
 TRAY_ONLY=0
 X11_ICONIC_ONLY=0
+SUBSURFACE_ONLY=0
 GRID_HOVER_ONLY=0
 KEYBOARD_ROUTES_ONLY=0
 DATEMENU_ONLY=0
@@ -609,6 +615,7 @@ while [ $# -gt 0 ]; do
         --lock-menu-only) LOCK_MENU_ONLY=1; only_mode "$1" no-media-source no-examples; shift ;;
         --dnd-overview-only) DND_OVERVIEW_ONLY=1; only_mode "$1" no-media-source no-examples; shift ;;
         --x11-iconic-only) X11_ICONIC_ONLY=1; only_mode "$1"; shift ;;
+        --subsurface-only) SUBSURFACE_ONLY=1; only_mode "$1" source-build no-media-source no-examples no-camera-policy; shift ;;
         --display) DISPLAY_ARG="$2"; shift 2 ;;
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
         --help|-h) sed -n '2,/^# end of --help$/{/^# end of --help$/!p;}' "$0"; exit 0 ;;
@@ -1547,6 +1554,9 @@ if [ "$INSTALLED_PACKAGE" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ]; then
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example icon-probe
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example shortcut-inhibit-client
     fi
+    if [ "$SUBSURFACE_ONLY" = 1 ]; then
+        cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example tuna-subsurface-client
+    fi
 fi
 # The compositor and the shell share this log from one file description.
 # Truncate first (a fresh log each run, as before), then append: O_APPEND
@@ -1906,6 +1916,96 @@ x11_iconic_gate() {
     pass G-X11-ICONIC "Super+H, Hide and the client's own iconify make an X11 window IconicState with _NET_WM_STATE_HIDDEN; the overview and Alt+Tab make it NormalState without"
 }
 
+# G-SUBSURFACE-STACKING: a window's subsurfaces stack where the client
+# placed them (wl_subsurface.place_above / place_below), as Mutter draws
+# them. tuna-subsurface-client's red 400x300 window has a green
+# subsurface above it at (50, 100) and a blue one below it at (300, 100),
+# half past its right edge: the parent never covers the green one and
+# always covers the blue one, which shows only past the parent's edge.
+# Checked in the three scenes that draw a window's surface tree: the
+# desktop, the overview's preview and the window's own screenshot
+# (Alt+Print, ScreenshotWindow). Each sampled pixel is kept in
+# subsurface-pixels.txt; every scene is sampled before the gate judges.
+SUBSURFACE_RED="200 40 40"
+SUBSURFACE_GREEN="40 200 40"
+SUBSURFACE_BLUE="40 40 200"
+# subsurface_sample SCENE PNG X Y WANT NAME: the pixel at (X, Y) of PNG is
+# within 30 of WANT ("r g b") in every channel.
+subsurface_sample() {
+    sub_got="$(px "$2" "$3" "$4")"
+    echo "$1 $6 ($3,$4) want $5 got $sub_got" >>"$ARTIFACTS/subsurface-pixels.txt"
+    if ! echo "$sub_got" | awk -v want="$5" '
+        BEGIN { split(want, w, " ") }
+        { for (i = 1; i <= 3; i++) { d = $i - w[i]; if (d < 0) d = -d; if (d > 30) exit 1 }; ok = 1 }
+        END { exit !ok }'; then
+        SUBSURFACE_BAD="${SUBSURFACE_BAD:+$SUBSURFACE_BAD; }$1: $6 shows $sub_got, not $5"
+    fi
+}
+# subsurface_scene SCENE PNG X Y W H: the window's geometry (400x300 in
+# the client) drawn at (X, Y) at W x H in PNG.
+subsurface_scene() {
+    sub_at() { echo "$(($3 + $1 * $5 / 400)) $(($4 + $2 * $6 / 300))"; }
+    # shellcheck disable=SC2046
+    subsurface_sample "$1" "$2" $(sub_at 200 50 "$3" "$4" "$5" "$6") "$SUBSURFACE_RED" "the parent"
+    # shellcheck disable=SC2046
+    subsurface_sample "$1" "$2" $(sub_at 100 150 "$3" "$4" "$5" "$6") "$SUBSURFACE_GREEN" "the subsurface placed above"
+    # shellcheck disable=SC2046
+    subsurface_sample "$1" "$2" $(sub_at 350 150 "$3" "$4" "$5" "$6") "$SUBSURFACE_RED" "the parent over the subsurface placed below"
+}
+subsurface_stacking_gate() {
+    SUBSURFACE_BAD=""
+    : >"$ARTIFACTS/subsurface-pixels.txt"
+    WAYLAND_DISPLAY="$SOCKET_NAME" "$COMPANIONS/tuna-subsurface-client" >"$ARTIFACTS/subsurface-client.log" 2>&1 &
+    SUBSURFACE_PID=$!
+    cstate 'any(.windows[]; .app_id == "tuna-subsurface-proof")' "subsurface window" ||
+        fail G-SUBSURFACE-STACKING "the subsurface client's window never mapped"
+    sub_id="$(jq -r '.windows[] | select(.app_id == "tuna-subsurface-proof") | .id' "$CSTATE")"
+    cstate ".focused == $sub_id" "subsurface window focused" ||
+        fail G-SUBSURFACE-STACKING "the subsurface client's window never took focus"
+    # The open animation ends; the pointer leaves the window, away from
+    # the hot corner.
+    xdotool mousemove --window "$WID" $((WIDTH - 20)) $((HEIGHT - 20))
+    sleep 1
+    read -r sx sy sw sh <<EOF
+$(jq -r '.windows[] | select(.app_id == "tuna-subsurface-proof") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE")
+EOF
+    [ "$sw,$sh" = "400,300" ] || fail G-SUBSURFACE-STACKING "the window is ${sw}x$sh, not the client's 400x300"
+    scrot -o "$ARTIFACTS/subsurface-desktop.png" >/dev/null
+    subsurface_scene desktop "$ARTIFACTS/subsurface-desktop.png" "$sx" "$sy" 400 300
+    # The subsurface below is drawn: past the parent's right edge it shows.
+    subsurface_sample desktop "$ARTIFACTS/subsurface-desktop.png" $((sx + 425)) $((sy + 150)) \
+        "$SUBSURFACE_BLUE" "the subsurface placed below, past the parent's edge"
+
+    xdotool key Super_L
+    cstate ".overview_open and .overview_progress == 1 and any(.previews[]; .id == $sub_id)" "subsurface preview" ||
+        fail G-SUBSURFACE-STACKING "the overview shows no preview of the window"
+    sleep 1
+    read -r ox oy ow oh <<EOF
+$(jq -r ".previews[] | select(.id == $sub_id) | .rect | map(floor) | \"\(.[0]) \(.[1]) \(.[2]) \(.[3])\"" "$CSTATE")
+EOF
+    scrot -o "$ARTIFACTS/subsurface-overview.png" >/dev/null
+    subsurface_scene overview "$ARTIFACTS/subsurface-overview.png" "$ox" "$oy" "$ow" "$oh"
+    xdotool key Escape
+    cstate "(.overview_open | not) and .overview_progress == 0 and .focused == $sub_id" "subsurface overview closed" ||
+        fail G-SUBSURFACE-STACKING "Escape did not close the overview back to the window"
+
+    touch "$ARTIFACTS/subsurface-before-capture"
+    xdotool key alt+Print
+    end=$(($(date +%s) + 15))
+    until [ -n "$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' -newer "$ARTIFACTS/subsurface-before-capture" 2>/dev/null)" ] ||
+        [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+    sub_shot="$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' -newer "$ARTIFACTS/subsurface-before-capture" 2>/dev/null | head -1)"
+    [ -n "$sub_shot" ] || fail G-SUBSURFACE-STACKING "Alt+Print saved no window screenshot"
+    cp "$sub_shot" "$ARTIFACTS/subsurface-window-capture.png"
+    sub_dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$sub_shot")"
+    [ "$sub_dims" = "400,300" ] || fail G-SUBSURFACE-STACKING "the window screenshot is $sub_dims, not 400,300"
+    subsurface_scene window-capture "$ARTIFACTS/subsurface-window-capture.png" 0 0 400 300
+
+    kill "$SUBSURFACE_PID" 2>/dev/null || true
+    [ -z "$SUBSURFACE_BAD" ] || fail G-SUBSURFACE-STACKING "$SUBSURFACE_BAD"
+    pass G-SUBSURFACE-STACKING "a subsurface placed above its window shows over it and one placed below shows under it (past its edge only) on the desktop, in the overview preview and in the window screenshot"
+}
+
 # G-LOCK-WITH-MENU-OPEN: GNOME's lock dismisses the open shell menu and
 # its grab, and the lock screen has the keyboard at once. Each menu is
 # opened from its keybinding, Super+L locks over it, and the password
@@ -2010,6 +2110,15 @@ if [ "$X11_ICONIC_ONLY" = 1 ]; then
     cstate '.x11_display != null' "xwayland" 30 || fail G-X11-ICONIC "XWayland display never advertised"
     x11_display="$(jq -r '.x11_display' "$CSTATE")"
     x11_iconic_gate
+    grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
+    exit 0
+fi
+if [ "$SUBSURFACE_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "subsurface desktop ready" ||
+        fail G-SUBSURFACE-STACKING "desktop never became ready"
+    # Let the startup cover settle before the first window.
+    sleep 3
+    subsurface_stacking_gate
     grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
     exit 0
 fi
