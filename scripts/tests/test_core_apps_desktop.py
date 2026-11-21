@@ -969,7 +969,7 @@ class EnterLocationCompletion(unittest.TestCase):
     The rig models exactly that: Return over the list appends the hovered
     row; Return elsewhere closes the entry on its text.
     """
-    WINDOW = {'id': 33, 'rect': [195, 141, 890, 550], 'surface_offset': [0, 0]}
+    WINDOW = {'id': 33, 'rect': [195, 141, 890, 550], 'buffer_rect': [195, 141, 890, 550]}
     ENTRY = [259, 0, 442, 34]
     LIST = [275, 59, 426, 176]
     PARKED = [797.6171875, 253.3203125]
@@ -1089,7 +1089,7 @@ class ShadowedSurfacePointer(unittest.TestCase):
     Adding No Thanks' bounds [300, 486, 109, 34] to the rect put the click at
     [665, 644], below the button drawn at [585, 604, 109, 34].
     """
-    WINDOW = {'id': 2, 'rect': [311, 141, 658, 549], 'surface_offset': [26, 23]}
+    WINDOW = {'id': 2, 'rect': [311, 141, 658, 549], 'buffer_rect': [285, 118, 710, 601]}
     ACTOR = {'id': 'org.gnome.Connections', 'window_id': 2}
     NO_THANKS = {'bounds': [300, 486, 109, 34]}
 
@@ -1115,8 +1115,8 @@ class ShadowedSurfacePointer(unittest.TestCase):
         self.assertTrue(desktop._pointer_rests_on(self.ACTOR, {'state': state}, self.NO_THANKS))
         self.assertEqual(desktop._field_pixels(self.ACTOR, state, self.NO_THANKS), (585, 604, 109, 34))
 
-    def test_missing_surface_offset_is_refused(self):
-        window = {'id': 2, 'rect': [311, 141, 658, 549], 'surface_offset': None}
+    def test_missing_buffer_rect_is_refused(self):
+        window = {'id': 2, 'rect': [311, 141, 658, 549], 'buffer_rect': None}
         with self.assertRaises(RuntimeError):
             self.desktop()._move_to(self.ACTOR, {'state': {'windows': [window]}},
                                     self.NO_THANKS, 0.5, 0.5)

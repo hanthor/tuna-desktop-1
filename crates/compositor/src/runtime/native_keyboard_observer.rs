@@ -16,7 +16,7 @@ pub(super) fn enable(state: &State) {
         .and_then(|path| path.parent().and_then(|parent| parent.metadata().ok()))
         .is_some_and(|metadata| {
             metadata.is_dir()
-                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.uid() == rustix::process::geteuid().as_raw()
                 && metadata.mode() & 0o077 == 0
         });
     if private_path {

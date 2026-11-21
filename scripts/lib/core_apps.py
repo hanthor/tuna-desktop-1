@@ -260,16 +260,16 @@ class Desktop(NativeDesktop):
         """Output point of the window's surface origin.
 
         Accessible extents are surface-relative, while `rect` is the xdg
-        window geometry, which client-side shadows push to `surface_offset`
-        inside the surface: Connections' welcome window reports a 710x601
-        frame for a 658x549 rect, and rect-relative clicks landed 26 px
-        right of and 23 px below No Thanks (run 44850865831).
+        window geometry, which client-side shadows push inside the surface;
+        `buffer_rect` is the committed buffer, shadows included. Connections'
+        welcome window reports a 710x601 frame for a 658x549 rect, and
+        rect-relative clicks landed 26 px right of and 23 px below No Thanks
+        (run 44850865831).
         """
-        window = self._window(actor, state)
-        offset = window.get('surface_offset')
-        if offset is None:
-            raise RuntimeError('original native surface offset unavailable')
-        return window['rect'][0] - offset[0], window['rect'][1] - offset[1]
+        buffer = self._window(actor, state).get('buffer_rect')
+        if buffer is None:
+            raise RuntimeError('original native surface buffer unavailable')
+        return buffer[0], buffer[1]
 
 
 
