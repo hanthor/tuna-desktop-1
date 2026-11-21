@@ -523,7 +523,9 @@ class Workflow(unittest.TestCase):
     @unittest.skipUnless(shutil.which('jq'), 'the gate expression runs under jq')
     def test_gate_rejects_a_selected_consumer_whose_join_did_not_succeed(self):
         gate = self.jobs['ci-gate']
-        self.assertEqual(gate['if'], 'always()')
+        # Runs after failed or skipped needs (only a superseded, cancelled
+        # run skips it), so a failed join still fails the gate.
+        self.assertEqual(gate['if'], '${{ !cancelled() }}')
         expression = re.search(r"jq -e '([^']+)'", gate['steps'][0]['run']).group(1)
 
         def passes(core, join_result, **others):
