@@ -65,6 +65,11 @@ class Selection(unittest.TestCase):
         # (#353) are sourced into it, with their pixel reader.
         for path in ("scripts/lib/tuna-sound-alerts-proof.sh", "scripts/lib/tuna-bell-pixels.py"):
             self.assertEqual(pr(path), ["journey", "gtk-shell"], path)
+        # MP-*, WL-*, X11-* window-motion gates and the capture they pair with.
+        for path in ("scripts/tuna-motion-pairing-proof", "scripts/tuna-x11-icon-geometry-proof",
+                     "scripts/lib/motion_pairing.py",
+                     "tests/gnome-reference/motion-reference.json"):
+            self.assertEqual(pr(path), ["gtk-shell"], path)
         self.assertEqual(pr("docs/parity-ledger.md"),
                          ["journey", "drm-smoke", "gtk-shell", "orca-speech",
                           "arch-package", "marlin-vm", "parity-ledger"])
