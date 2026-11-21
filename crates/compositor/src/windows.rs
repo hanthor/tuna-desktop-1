@@ -1226,8 +1226,37 @@ impl WindowManager {
             .get(&id)
             .is_some_and(|w| w.layout == WindowLayout::Fullscreen)
     }
+    /// Shell-published dash icon bounds for `id`.
     pub fn icon_geometry(&self, id: u64) -> Option<Rectangle<i32, Logical>> {
         self.icon_geometries.get(&id).copied()
+    }
+    /// The client's own minimize target: X11 `_NET_WM_ICON_GEOMETRY`, as
+    /// Mutter's `meta_window_get_icon_geometry` reports it (Wayland clients
+    /// have no such request).
+    pub fn client_icon_geometry(&self, id: u64) -> Option<Rectangle<i32, Logical>> {
+        match self.windows.get(&id)?.surface.underlying_surface() {
+            #[cfg(feature = "xwayland")]
+            WindowSurface::X11(surface) => surface.icon_geometry(),
+            _ => None,
+        }
+    }
+    /// Published dash icon bounds as `[window, x, y, w, h]`, by window id.
+    pub fn icon_geometries_json(&self) -> serde_json::Value {
+        let mut rows: Vec<_> = self
+            .icon_geometries
+            .iter()
+            .map(|(id, r)| {
+                [
+                    *id as i64,
+                    r.loc.x.into(),
+                    r.loc.y.into(),
+                    r.size.w.into(),
+                    r.size.h.into(),
+                ]
+            })
+            .collect();
+        rows.sort_unstable();
+        serde_json::json!(rows)
     }
     /// Replace trusted shell-published global logical dash icon bounds.
     pub fn set_icon_geometries(&mut self, geometries: Vec<(u64, Rectangle<i32, Logical>)>) {
@@ -7482,6 +7511,33 @@ pub enum TriggerAction {
     Open,
 }
 
+/// Read-only queries on the seat keymap. smithay's `Xkb::keymap` is
+/// unsafe because a ref-count of the keymap must not outlive the `Xkb`;
+/// the view borrows it no longer than the `Xkb` and hands out queries
+/// only, never the keymap or a clone of it.
+struct KeymapView<'a>(&'a xkb::Keymap);
+
+impl<'a> KeymapView<'a> {
+    fn of(xkb: &'a smithay::input::keyboard::Xkb) -> Self {
+        // SAFETY: the reference lives no longer than `xkb`, and nothing
+        // in this view can clone the keymap or let it escape.
+        Self(unsafe { xkb.keymap() })
+    }
+
+    /// The keymap's lowest and highest raw keycodes.
+    fn keycode_range(&self) -> (u32, u32) {
+        (self.0.min_keycode().raw(), self.0.max_keycode().raw())
+    }
+
+    fn syms_by_level(&self, key: Keycode, layout: u32, level: u32) -> &'a [xkb::Keysym] {
+        self.0.key_get_syms_by_level(key, layout, level)
+    }
+
+    fn num_levels(&self, key: Keycode, layout: u32) -> u32 {
+        self.0.num_levels_for_key(key, layout)
+    }
+}
+
 /// Every evdev keycode of the seat's keymap with the level-one keysyms it
 /// produces in any layout, for resolving the overlay key. Empty without a
 /// seat keyboard.
@@ -7493,10 +7549,7 @@ pub fn keymap_keysyms(state: &mut State) -> Vec<(u32, Vec<u32>)> {
         let Ok(xkb) = context.xkb().lock() else {
             return Vec::new();
         };
-        // SAFETY: the keymap is borrowed only while the XKB mutex is held;
-        // no reference escapes this call.
-        let keymap = unsafe { xkb.keymap() };
-        let (min, max) = (keymap.min_keycode().raw(), keymap.max_keycode().raw());
+        let (min, max) = KeymapView::of(&xkb).keycode_range();
         (min.max(XKB_X11_OFFSET)..=max)
             .filter_map(|code| {
                 let syms: Vec<u32> = xkb
@@ -8783,10 +8836,8 @@ impl WindowManager {
         keyboard.with_xkb_state(state, |context| {
             let xkb = context.xkb().lock().ok()?;
             let layout = xkb.active_layout().0;
-            // SAFETY: the keymap is only borrowed while the lock is held.
-            let keymap = unsafe { xkb.keymap() };
-            keymap
-                .key_get_syms_by_level((keycode + XKB_X11_OFFSET).into(), layout, 0)
+            KeymapView::of(&xkb)
+                .syms_by_level((keycode + XKB_X11_OFFSET).into(), layout, 0)
                 .first()
                 .map(|sym| sym.raw())
         })
@@ -8800,14 +8851,13 @@ impl WindowManager {
         keyboard.with_xkb_state(state, |context| {
             let xkb = context.xkb().lock().ok()?;
             let layout = xkb.active_layout().0;
-            // SAFETY: the keymap is only borrowed while the lock is held.
-            let keymap = unsafe { xkb.keymap() };
-            let (min, max) = (keymap.min_keycode().raw(), keymap.max_keycode().raw());
+            let keymap = KeymapView::of(&xkb);
+            let (min, max) = keymap.keycode_range();
             (min..max).find_map(|keycode| {
-                let levels = keymap.num_levels_for_key(keycode.into(), layout);
+                let levels = keymap.num_levels(keycode.into(), layout);
                 (0..levels).find_map(|level| {
                     keymap
-                        .key_get_syms_by_level(keycode.into(), layout, level)
+                        .syms_by_level(keycode.into(), layout, level)
                         .iter()
                         .any(|sym| sym.raw() == keysym)
                         .then(|| (keycode - XKB_X11_OFFSET, level))
@@ -9697,15 +9747,22 @@ mod resize_tests {
     }
 }
 
+/// The main surface's buffer size in logical pixels: the extent GNOME's
+/// `meta_window_get_buffer_rect` covers, client-side shadows included.
+/// `None` before the first buffer.
+pub(crate) fn buffer_size(
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) -> Option<Size<i32, Logical>> {
+    smithay::backend::renderer::utils::with_renderer_surface_state(surface, |s| s.surface_size())
+        .flatten()
+}
+
 /// The size a client committed for its window: its xdg window geometry,
 /// else its buffer's size. `None` before the first buffer.
 pub(crate) fn committed_size(
     surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
 ) -> Option<Size<i32, Logical>> {
-    let buffer = smithay::backend::renderer::utils::with_renderer_surface_state(surface, |s| {
-        s.surface_size()
-    })
-    .flatten()?;
+    let buffer = buffer_size(surface)?;
     let geometry = smithay::wayland::compositor::with_states(surface, |states| {
         states
             .cached_state
