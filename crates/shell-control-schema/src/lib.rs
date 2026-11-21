@@ -15,6 +15,7 @@
 //! `docs/api-stability.md` in the repository.
 
 pub mod background;
+pub mod framing;
 pub mod gl;
 pub mod introspect;
 pub mod motion;
@@ -22,11 +23,13 @@ pub use motion::{MotionLevel, MotionPolicy};
 
 use serde::{Deserialize, Serialize};
 
+use framing::FrameError;
 /// Maximum accepted frame body size in bytes (1 MiB, per ADR 0002).
 ///
-/// Enforced in [`decode_frame`] before postcard decoding, so a hostile or
-/// buggy peer cannot force a large allocation.
-pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+/// Defined by the message-agnostic [`framing`] codec and enforced in
+/// [`decode_frame`] before postcard decoding, so a hostile or buggy peer
+/// cannot force a large allocation.
+pub use framing::MAX_FRAME_BYTES;
 
 /// Maximum window title length in bytes.
 ///
@@ -232,9 +235,14 @@ impl ProtocolVersion {
     /// the shell reports the screen saver active only then, because
     /// gnome-settings-daemon blanks the screen on `ActiveChanged(true)`.
     /// Positional postcard peers must ship together.
+    /// `0.52` appends the shell-to-compositor `DeclareBusName` command: the
+    /// supervised shell names its session-bus connection over this
+    /// pidfd-pinned socket, and the compositor recognises the shell on
+    /// D-Bus by that unique name only (ADR 0010). Positional postcard peers
+    /// must ship together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 51,
+        minor: 52,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -525,6 +533,13 @@ pub enum CommandKind {
         window: WindowId,
         response: CloseDialogResponse,
     },
+    /// Since 0.52: the unique name (`:1.N`) of the shell's session-bus
+    /// connection. The compositor admits D-Bus calls as the shell only
+    /// from the names its supervised, pidfd-pinned control session
+    /// declared, and forgets them when that session or process ends. A
+    /// session that is not the supervised shell is denied. A later
+    /// declaration replaces the earlier one.
+    DeclareBusName { unique_name: String },
 }
 
 /// mutter 51 `MetaCloseDialogResponse`: what the user chose in the dialog
@@ -1962,6 +1977,16 @@ impl From<postcard::Error> for DecodeError {
     }
 }
 
+impl From<FrameError> for DecodeError {
+    fn from(e: FrameError) -> Self {
+        match e {
+            FrameError::Truncated { expected, actual } => Self::Truncated { expected, actual },
+            FrameError::Oversize { len, max } => Self::Oversize { len, max },
+            FrameError::Malformed(e) => Self::Malformed(e),
+        }
+    }
+}
+
 /// Encode one message as a length-prefixed frame: u32-LE body length
 /// followed by the postcard body.
 ///
@@ -1969,30 +1994,7 @@ impl From<postcard::Error> for DecodeError {
 /// [`MAX_FRAME_BYTES`]; both indicate a local programming error, since the
 /// cap bounds every message this crate can legally emit.
 pub fn encode_frame(msg: &Message) -> Vec<u8> {
-    // Grow-on-demand so small control messages avoid the 1 MiB buffer.
-    // postcard::to_slice reports SerializeBufferFull when the buffer is
-    // too small; that is the only recoverable encode error here.
-    let mut cap = 1024usize;
-    loop {
-        let mut buf = vec![0u8; cap];
-        match postcard::to_slice(msg, &mut buf) {
-            Ok(used) => {
-                let body_len = used.len();
-                let mut frame = Vec::with_capacity(4 + body_len);
-                frame.extend_from_slice(&(body_len as u32).to_le_bytes());
-                frame.extend_from_slice(used);
-                return frame;
-            }
-            Err(postcard::Error::SerializeBufferFull) => {
-                cap *= 4;
-                assert!(
-                    cap <= MAX_FRAME_BYTES,
-                    "encoded message exceeds {MAX_FRAME_BYTES}-byte frame cap"
-                );
-            }
-            Err(e) => panic!("shell control encode failed: {e}"),
-        }
-    }
+    framing::encode(msg)
 }
 
 /// Owned credential frame. Drop wipes this encoder's sole allocation; this is
@@ -2113,39 +2115,7 @@ pub fn encode_answer_frame(
 /// well-formed with no trailing bytes, titles within [`MAX_TITLE_LEN`],
 /// and `Hello` major matching [`CURRENT_VERSION`].major.
 pub fn decode_frame(bytes: &[u8]) -> Result<Message, DecodeError> {
-    if bytes.len() < 4 {
-        return Err(DecodeError::Truncated {
-            expected: 4,
-            actual: bytes.len(),
-        });
-    }
-    let mut prefix = [0u8; 4];
-    prefix.copy_from_slice(&bytes[..4]);
-    let len = u32::from_le_bytes(prefix) as usize;
-    if len > MAX_FRAME_BYTES {
-        return Err(DecodeError::Oversize {
-            len,
-            max: MAX_FRAME_BYTES,
-        });
-    }
-    let body = &bytes[4..];
-    if body.len() < len {
-        return Err(DecodeError::Truncated {
-            expected: len,
-            actual: body.len(),
-        });
-    }
-    if body.len() > len {
-        return Err(DecodeError::Malformed(
-            postcard::Error::DeserializeBadEncoding,
-        ));
-    }
-    let (msg, trailing): (Message, &[u8]) = postcard::take_from_bytes(&body[..len])?;
-    if !trailing.is_empty() {
-        return Err(DecodeError::Malformed(
-            postcard::Error::DeserializeBadEncoding,
-        ));
-    }
+    let msg: Message = framing::decode(bytes)?;
     validate_titles(&msg)?;
     if let Message::Hello { version } = &msg {
         if version.major != CURRENT_VERSION.major {
@@ -2653,11 +2623,11 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_51() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 51));
-        // A 0.50 shell still negotiates; a newer minor does not.
-        assert!(ProtocolVersion::new(0, 50).is_compatible_with(&CURRENT_VERSION));
-        assert!(!ProtocolVersion::new(0, 52).is_compatible_with(&CURRENT_VERSION));
+    fn current_version_is_0_52() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 52));
+        // A 0.51 shell still negotiates; a newer minor does not.
+        assert!(ProtocolVersion::new(0, 51).is_compatible_with(&CURRENT_VERSION));
+        assert!(!ProtocolVersion::new(0, 53).is_compatible_with(&CURRENT_VERSION));
     }
 
     #[test]
@@ -4236,5 +4206,28 @@ mod close_dialog_wire_tests {
             );
             assert_eq!(decode_frame(&encode_frame(&message)).unwrap(), message);
         }
+    }
+
+    #[test]
+    fn declare_bus_name_follows_respond_close_dialog() {
+        let tag = |bytes: &[u8]| bytes[0];
+        let mut buffer = [0_u8; 64];
+        let respond = tag(postcard::to_slice(
+            &CommandKind::RespondCloseDialog {
+                window: 3,
+                response: CloseDialogResponse::Wait,
+            },
+            &mut buffer,
+        )
+        .unwrap());
+        let kind = CommandKind::DeclareBusName {
+            unique_name: ":1.42".into(),
+        };
+        assert_eq!(
+            tag(postcard::to_slice(&kind, &mut buffer).unwrap()),
+            respond + 1
+        );
+        let command = Message::Command { id: 12, kind };
+        assert_eq!(decode_frame(&encode_frame(&command)).unwrap(), command);
     }
 }

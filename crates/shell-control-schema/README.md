@@ -11,7 +11,16 @@ before decoding.
 
 ## Public API (`src/lib.rs`)
 
-- Framing: `encode_frame`, `decode_frame`, `DecodeError`, `MAX_FRAME_BYTES`.
+- Envelope (`src/framing.rs`, ADR 0004 seam 1): `framing::encode`,
+  `framing::decode`, `framing::complete_frame_len`, `framing::body_len`,
+  `framing::FrameError`, `framing::PREFIX_LEN` and `MAX_FRAME_BYTES` (also
+  at the crate root). Generic over any serde type, and imports nothing from
+  the message schema; `FrameError` covers only truncated, oversize and
+  malformed frames.
+- Messages on the wire: `encode_frame`, `decode_frame` and `DecodeError`
+  apply the envelope to `Message`, then add the schema checks (title and
+  collection bounds, `Hello` major). `DecodeError` keeps the envelope
+  variants (`From<FrameError>`) so existing callers match unchanged.
 - Versioning: `ProtocolVersion`, `CURRENT_VERSION`. The current number is
   `ProtocolVersion::CURRENT` in `src/lib.rs`, whose doc comment lists every
   minor; the wire-change rules are in the
@@ -56,6 +65,11 @@ before decoding.
   (screenShield.js `_lockScreenShown`); `false` once it unlocks. The shell
   reports `org.gnome.ScreenSaver` active only while it is shown, because
   gnome-settings-daemon blanks the screen on `ActiveChanged(true)`.
+- Shell bus identity (0.52): `CommandKind::DeclareBusName { unique_name }`
+  (peers >=52 only) names the shell's session-bus connection. The
+  compositor admits D-Bus capture and Introspect calls as the shell only
+  from names the supervised shell's pidfd-pinned control session declared,
+  and denies the command from any other session (ADR 0010).
 - Messages: `Message`, `StateOp`, `CommandKind`, `CommandStatus`,
   `ErrorKind`.
 - State types: `WindowInfo`, `WorkspaceInfo`, `OutputInfo`, `PreviewInfo`,
@@ -73,8 +87,10 @@ before decoding.
   `SwitcherThumbnail`, `WindowAction`, `Accelerator`, and the `MOD_*` and
   `MODE_*` constants.
 
-Its only dependencies are `postcard` and `serde`. Tests are inline in
-`src/lib.rs`.
+Its dependencies are `postcard`, `serde` and `tuna-output`. Schema tests
+are inline in `src/lib.rs` and in `tests/protocol_schema_tests.rs`; the
+envelope's tests, including the check that `src/framing.rs` stays
+message-agnostic, are in `tests/framing_tests.rs`.
 
 ## Dependents
 
