@@ -391,6 +391,8 @@ pub struct Session<'a> {
     /// The session-bus unique name the supervised shell declared over this
     /// session (`DeclareBusName`), read by [`ControlHub::shell_bus_names`].
     bus_name: Option<String>,
+    /// Admitted `BeginStartupSequence`s `(app_id, wm_class)`, drained by the hub.
+    startup_sequences: Vec<(String, Option<String>)>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -494,6 +496,7 @@ impl<'a> Session<'a> {
             close_menu_unanimated: false,
             close_dialog_responses: Vec::new(),
             bus_name: None,
+            startup_sequences: Vec::new(),
         };
         let msg = match session.conn.read_frame() {
             Ok(msg) => msg,
@@ -1242,6 +1245,35 @@ impl<'a> Session<'a> {
             }
             Message::Command {
                 id,
+                kind: CommandKind::BeginStartupSequence { app_id, wm_class },
+            } => {
+                if self.peer_minor < 53 {
+                    self.conn.write_frame(&Message::Error {
+                        kind: ErrorKind::UnknownCommand,
+                        message: "startup sequences require negotiated minor 53".into(),
+                    })?;
+                    return Ok(Handled::ErrorSent {
+                        kind: ErrorKind::UnknownCommand,
+                    });
+                }
+                // Bounded like titles; the compositor holds at most a
+                // handful (see `startup::MAX_SEQUENCES`).
+                let fits = |s: &str| !s.is_empty() && s.len() <= tuna_shell_control::MAX_TITLE_LEN;
+                let status = if fits(&app_id) && wm_class.as_deref().is_none_or(fits) {
+                    self.startup_sequences.push((app_id, wm_class));
+                    CommandStatus::Applied
+                } else {
+                    CommandStatus::Denied {
+                        reason: "invalid startup sequence".into(),
+                    }
+                };
+                let applied = status == CommandStatus::Applied;
+                self.conn
+                    .write_frame(&Message::CommandResult { id, status })?;
+                Ok(Handled::CommandResult { id, applied })
+            }
+            Message::Command {
+                id,
                 kind: CommandKind::WindowAction { window, action },
             } => {
                 // The window manager carries it out (drained by the hub);
@@ -1634,6 +1666,7 @@ fn apply_command(
         | CommandKind::CloseMenuUnanimated
         | CommandKind::RespondCloseDialog { .. }
         | CommandKind::DeclareBusName { .. }
+        | CommandKind::BeginStartupSequence { .. }
         | CommandKind::SwitchInputSource { .. }
         | CommandKind::SetWindowIconGeometries { .. }
         | CommandKind::SetWellbeingEffects { .. }
@@ -1715,6 +1748,9 @@ pub struct PollOutcome {
     pub close_menu_unanimated: bool,
     /// Close-dialog answers `(window, response)`, in order (#1035).
     pub close_dialog_responses: Vec<(u64, tuna_shell_control::CloseDialogResponse)>,
+    /// App launches' startup sequences `(app_id, wm_class)`, in order: the
+    /// busy cursor until their windows map (#1193).
+    pub startup_sequences: Vec<(String, Option<String>)>,
     /// Input-source switches to make (`true` backward), in order.
     pub input_source_switches: Vec<bool>,
     /// New switcher thumbnail frames, if the shell sent any.
@@ -2571,6 +2607,9 @@ impl ControlHub {
                     outcome
                         .close_dialog_responses
                         .extend(std::mem::take(&mut session.close_dialog_responses));
+                    outcome
+                        .startup_sequences
+                        .extend(std::mem::take(&mut session.startup_sequences));
                     outcome
                         .input_source_switches
                         .extend(std::mem::take(&mut session.input_source_switches));
@@ -3544,6 +3583,14 @@ mod switcher_thumbnail_tests {
             .collect()
     }
 
+    /// The peer leaves. Shut the socket down rather than only dropping it:
+    /// a concurrently forked test child holds a duplicate of every open
+    /// descriptor until it execs, so a bare drop may not reach the hub as
+    /// EOF within `applied`'s rounds.
+    fn depart(client: ControlConn) {
+        client.stream.shutdown(std::net::Shutdown::Both).unwrap();
+    }
+
     #[test]
     fn a_departed_shell_takes_its_switcher_thumbnails_with_it() {
         let (_dir, mut hub, mut model) = setup();
@@ -3555,11 +3602,11 @@ mod switcher_thumbnail_tests {
         assert_eq!(drawn[0].len(), 2);
         assert_eq!(drain(&mut shell), [(1, CommandStatus::Applied)]);
         // Another peer leaving changes nothing.
-        drop(other);
+        depart(other);
         assert!(applied(&mut hub, &mut model).is_empty());
         assert_eq!(hub.sessions.len(), 1);
         // The shell dies mid-fade: the hub clears the drawn images once.
-        drop(shell);
+        depart(shell);
         assert_eq!(applied(&mut hub, &mut model), [Vec::new()]);
         assert!(hub.sessions.is_empty());
         assert!(applied(&mut hub, &mut model).is_empty());
@@ -3570,7 +3617,7 @@ mod switcher_thumbnail_tests {
         assert_eq!(applied(&mut hub, &mut model).len(), 1);
         send_thumbnails(&mut shell, 3, &[]);
         assert_eq!(applied(&mut hub, &mut model), [Vec::new()]);
-        drop(shell);
+        depart(shell);
         assert!(applied(&mut hub, &mut model).is_empty());
 
         // A replaced shell: the gate narrows to the new process and

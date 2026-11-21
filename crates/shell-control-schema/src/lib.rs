@@ -15,6 +15,7 @@
 //! `docs/api-stability.md` in the repository.
 
 pub mod background;
+pub mod framing;
 pub mod gl;
 pub mod introspect;
 pub mod motion;
@@ -22,11 +23,13 @@ pub use motion::{MotionLevel, MotionPolicy};
 
 use serde::{Deserialize, Serialize};
 
+use framing::FrameError;
 /// Maximum accepted frame body size in bytes (1 MiB, per ADR 0002).
 ///
-/// Enforced in [`decode_frame`] before postcard decoding, so a hostile or
-/// buggy peer cannot force a large allocation.
-pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+/// Defined by the message-agnostic [`framing`] codec and enforced in
+/// [`decode_frame`] before postcard decoding, so a hostile or buggy peer
+/// cannot force a large allocation.
+pub use framing::MAX_FRAME_BYTES;
 
 /// Maximum window title length in bytes.
 ///
@@ -237,9 +240,13 @@ impl ProtocolVersion {
     /// pidfd-pinned socket, and the compositor recognises the shell on
     /// D-Bus by that unique name only (ADR 0010). Positional postcard peers
     /// must ship together.
+    /// `0.53` appends mutter's `auto-maximize` and `overlay-key` to
+    /// InputSettings and the shell-to-compositor `BeginStartupSequence`
+    /// (an app launch's startup sequence: the busy cursor until its window
+    /// maps). Positional postcard peers must ship together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 52,
+        minor: 53,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -537,6 +544,16 @@ pub enum CommandKind {
     /// session that is not the supervised shell is denied. A later
     /// declaration replaces the earlier one.
     DeclareBusName { unique_name: String },
+    /// Since 0.53: the shell launched an app (mutter's `MetaLaunchContext`
+    /// startup sequence, `meta-launch-context.c:129-189`). The compositor
+    /// shows the busy cursor until a window of `app_id` (the desktop id
+    /// without `.desktop`) or of `wm_class` (its `StartupWMClass`) maps, or
+    /// the sequence times out (`STARTUP_TIMEOUT_MS`, 15 s). Both strings are
+    /// at most [`MAX_TITLE_LEN`] bytes; longer ones are denied.
+    BeginStartupSequence {
+        app_id: String,
+        wm_class: Option<String>,
+    },
 }
 
 /// mutter 51 `MetaCloseDialogResponse`: what the user chose in the dialog
@@ -1411,6 +1428,15 @@ pub struct InputSettings {
     /// placement, else mutter's first-fit from the work area's corner.
     #[serde(default = "default_center_new_windows")]
     pub center_new_windows: bool,
+    /// `org.gnome.mutter auto-maximize` (0.53): a window first mapping
+    /// larger than 80% of the work area opens maximized.
+    #[serde(default = "default_auto_maximize")]
+    pub auto_maximize: bool,
+    /// `org.gnome.mutter overlay-key` (0.53): the lone key that toggles the
+    /// overview, as mutter parses it (`Super` means `Super_L` and
+    /// `Super_R`; empty disables it).
+    #[serde(default = "default_overlay_key")]
+    pub overlay_key: String,
 }
 
 /// GNOME's `GDesktopPointerAccelProfile`, shared by the mouse, touchpad,
@@ -1704,6 +1730,16 @@ fn default_center_new_windows() -> bool {
     true
 }
 
+/// Mutter 51's `auto-maximize` default.
+fn default_auto_maximize() -> bool {
+    true
+}
+
+/// Mutter 51's `overlay-key` default.
+fn default_overlay_key() -> String {
+    "Super".into()
+}
+
 impl Default for InputSettings {
     /// GNOME 51's defaults.
     fn default() -> Self {
@@ -1744,6 +1780,8 @@ impl Default for InputSettings {
             trackball: TrackballSettings::default(),
             pointing_stick: PointingStickSettings::default(),
             center_new_windows: true,
+            auto_maximize: true,
+            overlay_key: default_overlay_key(),
         }
     }
 }
@@ -1974,6 +2012,16 @@ impl From<postcard::Error> for DecodeError {
     }
 }
 
+impl From<FrameError> for DecodeError {
+    fn from(e: FrameError) -> Self {
+        match e {
+            FrameError::Truncated { expected, actual } => Self::Truncated { expected, actual },
+            FrameError::Oversize { len, max } => Self::Oversize { len, max },
+            FrameError::Malformed(e) => Self::Malformed(e),
+        }
+    }
+}
+
 /// Encode one message as a length-prefixed frame: u32-LE body length
 /// followed by the postcard body.
 ///
@@ -1981,30 +2029,7 @@ impl From<postcard::Error> for DecodeError {
 /// [`MAX_FRAME_BYTES`]; both indicate a local programming error, since the
 /// cap bounds every message this crate can legally emit.
 pub fn encode_frame(msg: &Message) -> Vec<u8> {
-    // Grow-on-demand so small control messages avoid the 1 MiB buffer.
-    // postcard::to_slice reports SerializeBufferFull when the buffer is
-    // too small; that is the only recoverable encode error here.
-    let mut cap = 1024usize;
-    loop {
-        let mut buf = vec![0u8; cap];
-        match postcard::to_slice(msg, &mut buf) {
-            Ok(used) => {
-                let body_len = used.len();
-                let mut frame = Vec::with_capacity(4 + body_len);
-                frame.extend_from_slice(&(body_len as u32).to_le_bytes());
-                frame.extend_from_slice(used);
-                return frame;
-            }
-            Err(postcard::Error::SerializeBufferFull) => {
-                cap *= 4;
-                assert!(
-                    cap <= MAX_FRAME_BYTES,
-                    "encoded message exceeds {MAX_FRAME_BYTES}-byte frame cap"
-                );
-            }
-            Err(e) => panic!("shell control encode failed: {e}"),
-        }
-    }
+    framing::encode(msg)
 }
 
 /// Owned credential frame. Drop wipes this encoder's sole allocation; this is
@@ -2125,39 +2150,7 @@ pub fn encode_answer_frame(
 /// well-formed with no trailing bytes, titles within [`MAX_TITLE_LEN`],
 /// and `Hello` major matching [`CURRENT_VERSION`].major.
 pub fn decode_frame(bytes: &[u8]) -> Result<Message, DecodeError> {
-    if bytes.len() < 4 {
-        return Err(DecodeError::Truncated {
-            expected: 4,
-            actual: bytes.len(),
-        });
-    }
-    let mut prefix = [0u8; 4];
-    prefix.copy_from_slice(&bytes[..4]);
-    let len = u32::from_le_bytes(prefix) as usize;
-    if len > MAX_FRAME_BYTES {
-        return Err(DecodeError::Oversize {
-            len,
-            max: MAX_FRAME_BYTES,
-        });
-    }
-    let body = &bytes[4..];
-    if body.len() < len {
-        return Err(DecodeError::Truncated {
-            expected: len,
-            actual: body.len(),
-        });
-    }
-    if body.len() > len {
-        return Err(DecodeError::Malformed(
-            postcard::Error::DeserializeBadEncoding,
-        ));
-    }
-    let (msg, trailing): (Message, &[u8]) = postcard::take_from_bytes(&body[..len])?;
-    if !trailing.is_empty() {
-        return Err(DecodeError::Malformed(
-            postcard::Error::DeserializeBadEncoding,
-        ));
-    }
+    let msg: Message = framing::decode(bytes)?;
     validate_titles(&msg)?;
     if let Message::Hello { version } = &msg {
         if version.major != CURRENT_VERSION.major {
@@ -2654,6 +2647,34 @@ mod tests {
         }
         assert!(InputSettings::default().center_new_windows);
     }
+
+    /// mutter 51 `prefs.c:380,423`: `auto-maximize` defaults on and
+    /// `overlay-key` to `Super`; both survive the positional wire, and the
+    /// startup-sequence command round-trips.
+    #[test]
+    fn auto_maximize_overlay_key_and_startup_sequence_survive_the_wire() {
+        let defaults = InputSettings::default();
+        assert!(defaults.auto_maximize);
+        assert_eq!(defaults.overlay_key, "Super");
+        for (auto_maximize, overlay_key) in [(false, "Super_R"), (true, "")] {
+            let settings = InputSettings {
+                auto_maximize,
+                overlay_key: overlay_key.into(),
+                ..Default::default()
+            };
+            let mut buffer = [0u8; 512];
+            let body = postcard::to_slice(&settings, &mut buffer).unwrap();
+            let decoded: InputSettings = postcard::from_bytes(body).unwrap();
+            assert_eq!(decoded, settings);
+        }
+        let kind = CommandKind::BeginStartupSequence {
+            app_id: "org.gnome.TextEditor".into(),
+            wm_class: Some("gnome-text-editor".into()),
+        };
+        let mut buffer = [0u8; 256];
+        let body = postcard::to_slice(&kind, &mut buffer).unwrap();
+        assert_eq!(postcard::from_bytes::<CommandKind>(body).unwrap(), kind);
+    }
     #[test]
     fn secrets_never_reach_debug_output() {
         let kind = CommandKind::Unlock {
@@ -2665,11 +2686,11 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_52() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 52));
-        // A 0.51 shell still negotiates; a newer minor does not.
-        assert!(ProtocolVersion::new(0, 51).is_compatible_with(&CURRENT_VERSION));
-        assert!(!ProtocolVersion::new(0, 53).is_compatible_with(&CURRENT_VERSION));
+    fn current_version_is_0_53() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 53));
+        // A 0.52 shell still negotiates; a newer minor does not.
+        assert!(ProtocolVersion::new(0, 52).is_compatible_with(&CURRENT_VERSION));
+        assert!(!ProtocolVersion::new(0, 54).is_compatible_with(&CURRENT_VERSION));
     }
 
     #[test]
@@ -4271,5 +4292,30 @@ mod close_dialog_wire_tests {
         );
         let command = Message::Command { id: 12, kind };
         assert_eq!(decode_frame(&encode_frame(&command)).unwrap(), command);
+    }
+
+    #[test]
+    fn begin_startup_sequence_follows_declare_bus_name() {
+        let tag = |bytes: &[u8]| bytes[0];
+        let mut buffer = [0_u8; 64];
+        let declare = tag(postcard::to_slice(
+            &CommandKind::DeclareBusName {
+                unique_name: ":1.42".into(),
+            },
+            &mut buffer,
+        )
+        .unwrap());
+        for wm_class in [None, Some("gnome-text-editor".to_owned())] {
+            let kind = CommandKind::BeginStartupSequence {
+                app_id: "org.gnome.TextEditor".into(),
+                wm_class,
+            };
+            assert_eq!(
+                tag(postcard::to_slice(&kind, &mut buffer).unwrap()),
+                declare + 1
+            );
+            let command = Message::Command { id: 13, kind };
+            assert_eq!(decode_frame(&encode_frame(&command)).unwrap(), command);
+        }
     }
 }
