@@ -184,12 +184,22 @@ it can affect:
 
 - `select-lanes` and `check` always run; a **draft** pull request runs nothing
   else (marking it ready for review starts the proof lanes).
-- Every proof lane waits for `check` (`needs: check`, directly or through
-  `arch-package`), so a red `check` does not also burn the lanes.
+- The GitHub-hosted lanes (`arch-package`, `drm-smoke`,
+  `gdm51-native-package`, and through them `marlin-vm`, `marlin-image` and
+  the `arch-package` consumers) wait for `check`, so a red `check` does not
+  also burn hosted minutes. `check` takes about 10 minutes (run
+  42332450103: `cargo test` 194 s, `maintained-media-tests` 69 s, apt 52 s).
+  The self-hosted `journey`, `app-content`, `scroll-proof` and `orca-speech`
+  run beside it; `ci-gate` still fails when `check` does.
+  `fprint-phase-proof`, `grid-cancel-comparison` and `gtk-shell` also wait
+  for `check`: they check out its `tested_sha` output.
 - `scripts/ci-select-lanes` picks the lanes: docs, other non-runtime files and
   the tooling of other workflows (its `NO_LANE` list) pick none, a lane's own
-  proof script picks that lane, an edit confined to some lane jobs of `ci.yml`
-  picks those lanes, and any other code picks `gtk-shell` plus a rotating
+  proof script picks that lane, an edit confined to some jobs of `ci.yml`
+  picks those jobs' lanes plus every job that downloads their artifacts
+  (derived from `needs:` and `download-artifact` in `ci.yml`: an
+  `arch-package` edit also picks its package consumers, a `check` edit picks
+  `parity-ledger`), and any other code picks `gtk-shell` plus a rotating
   slice. Shared CI inputs still pick every lane.
 - A newer push supersedes the older run (`concurrency` with
   `cancel-in-progress`, except for `main`).
@@ -330,7 +340,8 @@ pods never mount it and cannot reach the API to read it.
 `/home/runner/work` (including Cargo targets and rust-cache restore),
 `/var/lib/containers`, and `/home/runner/.local/share/containers` are three
 fresh generic ephemeral volumes per runner, requesting 40 / 10 / 10 GiB.
-`/dev/shm` remains a 2 GiB memory emptyDir. All 14 runners request 840 GiB
+`/dev/shm` remains a 2 GiB memory emptyDir. At `maxRunners` (6 + 2) the
+8 runners request 480 GiB
 on the 900 GiB ext4 LV `vg1/tuna_ci_scratch`, mounted at
 `/var/lib/tuna-ci-scratch` on nvme1n1; nvme0n1 still holds the unchanged
 kubelet/containerd roots and unrelated workloads.
@@ -583,8 +594,9 @@ page), then run `.github/runners/deploy`: it upgrades the controller first.
 ## Scale
 
 `minRunners` (idle, pre-registered pods) and `maxRunners` live in the values
-files: 24.04 is 1–10, 26.04 is 0–4. Keep `maxRunners` of both sets within the
-quota's 14 pods; the scheduler can still withhold slots for VM reservations.
+files: 24.04 is 1–6, 26.04 is 0–2. Keep `maxRunners` of both sets within the
+quota's 14 pods and the limit quota's 276 GiB (each runner at its 24 GiB
+limit); the scheduler can still withhold slots for VM reservations.
 Change the quota in `cluster.yaml` only after checking punjab and KubeVirt
 (`kubectl describe node karnataka`). Apply guard rails with
 `kubectl --context karnataka-k3s apply -f .github/runners/cluster.yaml`, then

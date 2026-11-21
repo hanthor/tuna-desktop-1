@@ -3898,7 +3898,8 @@ impl WindowManager {
     /// motion, as Mutter's meta_wayland_pointer_update does on the
     /// repick, so a first click on a freshly mapped window lands there
     /// (#425). An interactive move/resize, pointer constraint or a seat
-    /// grab (an implicit button press, drag-and-drop) keeps its focus.
+    /// grab (an implicit button press) keeps its focus; a drag-and-drop's
+    /// target follows the scene, as it follows the pointer.
     fn repick_pointer_surface(&mut self, state: &mut State) {
         // Picking builds the popup/layer presentation. Do not rebuild an
         // unchanged scene on every idle tick, especially in click-focus
@@ -3916,7 +3917,10 @@ impl WindowManager {
         let Some(pointer) = self.pointer.clone() else {
             return;
         };
-        if pointer.is_grabbed() {
+        // A client's drag-and-drop is a grab too, but its target is where
+        // the pointer is: when the overview closes under it, the window
+        // now beneath is what the drop lands on (#1189).
+        if pointer.is_grabbed() && !state.client_dnd_active() {
             return;
         }
         self.pointer_scene_dirty.set(false);
@@ -7271,6 +7275,7 @@ pub struct TriggerState {
     hot_corner_off: bool,
     right_to_left: bool,
     pressure_only: bool,
+    client_drag: bool,
 }
 
 impl TriggerState {
@@ -7282,6 +7287,15 @@ impl TriggerState {
     /// Native seats use physical relative barrier pressure, not hover.
     pub fn set_pressure_only(&mut self, enabled: bool) {
         self.pressure_only = enabled;
+    }
+
+    /// Whether a client's drag-and-drop is under way. The drag holds the
+    /// pointer, which presses against no barrier, so GNOME's hot corner
+    /// answers the hover itself (layout.js `HotCorner.handleDragOver`):
+    /// it opens on hover even where physical pressure is required
+    /// otherwise.
+    pub fn set_client_drag(&mut self, active: bool) {
+        self.client_drag = active;
     }
 
     /// Follow GNOME's `enable-hot-corners`.
@@ -7325,21 +7339,10 @@ impl TriggerState {
         let outputs = outputs
             .filter(|(rect, _)| rect.size.w > 0 && rect.size.h > 0)
             .enumerate();
-        let in_region =
-            |pos: Point<f64, Logical>, rect: Rectangle<i32, Logical>, w: f64, h: f64| {
-                let x = if self.right_to_left {
-                    f64::from(rect.loc.x) + f64::from(rect.size.w) - pos.x
-                } else {
-                    pos.x - f64::from(rect.loc.x)
-                };
-                let y = pos.y - f64::from(rect.loc.y);
-                let within_x = if self.right_to_left {
-                    x > 0.0 && x <= w.min(f64::from(rect.size.w))
-                } else {
-                    (0.0..w.min(f64::from(rect.size.w))).contains(&x)
-                };
-                within_x && (0.0..h.min(f64::from(rect.size.h))).contains(&y)
-            };
+        let in_region = |pos: Point<f64, Logical>,
+                         rect: Rectangle<i32, Logical>,
+                         w: f64,
+                         h: f64| { self.in_region(pos, rect, w, h) };
         let corner = if let ManagerInput::Motion { pos, .. } = input {
             outputs.clone().any(|(index, (rect, primary))| {
                 if !in_region(*pos, rect, HOT_CORNER_PX, HOT_CORNER_PX) {
@@ -7370,6 +7373,45 @@ impl TriggerState {
         self.feed_regions(input, overview_open, corner, strip)
     }
 
+    /// Whether `pointer` is on the primary output's Activities control
+    /// (the strip's left end, mirrored in right-to-left): where a client
+    /// drag held for a moment opens the overview (panel.js
+    /// `ActivitiesButton.handleDragOver`).
+    pub fn activities_at(
+        &self,
+        pointer: Point<f64, Logical>,
+        outputs: impl Iterator<Item = (Rectangle<i32, Logical>, bool)>,
+    ) -> bool {
+        outputs
+            .filter(|(rect, _)| rect.size.w > 0 && rect.size.h > 0)
+            .any(|(rect, primary)| {
+                primary && self.in_region(pointer, rect, ACTIVITIES_WIDTH_PX, ACTIVITIES_STRIP_PX)
+            })
+    }
+
+    /// `pos` within the `w` x `h` region at `rect`'s top-left corner
+    /// (top-right in right-to-left).
+    fn in_region(
+        &self,
+        pos: Point<f64, Logical>,
+        rect: Rectangle<i32, Logical>,
+        w: f64,
+        h: f64,
+    ) -> bool {
+        let x = if self.right_to_left {
+            f64::from(rect.loc.x) + f64::from(rect.size.w) - pos.x
+        } else {
+            pos.x - f64::from(rect.loc.x)
+        };
+        let y = pos.y - f64::from(rect.loc.y);
+        let within_x = if self.right_to_left {
+            x > 0.0 && x <= w.min(f64::from(rect.size.w))
+        } else {
+            (0.0..w.min(f64::from(rect.size.w))).contains(&x)
+        };
+        within_x && (0.0..h.min(f64::from(rect.size.h))).contains(&y)
+    }
+
     fn feed_regions(
         &mut self,
         input: &ManagerInput,
@@ -7393,7 +7435,8 @@ impl TriggerState {
             }
             ManagerInput::Motion { .. } => {
                 self.super_armed = false;
-                if !self.pressure_only && !self.hot_corner_off && !overview_open && corner {
+                let hover_opens = !self.pressure_only || self.client_drag;
+                if hover_opens && !self.hot_corner_off && !overview_open && corner {
                     TriggerAction::Open
                 } else {
                     TriggerAction::None
@@ -7417,10 +7460,14 @@ impl TriggerState {
             }
             ManagerInput::CornerPressure { .. } => {
                 self.super_armed = false;
-                if !self.hot_corner_off {
-                    TriggerAction::Toggle
-                } else {
+                // A client drag's hover already opened the overview as the
+                // pointer reached the corner; the pressure that follows it
+                // must not toggle it shut (GNOME's `shouldToggleByCornerOrButton`
+                // holds the same corner's second activation off).
+                if self.hot_corner_off || (self.client_drag && overview_open) {
                     TriggerAction::None
+                } else {
+                    TriggerAction::Toggle
                 }
             }
             ManagerInput::RelativeMotion { .. }
@@ -9013,6 +9060,49 @@ mod tests {
         );
         assert_eq!(
             triggers.feed(&motion(400.0, 300.0), false, (0.0, 300.0).into()),
+            TriggerAction::None
+        );
+    }
+
+    #[test]
+    fn a_client_drag_opens_a_pressure_only_corner_by_hover_and_pressure_never_closes_it() {
+        let mut triggers = TriggerState::default();
+        triggers.set_pressure_only(true);
+        let pressure = ManagerInput::CornerPressure {
+            pos: (0.0, 3.0).into(),
+            time: 0,
+        };
+        let pointer = (0.0, 3.0).into();
+        // Without a drag a native seat's corner is pressure's alone.
+        assert_eq!(
+            triggers.feed(&motion(2.0, 3.0), false, pointer),
+            TriggerAction::None
+        );
+        assert_eq!(
+            triggers.feed(&pressure, true, pointer),
+            TriggerAction::Toggle
+        );
+        triggers.set_client_drag(true);
+        assert_eq!(
+            triggers.feed(&motion(2.0, 3.0), false, pointer),
+            TriggerAction::Open
+        );
+        // The pressure after the hover does not undo it.
+        assert_eq!(triggers.feed(&pressure, true, pointer), TriggerAction::None);
+        assert_eq!(
+            triggers.feed(&pressure, false, pointer),
+            TriggerAction::Toggle
+        );
+        // GNOME's setting still decides whether there is a corner.
+        triggers.set_hot_corner(false);
+        assert_eq!(
+            triggers.feed(&motion(2.0, 3.0), false, pointer),
+            TriggerAction::None
+        );
+        triggers.set_hot_corner(true);
+        triggers.set_client_drag(false);
+        assert_eq!(
+            triggers.feed(&motion(2.0, 3.0), false, pointer),
             TriggerAction::None
         );
     }
