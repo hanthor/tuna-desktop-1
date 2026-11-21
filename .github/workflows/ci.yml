@@ -952,6 +952,8 @@ jobs:
           if exit_status != 0 or not unchanged or '1 passed; 0 failed; 0 ignored' not in text or 'COUNTDOWN-OSD pass ' not in text:
               raise RuntimeError('actual admitted countdown OSD test did not pass')
           PY
+      # Each proof's marker line is its assertions.txt ("<ID> pass <desc>"):
+      # the parity ledger reads lock-idle-frames' (#1122).
       - name: Prove real GTK OSD fade-out, panel menu close/switch (#501), lock curtain (#502) and a settled lock screen's idle frame clock (#1122)
         run: |
           /usr/bin/python3 - <<'PY'
@@ -992,6 +994,7 @@ jobs:
               (artifacts / 'receipt.json').write_text(json.dumps({'build_admission': admission, 'argv': argv, 'exit_status': exit_status, 'executable_unchanged_after': unchanged, 'output_sha256': hashlib.sha256((artifacts / 'output.txt').read_bytes()).hexdigest(), 'scope': scope}, indent=2) + '\n')
               if exit_status != 0 or not unchanged or '1 passed; 0 failed; 0 ignored' not in text or marker not in text:
                   raise RuntimeError(f'actual admitted {name} test did not pass')
+              (artifacts / 'assertions.txt').write_text(text[text.index(marker):].splitlines()[0] + '\n')
           PY
       - name: Prove real MediaKeys callback completion and forced clamp interleave
         run: |
@@ -1019,6 +1022,15 @@ jobs:
         env:
           TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
         run: scripts/tuna-gtk-shell-proof --window-leak-only --artifacts gtk-shell-artifacts/window-leak
+      # A client's drag through the overview (#1189): real GTK drags open it
+      # from the hot corner and the Activities button, activate a window
+      # preview after 750 ms, and return to the starting workspace.
+      - name: Client drags through the overview
+        if: ${{ !cancelled() }}
+        timeout-minutes: 8
+        env:
+          TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
+        run: scripts/tuna-gtk-shell-proof --dnd-overview-only --artifacts gtk-shell-artifacts/dnd-overview
       # Initial DnD target focus must not wait for another physical motion.
       # Run the unchanged shared hover/reorder assertions independently of
       # unrelated full-suite assertions, using this job's just-built binaries.
@@ -1036,6 +1048,17 @@ jobs:
         env:
           TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
         run: scripts/tuna-gtk-shell-proof --search-leak-only --artifacts gtk-shell-artifacts/search-leak
+      # A window's subsurfaces stack where its client placed them, above
+      # and below it, on the desktop, in the overview and in the window's
+      # screenshot (G-SUBSURFACE-STACKING).
+      - name: Subsurfaces stack above and below their window
+        if: ${{ !cancelled() }}
+        timeout-minutes: 8
+        env:
+          TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
+        run: |
+          cargo build --locked -p tuna-compositor --example tuna-subsurface-client
+          scripts/tuna-gtk-shell-proof --subsurface-only --artifacts gtk-shell-artifacts/subsurface
       # Native/X11 geometry and physical input at all required virtual scales.
       - run: |
           for scale in 1 1.25 1.5 2; do
@@ -1065,11 +1088,29 @@ jobs:
       - if: ${{ !cancelled() }}
         run: shellcheck -x scripts/tuna-osk-proof && scripts/tuna-osk-proof --artifacts gtk-shell-artifacts/osk
       # Keep runnable binaries even when a later live proof assertion fails.
+      # #1124: tuna-wallpaper-svg is built only by scripts/tuna-gtk-shell-proof
+      # and the layer-shell library is installed by the ci-tool step. After an
+      # earlier failure this copies what exists, so that earlier step stays the
+      # job's reported failure; with no earlier failure a missing file fails here.
       - if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p gtk-shell-artifacts/bin
-          cp target/debug/tuna-compositor target/debug/tuna-shell-gtk target/debug/tuna-wallpaper-svg gtk-shell-artifacts/bin/
-          cp /usr/local/lib/*/libgtk4-layer-shell.so* gtk-shell-artifacts/bin/ 2>/dev/null || cp /usr/local/lib/libgtk4-layer-shell.so* gtk-shell-artifacts/bin/
+          shopt -s nullglob
+          layer_shell=(/usr/local/lib/*/libgtk4-layer-shell.so*)
+          [ ${#layer_shell[@]} -gt 0 ] || layer_shell=(/usr/local/lib/libgtk4-layer-shell.so*)
+          [ ${#layer_shell[@]} -gt 0 ] || layer_shell=(/usr/local/lib/libgtk4-layer-shell.so)
+          missing=0
+          for file in target/debug/tuna-compositor target/debug/tuna-shell-gtk target/debug/tuna-wallpaper-svg "${layer_shell[@]}"; do
+            if [ -e "$file" ]; then
+              cp "$file" gtk-shell-artifacts/bin/
+            else
+              echo "::warning::not collected, never built or installed: $file"
+              missing=1
+            fi
+          done
+          if [ "$missing" = 1 ] && [ "$JOB_STATUS" = success ]; then exit 1; fi
       # G-WS-INSERT publishes the targeted insertion frame/state. Full
       # parity captures need native fonts, wallpapers and installed apps;
       # use the binaries uploaded as gtk-shell-binaries with that reference
@@ -2125,7 +2166,9 @@ jobs:
           --assertions ledger-in/gtk-shell/magnifier/assertions.txt
           --assertions ledger-in/gtk-shell/session-restore/assertions.txt
           --assertions ledger-in/gtk-shell/osk/assertions.txt
+          --assertions ledger-in/gtk-shell/subsurface/assertions.txt
           --assertions ledger-in/gtk-shell/lock-auth/assertions.txt
+          --assertions ledger-in/gtk-shell/lock-idle-frames/assertions.txt
           --assertions ledger-in/orca-speech/assertions.txt
           --assertions ledger-in/drm-smoke/assertions.txt
           --assertions ledger-in/marlin-vm/assertions.txt
@@ -2169,8 +2212,11 @@ jobs:
   ci-gate:
     timeout-minutes: 10
     # One stable status for the run: lanes the selection skipped report
-    # skipped, any failed or cancelled job fails the gate.
-    if: always()
+    # skipped, any failed or cancelled job fails the gate. A superseded run
+    # (cancel-in-progress) needs no gate: with always() its gate still queued
+    # for a self-hosted runner, and the replacing run stayed pending until it
+    # got one, often for hours.
+    if: ${{ !cancelled() }}
     needs: [select-lanes, check, journey, app-content, scroll-proof, drm-smoke, grid-cancel-comparison, gtk-shell, orca-speech, portal-security, remote-security, niri-parity, arch-package, marlin-image, gdm51-native-package, marlin-vm, native-reference-context, parity-ledger, docs-shots]
     runs-on: *runner-24
     steps:

@@ -468,7 +468,10 @@ class GuestAgent:
         finally:
             self._poison()
 
-    def run(self, action, *arguments, timeout=30):
+    def run(self, action, *arguments, timeout=30, log_failure=True):
+        # log_failure=False is for polls that retry an expected failure (for
+        # example inventory before the compositor's first state snapshot) and
+        # own the record via the raised message instead.
         if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("finite positive guest-agent operation timeout required")
         path = "/usr/libexec/tuna-vm-lifecycle"
@@ -555,7 +558,7 @@ class GuestAgent:
                         except (binascii.Error, ValueError, UnicodeDecodeError, AttributeError, TypeError):
                             diagnostic = None
                         if valid(diagnostic):
-                            if action in LOGGED_FAILURE_RECORDS:
+                            if action in LOGGED_FAILURE_RECORDS and log_failure:
                                 # Preserve the sanitized reason before a caller's
                                 # cleanup (restore-unlock, Orca reset) can itself fail.
                                 print(f"tuna-vm-lane: {action} failure " + json.dumps(diagnostic), flush=True)
