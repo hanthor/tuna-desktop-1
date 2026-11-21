@@ -793,6 +793,8 @@ pub struct Runtime {
     /// An Escape press cancelled a client drag; its repeats and release
     /// belong to that cancel, not to the overview or a client.
     dnd_escape_held: bool,
+    /// A client's drag through the overview (#1189).
+    dnd_overview: crate::dnd_overview::DndOverview,
     /// PipeWire, connected on the first screen cast (#61).
     pipewire: Option<crate::screencast::PipeWire>,
     /// Running screen casts.
@@ -984,6 +986,12 @@ impl Drop for Runtime {
         // Every exit path drops the runtime, including SIGTERM from logind's
         // session stop or the supervisor.
         self.orca.shutdown();
+        // Likewise the IBus bridge's group and that of an ibus-daemon the
+        // bridge started itself: left running the daemon keeps logind's
+        // session scope, and the session, from ending (#1014).
+        if let Some(ime) = &mut self.ime {
+            ime.shutdown();
+        }
         // Window sessions (P-SY-08): record every window still in one and
         // write the store before the clients lose their windows, as
         // Mutter does when its display closes at logout.
@@ -1604,6 +1612,7 @@ impl Runtime {
             motion_queue: crate::motion_coalesce::MotionCoalescer::new(),
             osk: osk::RuntimeOsk::default(),
             dnd_escape_held: false,
+            dnd_overview: Default::default(),
             orca: crate::orca::Reader::new(&session.socket_name, a11y_keyboard.clone()),
             a11y_keyboard,
             pipewire: None,
@@ -2281,6 +2290,17 @@ impl Runtime {
     /// breaking Super-combos); only Escape-closes is consumed, so a
     /// closing keypress never double-acts on client UI.
     fn dispatch_manager_input(&mut self, input: ManagerInput) {
+        self.client_dnd_sync();
+        let motion = matches!(input, ManagerInput::Motion { .. });
+        self.route_manager_input(input);
+        // The release or the Escape that ended a drag was routed above.
+        self.client_dnd_sync();
+        if motion {
+            self.client_dnd_motion();
+        }
+    }
+
+    fn route_manager_input(&mut self, input: ManagerInput) {
         if let Some(monitor) = &self.a11y_keyboard {
             monitor.set_locked(self.is_locked());
             if self
@@ -2400,7 +2420,8 @@ impl Runtime {
             return;
         }
         // Mutter's drag grab: Escape cancels a client drag-and-drop and
-        // is consumed, so the overview stays open and the release can
+        // is consumed, so the Escape does not also close the overview
+        // (the cancel does, see `client_dnd_sync`) and the release can
         // no longer drop (a Wayland drag owns the pointer, not the keys).
         if let ManagerInput::Key {
             keycode: ESCAPE_KEYCODE,
@@ -3345,6 +3366,110 @@ impl Runtime {
         }
     }
 
+    /// Activate workspace `ws` from the overview (a neighboring card, a
+    /// thumbnail). GNOME's trailing empty workspace is not in the model
+    /// yet: it sits right after the active (last) one, and stepping onto
+    /// it creates it.
+    fn overview_switch_workspace(&mut self, ws: u32) {
+        if !self.manager.switch_to_workspace(&mut self.state, ws) {
+            // From a thumbnail the active one need not be last.
+            if let Some(&last) = self.manager.model().workspaces().last() {
+                self.manager.switch_to_workspace(&mut self.state, last);
+            }
+            self.manager.switch_relative(&mut self.state, 1);
+        }
+    }
+
+    /// Follow whether a client's drag runs, and what it brings about: an
+    /// overview showing when it ends closes onto the workspace it began
+    /// on (#1189, overview.js `_onDragEnd`).
+    fn client_dnd_sync(&mut self) {
+        let active = !self.is_locked() && self.state.client_dnd_overview_active();
+        let actions = self.dnd_overview.sync(
+            active,
+            self.manager.model().active_workspace(),
+            self.control.overview_open(),
+        );
+        self.apply_dnd_actions(actions);
+    }
+
+    /// What a client's drag is over: the Activities control, and while
+    /// the overview shows its workspace thumbnails and window previews
+    /// (shell surfaces over them, and the search results, take the
+    /// hover as they take a press).
+    fn client_dnd_hover(&self) -> crate::dnd_overview::Hover {
+        let pos = self.manager.pointer_pos();
+        let activities = self.state.overview_activities_at(&self.triggers, pos);
+        let covered = self.overview_search
+            || crate::layer::topmost_layer_at(&self.state, pos.x as i32, pos.y as i32).is_some()
+            || self.manager.popup_at(&self.state, pos).is_some();
+        if !self.control.overview_open() || covered {
+            return crate::dnd_overview::Hover {
+                activities,
+                ..Default::default()
+            };
+        }
+        crate::dnd_overview::Hover::in_overview(&self.overview_layout(), pos, activities)
+    }
+
+    /// The drag moved (after `input` reached the window manager).
+    fn client_dnd_motion(&mut self) {
+        if !self.dnd_overview.active() {
+            return;
+        }
+        let hover = self.client_dnd_hover();
+        let actions = self.dnd_overview.motion(
+            hover,
+            self.manager.model().active_workspace(),
+            Instant::now(),
+        );
+        self.apply_dnd_actions(actions);
+    }
+
+    /// One tick of a client's drag through the overview: notice it, run
+    /// its due timers.
+    fn client_dnd_tick(&mut self) {
+        self.client_dnd_sync();
+        if !self.dnd_overview.active() {
+            return;
+        }
+        let actions = self.dnd_overview.poll(
+            self.client_dnd_hover(),
+            self.control.overview_open(),
+            Instant::now(),
+        );
+        self.apply_dnd_actions(actions);
+    }
+
+    fn apply_dnd_actions(&mut self, actions: Vec<crate::dnd_overview::DndAction>) {
+        use crate::dnd_overview::DndAction;
+        for action in actions {
+            match action {
+                DndAction::OpenOverview => {
+                    // The Activities control is not under a fullscreen
+                    // window, as the corner is not.
+                    if !self.manager.fullscreen_at(self.manager.pointer_pos()) {
+                        self.control.set_overview(true);
+                    }
+                }
+                DndAction::SwitchWorkspace(ws) => self.overview_switch_workspace(ws),
+                DndAction::ActivateWindow(id) => {
+                    // Main.activateWindow: the window's own workspace,
+                    // the window raised and focused, the overview away.
+                    let workspace = self.manager.model().window(id).map(|w| w.workspace);
+                    if let Some(workspace) = workspace {
+                        if workspace != self.manager.model().active_workspace() {
+                            self.manager.switch_to_workspace(&mut self.state, workspace);
+                        }
+                        self.manager.focus(&mut self.state, Some(id));
+                    }
+                    self.control.set_overview(false);
+                }
+                DndAction::CloseOverview => self.control.set_overview(false),
+            }
+        }
+    }
+
     /// A press while the overview is open that no shell surface took:
     /// focus the preview's window, switch to a neighbor card's
     /// workspace, or close the overview (GNOME shape). Returns whether
@@ -3367,18 +3492,7 @@ impl Runtime {
                 // release decides.
                 self.overview_drag = Some((id, pos, false));
             }
-            crate::overview::OverviewHit::Workspace(ws) => {
-                // GNOME's trailing empty workspace is not in the model
-                // yet: it sits right after the active (last) one, and
-                // stepping onto it creates it.
-                if !self.manager.switch_to_workspace(&mut self.state, ws) {
-                    // From a thumbnail the active one need not be last.
-                    if let Some(&last) = self.manager.model().workspaces().last() {
-                        self.manager.switch_to_workspace(&mut self.state, last);
-                    }
-                    self.manager.switch_relative(&mut self.state, 1);
-                }
-            }
+            crate::overview::OverviewHit::Workspace(ws) => self.overview_switch_workspace(ws),
             crate::overview::OverviewHit::Dismiss => self.control.set_overview(false),
         }
         true
@@ -3916,13 +4030,12 @@ impl Runtime {
             |renderer: &mut GlesRenderer,
              surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
              at: Point<i32, Logical>| {
-                elements.extend(render_elements_from_surface_tree(
+                elements.extend(surface_tree_bottom_to_top(
                     renderer,
                     surface,
                     view.physical(f64::from(at.x), f64::from(at.y)),
                     view.scale,
                     1.0,
-                    Kind::Unspecified,
                 ));
             };
         tree(renderer, &surface, origin);
@@ -5186,6 +5299,9 @@ impl Runtime {
             // Tablet and stylus settings: the bounded re-read.
             self.tablet_settings.next_deadline(now),
             self.manager.focus_deadline(),
+            // A client's drag resting on the Activities button or a
+            // window preview (#1189).
+            self.dnd_overview.deadline(),
             // Mutter's alive checks: a ping timing out, Wait, re-pings.
             self.manager.alive_deadline(),
             // Window sessions are written 3 s after a change (Mutter).
@@ -5351,6 +5467,7 @@ impl Runtime {
         self.manager.reconcile(&mut self.state);
         self.state.window_sessions_mut().save_if_due(Instant::now());
         self.focus_policy_tick();
+        self.client_dnd_tick();
         self.alive_checks_tick();
         self.tablet_settings_tick();
         self.poll_input_aids();
@@ -7422,14 +7539,9 @@ fn previews_to_elements(
             f64::from(preview.rect.loc.x) - f64::from(geo.x) * preview.scale,
             f64::from(preview.rect.loc.y) - f64::from(geo.y) * preview.scale,
         );
-        for element in render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
-            renderer,
-            &surface,
-            origin,
-            view.scale,
-            preview.alpha,
-            Kind::Unspecified,
-        ) {
+        for element in
+            surface_tree_bottom_to_top(renderer, &surface, origin, view.scale, preview.alpha)
+        {
             out.push(
                 smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
                     element,
@@ -7443,12 +7555,20 @@ fn previews_to_elements(
 }
 
 /// A drag's icon at the pointer, centred on it (front to back).
-fn dnd_icon_elements(
-    renderer: &mut GlesRenderer,
+fn dnd_icon_elements<R>(
+    renderer: &mut R,
     state: &State,
     view: View,
     pointer: Point<f64, Logical>,
-) -> Vec<PreviewElement> {
+) -> Vec<
+    smithay::backend::renderer::element::utils::RescaleRenderElement<
+        WaylandSurfaceRenderElement<R>,
+    >,
+>
+where
+    R: smithay::backend::renderer::Renderer + smithay::backend::renderer::ImportAll,
+    R::TextureId: Clone + 'static,
+{
     let Some(icon) = state.dnd_icon() else {
         return Vec::new();
     };
@@ -7463,24 +7583,49 @@ fn dnd_icon_elements(
         pointer.x - f64::from(size.w) / 2.0,
         pointer.y - f64::from(size.h) / 2.0,
     );
-    let elements = render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
+    // Smithay returns a surface tree front to back already.
+    render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
         renderer,
         &icon,
         origin,
         view.scale,
         1.0,
         Kind::Unspecified,
-    );
-    crate::layer::front_to_back(
-        elements
-            .into_iter()
-            .map(|e| {
-                smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
-                    e, origin, 1.0,
-                )
-            })
-            .collect(),
     )
+    .into_iter()
+    .map(|e| {
+        smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
+            e, origin, 1.0,
+        )
+    })
+    .collect()
+}
+
+/// A surface tree's elements bottom to top, for the scenes here that
+/// accumulate bottom to top before [`crate::layer::front_to_back`]:
+/// Smithay returns a tree front to back, subsurfaces above their parent
+/// first, so appended as is a parent would cover its subsurfaces.
+fn surface_tree_bottom_to_top<R>(
+    renderer: &mut R,
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    location: Point<i32, smithay::utils::Physical>,
+    scale: f64,
+    alpha: f32,
+) -> Vec<WaylandSurfaceRenderElement<R>>
+where
+    R: smithay::backend::renderer::Renderer + smithay::backend::renderer::ImportAll,
+    R::TextureId: Clone + 'static,
+{
+    let mut elements = render_elements_from_surface_tree(
+        renderer,
+        surface,
+        location,
+        scale,
+        alpha,
+        Kind::Unspecified,
+    );
+    elements.reverse();
+    elements
 }
 
 /// GNOME's switcher thumbnails (altTab.js `_createWindowClone`): each
@@ -7856,22 +8001,20 @@ fn scene_elements(
         // layers (and their popovers) go on top.
         let mut elements = Vec::new();
         for (surface, (x, y), _) in crate::layer::layer_layout(state) {
-            elements.extend(render_elements_from_surface_tree(
+            elements.extend(surface_tree_bottom_to_top(
                 renderer,
                 &surface,
                 view.physical(f64::from(x), f64::from(y)),
                 view.scale,
                 1.0,
-                Kind::Unspecified,
             ));
             for popup in crate::popup::placed_popups(&surface, (x, y).into(), false) {
-                elements.extend(render_elements_from_surface_tree(
+                elements.extend(surface_tree_bottom_to_top(
                     renderer,
                     &popup.surface,
                     view.physical(f64::from(popup.origin.x), f64::from(popup.origin.y)),
                     view.scale,
                     1.0,
-                    Kind::Unspecified,
                 ));
             }
         }
@@ -7889,22 +8032,15 @@ fn scene_elements(
                 alpha: f32| {
         let origin = view.physical(f64::from(at.x), f64::from(at.y));
         elements.extend(
-            render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
-                renderer,
-                surface,
-                origin,
-                view.scale,
-                alpha,
-                Kind::Unspecified,
-            )
-            .into_iter()
-            .map(|element| {
-                smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
-                    element,
-                    origin,
-                    (sx, 1.0),
-                )
-            }),
+            surface_tree_bottom_to_top(renderer, surface, origin, view.scale, alpha)
+                .into_iter()
+                .map(|element| {
+                    smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
+                        element,
+                        origin,
+                        (sx, 1.0),
+                    )
+                }),
         );
     };
     // Size-change snapshots with the bottom-to-top index they sit at.
@@ -7943,7 +8079,7 @@ fn scene_elements(
                     r.size.h / f64::from(buffer_size.h),
                 );
                 let origin = view.physical(r.loc.x, r.loc.y);
-                elements.extend(render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(renderer, &surface, origin, view.scale, fade, Kind::Unspecified).into_iter().map(|e| smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(e, origin, scale)));
+                elements.extend(surface_tree_bottom_to_top(renderer, &surface, origin, view.scale, fade).into_iter().map(|e| smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(e, origin, scale)));
                 owners.resize(elements.len(), Some(id));
                 continue;
             }
@@ -7966,14 +8102,7 @@ fn scene_elements(
                         frame.live.loc.y - f64::from(geo.y) * sy,
                     );
                     elements.extend(
-                        render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
-                            renderer,
-                            &surface,
-                            origin,
-                            view.scale,
-                            alpha,
-                            Kind::Unspecified,
-                        )
+                        surface_tree_bottom_to_top(renderer, &surface, origin, view.scale, alpha)
                         .into_iter()
                         .map(|element| {
                             smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
@@ -8007,7 +8136,7 @@ fn scene_elements(
                     r.size.h / f64::from(buffer_size.h),
                 );
                 let origin = view.physical(r.loc.x, r.loc.y);
-                elements.extend(render_elements_from_surface_tree::<_,WaylandSurfaceRenderElement<_>>(renderer,&surface,origin,view.scale,fade*manager.render_alpha(&window),Kind::Unspecified).into_iter().map(|e|smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(e,origin,scale)));
+                elements.extend(surface_tree_bottom_to_top(renderer,&surface,origin,view.scale,fade*manager.render_alpha(&window)).into_iter().map(|e|smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(e,origin,scale)));
                 owners.resize(elements.len(), Some(id));
                 continue;
             }
@@ -8019,7 +8148,7 @@ fn scene_elements(
                     r.loc.y - f64::from(geo.y) * frame.scale.1,
                 );
                 let alpha = frame.alpha * manager.render_alpha(&window);
-                elements.extend(render_elements_from_surface_tree::<_,WaylandSurfaceRenderElement<_>>(renderer,&surface,origin,view.scale,alpha,Kind::Unspecified).into_iter().map(|e|smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(e,origin,frame.scale)));
+                elements.extend(surface_tree_bottom_to_top(renderer,&surface,origin,view.scale,alpha).into_iter().map(|e|smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(e,origin,frame.scale)));
                 owners.resize(elements.len(), Some(id));
                 continue;
             }
@@ -9416,3 +9545,7 @@ mod power_save_frame_tests {
         assert_eq!(app.frames_done, 2);
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_surface_order_tests.rs"]
+mod surface_order_tests;
