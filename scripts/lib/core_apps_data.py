@@ -150,7 +150,13 @@ def _files(desktop, fixture):
     desktop.keys("ctrl", "shift", "n")
     evidence["original_app_ime"] = ime(desktop, actor, field(desktop, actor, focused=True))
     edit(desktop, actor, "cancelled-" + desktop.nonce, focused=True)
-    press(desktop, actor, "Cancel")
+    # Nautilus 51's New Folder dialog offers only Create and the dialog's
+    # Close, never a Cancel button (run 44850865831: "actual control Cancel
+    # not unique: 0"; the window's own Close made "Close" ambiguous too).
+    # Escape is the dialog's keyboard cancel, as for the rename below.
+    desktop.keys("esc")
+    desktop.await_state("files-create-dialog-dismissed", lambda: desktop.tree(actor),
+                        lambda tree: not any(n["role"] == "dialog" for n in visible(tree)))
     evidence["create_cancel"] = file_wait(desktop, "files-create-cancel-no-side-effect", {
         "data/cancelled-" + desktop.nonce: None, "data/seed.txt": seed, "data/unselected.txt": untouched})
     desktop.keys("ctrl", "shift", "n")

@@ -2917,6 +2917,13 @@ impl Runtime {
                 "icon": model.window(w.id).and_then(|w| w.icon.clone()),
                 "workspace": w.workspace,
                 "rect": [w.geometry.loc.x, w.geometry.loc.y, w.geometry.size.w, w.geometry.size.h],
+                // Where `rect` (the xdg window geometry) sits inside the
+                // client's surface: client-side shadows push it off 0,0,
+                // and accessible extents are surface-relative.
+                "surface_offset": self.manager.surface_of(w.id).map(|surface| {
+                    let geo = crate::popup::window_geometry_loc(&surface);
+                    [geo.x, geo.y]
+                }),
             })).collect::<Vec<_>>(),
             "previews": previews,
             "thumbnails": thumbnails,

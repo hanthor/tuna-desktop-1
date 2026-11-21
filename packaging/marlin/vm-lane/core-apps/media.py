@@ -262,9 +262,14 @@ def _prepare(c):
                        "v4l2-ctl", "scanimage", "pdfinfo", "pdfimages", "pdftoppm", "gst-inspect-1.0"):
         if shutil.which(executable) is None:
             raise MediaUnavailable("required native media tool unavailable: " + executable)
+    # --exists looks the name up as any registry feature. A bare
+    # `gst-inspect-1.0 <name>` resolves only elements, typefinders, tracers
+    # and plugins (gst-inspect.c: "TODO: handle DEVICE_PROVIDER_FACTORY"),
+    # so it exits 255 for pipewiredeviceprovider even when the PipeWire
+    # plugin provides it (runs 44383940246, 44538201237, 44850865831).
     for plugin in ("oggdemux", "vorbisdec", "vp8dec", "matroskademux", "gtk4paintablesink",
                    "pipewiresrc", "pipewiredeviceprovider"):
-        available = c.user(["gst-inspect-1.0", plugin], timeout=2, check=False)
+        available = c.user(["gst-inspect-1.0", "--exists", plugin], timeout=2, check=False)
         if available.returncode:
             raise MediaUnavailable("required native GStreamer feature absent: " + plugin
                                    + " " + available.stderr)

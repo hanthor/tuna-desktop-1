@@ -256,6 +256,21 @@ class Desktop(NativeDesktop):
             raise RuntimeError('original native surface not uniquely mapped')
         return found[0]
 
+    def _surface_origin(self, actor, state):
+        """Output point of the window's surface origin.
+
+        Accessible extents are surface-relative, while `rect` is the xdg
+        window geometry, which client-side shadows push to `surface_offset`
+        inside the surface: Connections' welcome window reports a 710x601
+        frame for a 658x549 rect, and rect-relative clicks landed 26 px
+        right of and 23 px below No Thanks (run 44850865831).
+        """
+        window = self._window(actor, state)
+        offset = window.get('surface_offset')
+        if offset is None:
+            raise RuntimeError('original native surface offset unavailable')
+        return window['rect'][0] - offset[0], window['rect'][1] - offset[1]
+
 
 
     def start(self, app_id, search_name):
@@ -340,9 +355,9 @@ class Desktop(NativeDesktop):
             origin = self.guest('desktop', 'shell-origin', actor=actor, path=node['path'])
             x, y = origin['x'] + bounds[0] + bounds[2] * fx, origin['y'] + bounds[1] + bounds[3] * fy
         else:
-            window = self._window(actor, tree['state'])
-            x = window['rect'][0] + bounds[0] + bounds[2] * fx
-            y = window['rect'][1] + bounds[1] + bounds[3] * fy
+            left, top = self._surface_origin(actor, tree['state'])
+            x = left + bounds[0] + bounds[2] * fx
+            y = top + bounds[1] + bounds[3] * fy
         x, y = int(x * self.scale), int(y * self.scale)
         if not (0 <= x < self.width and 0 <= y < self.height):
             raise RuntimeError('actual native pointer point outside admitted output')
@@ -371,19 +386,19 @@ class Desktop(NativeDesktop):
         position, bounds = tree['state'].get('pointer_position'), node['bounds']
         if position is None or bounds is None:
             return False
-        rect = self._window(actor, tree['state'])['rect']
-        left, top = rect[0] + bounds[0], rect[1] + bounds[1]
+        origin = self._surface_origin(actor, tree['state'])
+        left, top = origin[0] + bounds[0], origin[1] + bounds[1]
         return left <= position[0] < left + bounds[2] and top <= position[1] < top + bounds[3]
 
     def _field_pixels(self, actor, state, node):
         if node['bounds'] is None:
             raise RuntimeError('original actual editable field has no bounds')
-        window = self._window(actor, state)
+        origin_x, origin_y = self._surface_origin(actor, state)
         x, y, width, height = node['bounds']
-        left = math.floor((window['rect'][0] + x) * self.scale)
-        top = math.floor((window['rect'][1] + y) * self.scale)
-        right = math.ceil((window['rect'][0] + x + width) * self.scale)
-        bottom = math.ceil((window['rect'][1] + y + height) * self.scale)
+        left = math.floor((origin_x + x) * self.scale)
+        top = math.floor((origin_y + y) * self.scale)
+        right = math.ceil((origin_x + x + width) * self.scale)
+        bottom = math.ceil((origin_y + y + height) * self.scale)
         if not (0 <= left < right <= self.width and 0 <= top < bottom <= self.height):
             raise RuntimeError('original actual editable field is clipped outside the output')
         return left, top, right - left, bottom - top

@@ -374,6 +374,11 @@ def _papers(desktop):
     rejected = desktop.open_file(actor, corrupt['path'], cancel_first=False)
     decoder_error = content(desktop, actor, 'papers-real-corrupt-decoder-rejection',
                             'Unable to Open Document', timeout=30)
+    # Papers 51 opens a document chosen from a window that already holds
+    # one, even a rejected one, in a new window (run 44850865831: window 36
+    # beside the error window 32 the actor stayed bound to). Start the
+    # positive journey from a fresh frontend so its window is the actor's.
+    actor = desktop.restart(actor, 'Document Viewer')
     evidence = {'open': desktop.open_file(actor, path, cancel_first=True)}
     evidence['decoder_negative'] = {'control': corrupt, 'native_open': rejected,
                                     'actual_original_error': decoder_error}

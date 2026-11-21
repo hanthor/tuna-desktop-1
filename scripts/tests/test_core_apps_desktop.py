@@ -951,7 +951,7 @@ class EnterLocationCompletion(unittest.TestCase):
     The rig models exactly that: Return over the list appends the hovered
     row; Return elsewhere closes the entry on its text.
     """
-    WINDOW = {'id': 33, 'rect': [195, 141, 890, 550]}
+    WINDOW = {'id': 33, 'rect': [195, 141, 890, 550], 'surface_offset': [0, 0]}
     ENTRY = [259, 0, 442, 34]
     LIST = [275, 59, 426, 176]
     PARKED = [797.6171875, 253.3203125]
@@ -1061,6 +1061,47 @@ class EnterLocationCompletion(unittest.TestCase):
         self.assertFalse(desktop._pointer_rests_on(self.PICKER, {'state': state}, {'bounds': None}))
         state['pointer_position'] = None
         self.assertFalse(desktop._pointer_rests_on(self.PICKER, {'state': state}, node))
+
+
+class ShadowedSurfacePointer(unittest.TestCase):
+    """Accessible extents are surface-relative; `rect` is the window geometry.
+
+    Run 44850865831: Connections' welcome window had rect [311, 141, 658,
+    549] inside a 710x601 surface (client shadow, geometry at [26, 23]).
+    Adding No Thanks' bounds [300, 486, 109, 34] to the rect put the click at
+    [665, 644], below the button drawn at [585, 604, 109, 34].
+    """
+    WINDOW = {'id': 2, 'rect': [311, 141, 658, 549], 'surface_offset': [26, 23]}
+    ACTOR = {'id': 'org.gnome.Connections', 'window_id': 2}
+    NO_THANKS = {'bounds': [300, 486, 109, 34]}
+
+    def desktop(self):
+        desktop = core_apps.Desktop.__new__(core_apps.Desktop)
+        desktop.width, desktop.height, desktop.scale = 1280, 800, 1.0
+        desktop._select_mouse = lambda qmp, relative: 'tablet'
+
+        class Qmp:
+            def cmd(self, command, events):
+                pass
+        desktop.qmp = Qmp()
+        return desktop
+
+    def test_click_lands_on_the_drawn_button(self):
+        x, y, _ = self.desktop()._move_to(self.ACTOR, {'state': {'windows': [self.WINDOW]}},
+                                          self.NO_THANKS, 0.5, 0.5)
+        self.assertTrue(585 <= x < 585 + 109 and 604 <= y < 604 + 34, (x, y))
+
+    def test_pointer_rest_and_field_pixels_use_the_surface_origin(self):
+        desktop = self.desktop()
+        state = {'windows': [self.WINDOW], 'pointer_position': [640, 620]}
+        self.assertTrue(desktop._pointer_rests_on(self.ACTOR, {'state': state}, self.NO_THANKS))
+        self.assertEqual(desktop._field_pixels(self.ACTOR, state, self.NO_THANKS), (585, 604, 109, 34))
+
+    def test_missing_surface_offset_is_refused(self):
+        window = {'id': 2, 'rect': [311, 141, 658, 549], 'surface_offset': None}
+        with self.assertRaises(RuntimeError):
+            self.desktop()._move_to(self.ACTOR, {'state': {'windows': [window]}},
+                                    self.NO_THANKS, 0.5, 0.5)
 
 
 class PickerFilterDiagnostic(unittest.TestCase):
