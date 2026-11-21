@@ -390,7 +390,10 @@ jobs:
   journey:
     # Same choice as select-lanes' runs-on, on the Ubuntu 26.04 runners.
     runs-on: &runner-26 ${{ vars.CI_RUNNERS != 'hosted' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'tuna-ci-26.04' || 'ubuntu-26.04' }}
-    needs: [select-lanes, check]
+    # Runs beside check: self-hosted minutes are free, and a red check still
+    # fails ci-gate. (fprint-phase-proof, grid-cancel-comparison and
+    # gtk-shell stay behind check: they check out its tested_sha output.)
+    needs: [select-lanes]
     if: contains(fromJSON(needs.select-lanes.outputs.lanes), 'journey')
     timeout-minutes: 60
     steps:
@@ -516,7 +519,7 @@ jobs:
 
   app-content:
     runs-on: *runner-24
-    needs: [select-lanes, check]
+    needs: [select-lanes]
     if: contains(fromJSON(needs.select-lanes.outputs.lanes), 'app-content')
     timeout-minutes: 25
     steps:
@@ -552,7 +555,7 @@ jobs:
 
   scroll-proof:
     runs-on: *runner-24
-    needs: [select-lanes, check]
+    needs: [select-lanes]
     if: contains(fromJSON(needs.select-lanes.outputs.lanes), 'scroll-proof')
     timeout-minutes: 25
     steps:
@@ -785,7 +788,7 @@ jobs:
         with:
           tool: gtk4-layer-shell
           version: 4867d7b85cdf1e829fc1fd6f1d5f04c42cc99389
-      - run: shellcheck -x scripts/tuna-gtk-shell-proof scripts/tuna-walkthrough scripts/tuna-gtk-accessibility-proof scripts/tuna-slow-portal-proof scripts/lib/tuna-fade-match
+      - run: shellcheck -x scripts/tuna-gtk-shell-proof scripts/tuna-walkthrough scripts/tuna-gtk-accessibility-proof scripts/tuna-slow-portal-proof scripts/tuna-ibus-owner-proof scripts/lib/tuna-fade-match
       # docs/walkthrough.md must match its manifest (docs/walkthrough.tsv).
       - run: scripts/tuna-walkthrough check
       - name: Prove password origin and epoch ownership in the actual nested runtime
@@ -1068,6 +1071,10 @@ jobs:
       # dbus-daemon semantics: portal activation hangs instead of failing
       # fast, and the shell must still own org.gnome.Shell promptly.
       - run: scripts/tuna-slow-portal-proof --artifacts gtk-shell-artifacts/slow-portal
+      # One owner for the session's ibus-daemon (#1014): the bridge's own
+      # supervised child, or the session's unit, never both; session end
+      # leaves no ibus-* process of the display behind.
+      - run: scripts/tuna-ibus-owner-proof gtk-shell-artifacts/ibus-owner
       # Screen magnifier (#349): real GSettings writes, magnified pixels
       # in shell screenshot captures and live output frames. Independent
       # of the shell proof above, so it runs (and gates) even when that
@@ -1183,7 +1190,7 @@ jobs:
     # against the nested session that owns the screen reader. Ubuntu
     # 24.04's Orca 46 predates GNOME's KeyboardMonitor.
     runs-on: *runner-26
-    needs: [select-lanes, check]
+    needs: [select-lanes]
     if: contains(fromJSON(needs.select-lanes.outputs.lanes), 'orca-speech')
     timeout-minutes: 45
     steps:
@@ -2169,6 +2176,7 @@ jobs:
           --assertions ledger-in/gtk-shell/osk/assertions.txt
           --assertions ledger-in/gtk-shell/subsurface/assertions.txt
           --assertions ledger-in/gtk-shell/lock-auth/assertions.txt
+          --assertions ledger-in/gtk-shell/ibus-owner/assertions.txt
           --assertions ledger-in/gtk-shell/lock-idle-frames/assertions.txt
           --assertions ledger-in/orca-speech/assertions.txt
           --assertions ledger-in/drm-smoke/assertions.txt
