@@ -1936,16 +1936,17 @@ subsurface_sample() {
         SUBSURFACE_BAD="${SUBSURFACE_BAD:+$SUBSURFACE_BAD; }$1: $6 shows $sub_got, not $5"
     fi
 }
+# subsurface_point SCENE PNG X Y W H CX CY WANT NAME: samples the client
+# point (CX, CY) of the 400x300 window drawn at (X, Y) at W x H in PNG.
+subsurface_point() {
+    subsurface_sample "$1" "$2" $(($3 + $7 * $5 / 400)) $(($4 + $8 * $6 / 300)) "$9" "${10}"
+}
 # subsurface_scene SCENE PNG X Y W H: the window's geometry (400x300 in
 # the client) drawn at (X, Y) at W x H in PNG.
 subsurface_scene() {
-    sub_at() { echo "$(($3 + $1 * $5 / 400)) $(($4 + $2 * $6 / 300))"; }
-    # shellcheck disable=SC2046
-    subsurface_sample "$1" "$2" $(sub_at 200 50 "$3" "$4" "$5" "$6") "$SUBSURFACE_RED" "the parent"
-    # shellcheck disable=SC2046
-    subsurface_sample "$1" "$2" $(sub_at 100 150 "$3" "$4" "$5" "$6") "$SUBSURFACE_GREEN" "the subsurface placed above"
-    # shellcheck disable=SC2046
-    subsurface_sample "$1" "$2" $(sub_at 350 150 "$3" "$4" "$5" "$6") "$SUBSURFACE_RED" "the parent over the subsurface placed below"
+    subsurface_point "$1" "$2" "$3" "$4" "$5" "$6" 200 50 "$SUBSURFACE_RED" "the parent"
+    subsurface_point "$1" "$2" "$3" "$4" "$5" "$6" 100 150 "$SUBSURFACE_GREEN" "the subsurface placed above"
+    subsurface_point "$1" "$2" "$3" "$4" "$5" "$6" 350 150 "$SUBSURFACE_RED" "the parent over the subsurface placed below"
 }
 subsurface_stacking_gate() {
     SUBSURFACE_BAD=""

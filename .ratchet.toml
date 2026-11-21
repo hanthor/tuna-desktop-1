@@ -52,4 +52,4 @@ exclude = [
   "**/tests/**", "**/test/**", "**/*.bats", "**/test_*",
 ]
 exclude-rust-tests = false
-budget = 163
+budget = 151
