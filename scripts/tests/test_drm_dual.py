@@ -267,6 +267,56 @@ class Windows(unittest.TestCase):
         self.assertEqual(dual.check_frame_rate("P", 3, 3, False, 10, 3), [])
         self.assertTrue(dual.check_frame_rate("P", 150, 3, False, 10, 3))
 
+    @staticmethod
+    def heartbeats(rate_at, start=50.0, seconds=8.0):
+        """A client's beats (ten a second) drawing at rate_at(t) frames/s."""
+        beats, frames, t, owed = [], 0, start, 0.0
+        while t <= start + seconds:
+            owed += rate_at(t) * 0.1
+            frames += int(owed)
+            owed -= int(owed)
+            beats.append({"t": round(t, 3), "frames": frames})
+            t += 0.1
+        return beats
+
+    def test_rates_count_after_the_switch_settles(self):
+        switch_end = 52.0
+        # The CI run's shape (run 44873094927, client S): full rate through
+        # the slide, the callbacks owed from it trickling in for a moment,
+        # then HIDDEN_FRAME_INTERVAL's one frame a second.
+        def hidden_after(t):
+            if t < switch_end:
+                return 60
+            if t < switch_end + 0.15:
+                return 40
+            return 1
+        beats = self.heartbeats(hidden_after)
+        # Counting straight from the switch (the old window) takes in the
+        # tail and fails a throttled window.
+        from_switch = dual.frames_between(beats, switch_end - 0.1, switch_end + 2.9)
+        self.assertTrue(dual.check_frame_rate("S", from_switch, 3, False, 10, 3))
+        # The settled window counts only the hidden rate.
+        settled = dual.frames_between(beats, switch_end + 1.5, switch_end + 4.5)
+        self.assertLessEqual(settled, 4)
+        self.assertEqual(dual.check_frame_rate("S", settled, 3, False, 10, 3), [])
+        # A window that is not throttled at all still fails, settled or not.
+        unthrottled = self.heartbeats(lambda t: 60)
+        frames = dual.frames_between(unthrottled, switch_end + 1.5, switch_end + 4.5)
+        self.assertGreater(frames, 150)
+        self.assertTrue(dual.check_frame_rate("S", frames, 3, False, 10, 3))
+        # So does one throttled only to a few frames a second.
+        slow = self.heartbeats(lambda t: 6)
+        self.assertTrue(dual.check_frame_rate(
+            "S", dual.frames_between(slow, switch_end + 1.5, switch_end + 4.5), 3, False, 10, 3))
+        # And a shown window must keep its rate in the same window.
+        self.assertEqual(dual.check_frame_rate("P", frames, 3, True, 10, 3), [])
+
+    def test_a_window_the_beats_do_not_cover_is_no_count(self):
+        beats = self.heartbeats(lambda t: 60, seconds=2.0)
+        self.assertIsNone(dual.frames_between(beats, 49.0, 51.0))
+        self.assertIsNone(dual.frames_between(beats, 50.5, 55.0))
+        self.assertIsNotNone(dual.frames_between(beats, 50.5, 51.9))
+
 
 if __name__ == "__main__":
     unittest.main()
