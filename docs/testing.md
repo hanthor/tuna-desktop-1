@@ -293,6 +293,19 @@ buffer_release`: an uploaded `wl_shm` buffer comes back with
 `wl_buffer.release` at once, as Mutter's do, and its pool closes once the
 client destroys it and the surface moves on to another buffer.
 
+`scripts/tuna-gtk-shell-proof --subsurface-only --artifacts DIR` runs
+G-SUBSURFACE-STACKING: `tuna-subsurface-client` (a compositor example)
+maps an opaque red 400x300 window with an opaque green subsurface placed
+above it and an opaque blue one placed below it, half past its right
+edge. On the desktop, in the overview's preview and in its Alt+Print
+window screenshot the green one must show over the parent and the parent
+over the blue one, which shows past the parent's edge only; every sampled
+pixel is kept in `subsurface-pixels.txt` with `subsurface-desktop.png`,
+`subsurface-overview.png` and `subsurface-window-capture.png`. It takes
+under a minute. The compositor side is `cargo test -p tuna-compositor --lib
+surface_order_tests`: windows, popups and layer surfaces append their
+trees bottom to top, a drag icon keeps Smithay's front-to-back order.
+
 Every build uses its own checkout's `target/` (an inherited
 `CARGO_TARGET_DIR` is ignored; set `TUNA_TARGET_DIR` to choose one) and no
 incremental state, with half the host's CPUs as jobs. Builds from every
@@ -867,6 +880,9 @@ To drive the published image through GDM in a KubeVirt VM with keyboard
 and pointer input and save a console frame for every step, see
 [Published-image journey through Corral](corral-journey.md).
 
+To try guest-side code in a running VM before pushing, without the CI
+queue or an image rebuild, see [Fast iteration on karnataka](ci-fast-iteration.md).
+
 ## Pointer motion barriers and input aids
 
 Backend motion is coalesced once per output frame, but a raw non-motion
@@ -1256,7 +1272,7 @@ PSS split by mapping kind (heap, anonymous, shared memory, GPU, files), in
 the process and kind that grew. Final PSS must stay within
 warmup × 1.25 + 64 MiB, fds within warmup + 32 and mappings within
 warmup × 1.25 + 1024. These diagnostic bounds catch unbounded growth;
-they are separate from the GNOME performance targets in #73. A panic,
+they are separate from the GNOME performance targets in #503. A panic,
 compositor exit, lost input response, orphaned window or hung worker
 fails the lane. Pull requests touching the suite run ten churn rounds;
 the nightly run uses 300.
@@ -1290,9 +1306,9 @@ regression test in the protocol crate before its fix is merged.
 To reproduce locally, install the pinned tool and toolchain, then run:
 
 ```sh
-rustup toolchain install nightly-2026-08-28
+rustup toolchain install nightly-2026-11-13
 cargo install cargo-fuzz --version 0.13.2 --locked
-cargo +nightly-2026-08-28 fuzz run control_body -- -max_total_time=60 -max_len=1048580 -timeout=5 -rss_limit_mb=2048
+cargo +nightly-2026-11-13 fuzz run control_body -- -max_total_time=60 -max_len=1048580 -timeout=5 -rss_limit_mb=2048
 ```
 
 This covers the control decoders of #203; Wayland request handlers are
