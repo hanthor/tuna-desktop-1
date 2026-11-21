@@ -239,16 +239,7 @@ impl EdgeData {
             }
         } else {
             let resist = |old_pos: i32, new_pos: i32, edges: &[Edge], xdir: bool| {
-                apply_edge_resistance(
-                    old_pos,
-                    new_pos,
-                    old,
-                    new,
-                    edges,
-                    xdir,
-                    flags.windows,
-                    flags.keyboard,
-                )
+                apply_edge_resistance(old_pos, new_pos, old, new, edges, xdir, flags)
             };
             Sides {
                 left: resist(old.x, new.x, &self.vertical, true),
@@ -906,8 +897,7 @@ fn movement_towards_edge(side: Side, increment: isize) -> bool {
 /// `old_pos` to `new_pos` over the sorted `edges`. A keyboard move stops
 /// at the first aligned edge strictly between the two; a pointer move
 /// stops at the first aligned edge it has not yet passed by the edge
-/// type's threshold (window edges only with `include_windows`).
-#[allow(clippy::too_many_arguments)]
+/// type's threshold (window edges only with `flags.windows`).
 fn apply_edge_resistance(
     old_pos: i32,
     new_pos: i32,
@@ -915,8 +905,7 @@ fn apply_edge_resistance(
     new_rect: &Rect,
     edges: &[Edge],
     xdir: bool,
-    include_windows: bool,
-    keyboard_op: bool,
+    flags: Flags,
 ) -> i32 {
     if old_pos == new_pos || edges.is_empty() {
         return new_pos;
@@ -937,7 +926,7 @@ fn apply_edge_resistance(
         let edge = &edges[i as usize];
         let compare = edge.position(xdir);
         if edge_aligns(new_rect, edge) || edge_aligns(old_rect, edge) {
-            if keyboard_op {
+            if flags.keyboard {
                 if (old_pos < compare && compare < new_pos)
                     || (old_pos > compare && compare > new_pos)
                 {
@@ -946,7 +935,7 @@ fn apply_edge_resistance(
             } else {
                 let towards = movement_towards_edge(edge.side, increment);
                 let threshold = match edge.kind {
-                    EdgeKind::Window if !include_windows => 0,
+                    EdgeKind::Window if !flags.windows => 0,
                     EdgeKind::Window if towards => TOWARDS_WINDOW,
                     EdgeKind::Window => AWAYFROM_WINDOW,
                     EdgeKind::Monitor if towards => TOWARDS_MONITOR,
