@@ -51,20 +51,21 @@ panel_layout_gate() {
     panel_points="$("$PY" "$ROOT/scripts/lib/tuna-panel-dash-check.py" panel-points \
         "$ARTIFACTS/a11y-panel-layout.json" "$ARTIFACTS/panel-layout-state.json" \
         --physical-width "$WIDTH" 2>&1)" || fail "$panel_gate" "$panel_points"
-    panel_frames=""
+    # The hover frames collect in the positional parameters (this function
+    # takes none), so each path stays one argument.
+    set --
     while read -r panel_name panel_x panel_y; do
         xdotool mousemove --window "$WID" "$panel_x" "$panel_y"
         # Past the fill's hover transition.
         sleep 0.6
         scrot "$ARTIFACTS/panel-layout-hover-$panel_name.png" >/dev/null
-        panel_frames="$panel_frames $ARTIFACTS/panel-layout-hover-$panel_name.png"
+        set -- "$@" "$ARTIFACTS/panel-layout-hover-$panel_name.png"
     done <<EOF
 $panel_points
 EOF
     xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
-    # shellcheck disable=SC2086
     panel_detail="$("$PY" "$ROOT/scripts/lib/tuna-panel-dash-check.py" panel \
-        "$ARTIFACTS/a11y-panel-layout.json" "$ARTIFACTS/panel-layout-state.json" $panel_frames \
+        "$ARTIFACTS/a11y-panel-layout.json" "$ARTIFACTS/panel-layout-state.json" "$@" \
         --physical-width "$WIDTH" --direction "$PANEL_DASH_DIRECTION" 2>&1)" ||
         fail "$panel_gate" "$panel_detail"
     pass "$panel_gate" "Activities at the leading edge, the clock centred, the system menu at the trailing edge ($panel_detail)"
