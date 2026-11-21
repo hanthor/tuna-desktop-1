@@ -388,7 +388,10 @@ jobs:
   journey:
     # Same choice as select-lanes' runs-on, on the Ubuntu 26.04 runners.
     runs-on: &runner-26 ${{ vars.CI_RUNNERS != 'hosted' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'tuna-ci-26.04' || 'ubuntu-26.04' }}
-    needs: [select-lanes, check]
+    # Runs beside check: self-hosted minutes are free, and a red check still
+    # fails ci-gate. (fprint-phase-proof, grid-cancel-comparison and
+    # gtk-shell stay behind check: they check out its tested_sha output.)
+    needs: [select-lanes]
     if: contains(fromJSON(needs.select-lanes.outputs.lanes), 'journey')
     timeout-minutes: 60
     steps:
@@ -514,7 +517,7 @@ jobs:
 
   app-content:
     runs-on: *runner-24
-    needs: [select-lanes, check]
+    needs: [select-lanes]
     if: contains(fromJSON(needs.select-lanes.outputs.lanes), 'app-content')
     timeout-minutes: 25
     steps:
@@ -550,7 +553,7 @@ jobs:
 
   scroll-proof:
     runs-on: *runner-24
-    needs: [select-lanes, check]
+    needs: [select-lanes]
     if: contains(fromJSON(needs.select-lanes.outputs.lanes), 'scroll-proof')
     timeout-minutes: 25
     steps:
@@ -783,7 +786,7 @@ jobs:
         with:
           tool: gtk4-layer-shell
           version: 4867d7b85cdf1e829fc1fd6f1d5f04c42cc99389
-      - run: shellcheck -x scripts/tuna-gtk-shell-proof scripts/tuna-walkthrough scripts/tuna-gtk-accessibility-proof scripts/tuna-slow-portal-proof scripts/lib/tuna-fade-match
+      - run: shellcheck -x scripts/tuna-gtk-shell-proof scripts/tuna-walkthrough scripts/tuna-gtk-accessibility-proof scripts/tuna-slow-portal-proof scripts/tuna-ibus-owner-proof scripts/lib/tuna-fade-match
       # docs/walkthrough.md must match its manifest (docs/walkthrough.tsv).
       - run: scripts/tuna-walkthrough check
       - name: Prove password origin and epoch ownership in the actual nested runtime
@@ -842,6 +845,34 @@ jobs:
         with:
           name: native-wellbeing-proof
           path: ${{ runner.temp }}/native-wellbeing/
+          retention-days: 14
+      # Window motion paired with GNOME 51 (#493 #494 #495 #496 #498): the
+      # same clients and actions as tests/gnome-reference/motion.js, sampled
+      # on the frozen clock at GNOME's capture delays and compared with
+      # tests/gnome-reference/motion-reference.json. The modal-dim proof
+      # covers overlap, live settings and parent death; the window-lifecycle
+      # proof the retained close frame of a CSD GTK window; the X11 proof
+      # minimize toward _NET_WM_ICON_GEOMETRY on the session's XWayland.
+      - name: Prove window motion against the paired GNOME 51 capture
+        run: |
+          dbus-run-session -- /usr/bin/python3 scripts/tuna-motion-pairing-proof --bin-dir "$RUNNER_TEMP/native-minimize/frozen" --artifacts "$RUNNER_TEMP/motion-pairing" --display :112 --require-clean
+          dbus-run-session -- /usr/bin/python3 scripts/tuna-modal-dim-proof --bin-dir "$RUNNER_TEMP/native-minimize/frozen" --artifacts "$RUNNER_TEMP/modal-dim" --display :114
+          dbus-run-session -- /usr/bin/python3 scripts/tuna-window-lifecycle-proof --bin-dir "$RUNNER_TEMP/native-minimize/frozen" --artifacts "$RUNNER_TEMP/window-lifecycle" --display :115
+          dbus-run-session -- /usr/bin/python3 scripts/tuna-x11-icon-geometry-proof --bin-dir "$RUNNER_TEMP/native-minimize/frozen" --artifacts "$RUNNER_TEMP/x11-icon-geometry" --display :116
+          for proof in motion-pairing modal-dim window-lifecycle x11-icon-geometry; do
+            mkdir -p "gtk-shell-artifacts/$proof"
+            cp "$RUNNER_TEMP/$proof/assertions.txt" "$RUNNER_TEMP/$proof/manifest.json" "gtk-shell-artifacts/$proof/"
+          done
+          cp "$RUNNER_TEMP/motion-pairing/comparison.json" gtk-shell-artifacts/motion-pairing/
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: window-motion-proofs
+          path: |
+            ${{ runner.temp }}/motion-pairing/
+            ${{ runner.temp }}/modal-dim/
+            ${{ runner.temp }}/window-lifecycle/
+            ${{ runner.temp }}/x11-icon-geometry/
           retention-days: 14
       - name: Bound native privacy executor proof
         run: cargo test -p tuna-shell-gtk --bin tuna-shell-gtk privacy::tests::live_pw::live_native_executor_mutes_restores_and_refuses_wrong_identity -- --exact --nocapture
@@ -1019,6 +1050,15 @@ jobs:
         env:
           TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
         run: scripts/tuna-gtk-shell-proof --window-leak-only --artifacts gtk-shell-artifacts/window-leak
+      # A client's drag through the overview (#1189): real GTK drags open it
+      # from the hot corner and the Activities button, activate a window
+      # preview after 750 ms, and return to the starting workspace.
+      - name: Client drags through the overview
+        if: ${{ !cancelled() }}
+        timeout-minutes: 8
+        env:
+          TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
+        run: scripts/tuna-gtk-shell-proof --dnd-overview-only --artifacts gtk-shell-artifacts/dnd-overview
       # Initial DnD target focus must not wait for another physical motion.
       # Run the unchanged shared hover/reorder assertions independently of
       # unrelated full-suite assertions, using this job's just-built binaries.
@@ -1036,6 +1076,17 @@ jobs:
         env:
           TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
         run: scripts/tuna-gtk-shell-proof --search-leak-only --artifacts gtk-shell-artifacts/search-leak
+      # A window's subsurfaces stack where its client placed them, above
+      # and below it, on the desktop, in the overview and in the window's
+      # screenshot (G-SUBSURFACE-STACKING).
+      - name: Subsurfaces stack above and below their window
+        if: ${{ !cancelled() }}
+        timeout-minutes: 8
+        env:
+          TUNA_PROOF_BIN_DIR: ${{ github.workspace }}/target/debug
+        run: |
+          cargo build --locked -p tuna-compositor --example tuna-subsurface-client
+          scripts/tuna-gtk-shell-proof --subsurface-only --artifacts gtk-shell-artifacts/subsurface
       # Native/X11 geometry and physical input at all required virtual scales.
       - run: |
           for scale in 1 1.25 1.5 2; do
@@ -1046,6 +1097,10 @@ jobs:
       # dbus-daemon semantics: portal activation hangs instead of failing
       # fast, and the shell must still own org.gnome.Shell promptly.
       - run: scripts/tuna-slow-portal-proof --artifacts gtk-shell-artifacts/slow-portal
+      # One owner for the session's ibus-daemon (#1014): the bridge's own
+      # supervised child, or the session's unit, never both; session end
+      # leaves no ibus-* process of the display behind.
+      - run: scripts/tuna-ibus-owner-proof gtk-shell-artifacts/ibus-owner
       # Screen magnifier (#349): real GSettings writes, magnified pixels
       # in shell screenshot captures and live output frames. Independent
       # of the shell proof above, so it runs (and gates) even when that
@@ -1065,11 +1120,29 @@ jobs:
       - if: ${{ !cancelled() }}
         run: shellcheck -x scripts/tuna-osk-proof && scripts/tuna-osk-proof --artifacts gtk-shell-artifacts/osk
       # Keep runnable binaries even when a later live proof assertion fails.
+      # #1124: tuna-wallpaper-svg is built only by scripts/tuna-gtk-shell-proof
+      # and the layer-shell library is installed by the ci-tool step. After an
+      # earlier failure this copies what exists, so that earlier step stays the
+      # job's reported failure; with no earlier failure a missing file fails here.
       - if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p gtk-shell-artifacts/bin
-          cp target/debug/tuna-compositor target/debug/tuna-shell-gtk target/debug/tuna-wallpaper-svg gtk-shell-artifacts/bin/
-          cp /usr/local/lib/*/libgtk4-layer-shell.so* gtk-shell-artifacts/bin/ 2>/dev/null || cp /usr/local/lib/libgtk4-layer-shell.so* gtk-shell-artifacts/bin/
+          shopt -s nullglob
+          layer_shell=(/usr/local/lib/*/libgtk4-layer-shell.so*)
+          [ ${#layer_shell[@]} -gt 0 ] || layer_shell=(/usr/local/lib/libgtk4-layer-shell.so*)
+          [ ${#layer_shell[@]} -gt 0 ] || layer_shell=(/usr/local/lib/libgtk4-layer-shell.so)
+          missing=0
+          for file in target/debug/tuna-compositor target/debug/tuna-shell-gtk target/debug/tuna-wallpaper-svg "${layer_shell[@]}"; do
+            if [ -e "$file" ]; then
+              cp "$file" gtk-shell-artifacts/bin/
+            else
+              echo "::warning::not collected, never built or installed: $file"
+              missing=1
+            fi
+          done
+          if [ "$missing" = 1 ] && [ "$JOB_STATUS" = success ]; then exit 1; fi
       # G-WS-INSERT publishes the targeted insertion frame/state. Full
       # parity captures need native fonts, wallpapers and installed apps;
       # use the binaries uploaded as gtk-shell-binaries with that reference
@@ -1143,7 +1216,7 @@ jobs:
     # against the nested session that owns the screen reader. Ubuntu
     # 24.04's Orca 46 predates GNOME's KeyboardMonitor.
     runs-on: *runner-26
-    needs: [select-lanes, check]
+    needs: [select-lanes]
     if: contains(fromJSON(needs.select-lanes.outputs.lanes), 'orca-speech')
     timeout-minutes: 45
     steps:
@@ -2124,8 +2197,14 @@ jobs:
           --assertions ledger-in/gtk-shell/scale/assertions.txt
           --assertions ledger-in/gtk-shell/magnifier/assertions.txt
           --assertions ledger-in/gtk-shell/session-restore/assertions.txt
+          --assertions ledger-in/gtk-shell/motion-pairing/assertions.txt
+          --assertions ledger-in/gtk-shell/modal-dim/assertions.txt
+          --assertions ledger-in/gtk-shell/window-lifecycle/assertions.txt
+          --assertions ledger-in/gtk-shell/x11-icon-geometry/assertions.txt
           --assertions ledger-in/gtk-shell/osk/assertions.txt
+          --assertions ledger-in/gtk-shell/subsurface/assertions.txt
           --assertions ledger-in/gtk-shell/lock-auth/assertions.txt
+          --assertions ledger-in/gtk-shell/ibus-owner/assertions.txt
           --assertions ledger-in/gtk-shell/lock-idle-frames/assertions.txt
           --assertions ledger-in/orca-speech/assertions.txt
           --assertions ledger-in/drm-smoke/assertions.txt
