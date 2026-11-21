@@ -2927,11 +2927,20 @@ impl Runtime {
                 "app_id": app_of(w.id),
                 "introspect_eligible": self.manager.is_introspect_eligible(w.id),
                 "x11_window_id": self.manager.x11_window_id(w.id),
+                // `_NET_WM_ICON_GEOMETRY`, the X11 client's minimize target.
+                "client_icon_geometry": self.manager.client_icon_geometry(w.id)
+                    .map(|r| [r.loc.x, r.loc.y, r.size.w, r.size.h]),
                 "parent_window_id": self.manager.transient_parent(w.id),
                 "application_window_id": self.manager.application_window(w.id),
                 "icon": model.window(w.id).and_then(|w| w.icon.clone()),
                 "workspace": w.workspace,
                 "rect": [w.geometry.loc.x, w.geometry.loc.y, w.geometry.size.w, w.geometry.size.h],
+                // The committed buffer, client shadows included (GNOME's buffer rect).
+                "buffer_rect": self.manager.surface_of(w.id).and_then(|s| {
+                    let size = crate::windows::buffer_size(&s)?;
+                    let origin = crate::popup::surface_origin(&s, w.geometry.loc);
+                    Some([origin.x, origin.y, size.w, size.h])
+                }),
             })).collect::<Vec<_>>(),
             "previews": previews,
             "thumbnails": thumbnails,
@@ -3000,6 +3009,9 @@ impl Runtime {
             "workspaces_only_on_primary": policy.only_on_primary,
             "edge_tiling": policy.edge_tiling,
             "center_new_windows": self.input_settings.center_new_windows,
+            "auto_maximize": self.input_settings.auto_maximize,
+            "overlay_key": self.input_settings.overlay_key,
+            "overlay_keycodes": self.triggers.overlay_keycodes(),
         });
         // Bottom-to-top stacking and GNOME's live focus policy (P-WM-09).
         doc["stacking"] = serde_json::json!(self.manager.stacking_order());
@@ -3014,6 +3026,8 @@ impl Runtime {
             "focus_change_on_pointer_rest": focus_policy.focus_change_on_pointer_rest,
         });
         doc["window_lifecycle"] = self.manager.window_lifecycle().to_json();
+        // Published dash icons; minimize uses one only while the dash shows.
+        doc["dash_icon_targets"] = self.manager.icon_geometries_json();
         doc["menu_close"] = self.menu_close.to_json();
         doc["modal_dim"] = self.manager.modal_dim().to_json();
         doc["frame_cost"] = self
@@ -3096,6 +3110,8 @@ impl Runtime {
         doc["animation_clock_ms"] =
             serde_json::json!(manual.then(|| self.animation_clock.now().as_millis() as u64));
         doc["overview_motion"] = self.overview_motion.diagnostics();
+        // Pending app launches behind the busy cursor (#1193).
+        doc["startup"] = self.state.startup.snapshot(Instant::now());
         doc["cursor"] = self
             .cursor
             .diagnostics(self.animation_clock.now(), self.is_locked());
@@ -5096,6 +5112,7 @@ impl Runtime {
             .apply_workspace_policy(&mut self.state, settings.workspace_policy);
         self.manager
             .set_window_placement(settings.center_new_windows, settings.right_to_left);
+        self.manager.set_auto_maximize(settings.auto_maximize);
         // Release delayed/synthetic input under the OLD map. An unrelated
         // preference change must not reinstall the map or lose held state.
         if aids::keymap_changed(&self.input_settings, &settings) {
@@ -5105,6 +5122,9 @@ impl Runtime {
         } else {
             self.manager.apply_keyboard_repeat(&settings);
         }
+        // mutter's overlay-key, resolved against the keymap now installed.
+        let keymap = crate::windows::keymap_keysyms(&mut self.state);
+        self.triggers.set_overlay_key(&settings.overlay_key, keymap);
         self.triggers.set_hot_corner(settings.hot_corners);
         self.triggers.set_right_to_left(settings.right_to_left);
         self.configure_input_aids(&settings.keyboard_aids, &settings.pointer_aids);
@@ -5445,6 +5465,8 @@ impl Runtime {
             self.state.window_sessions().save_deadline(),
             // The lock conversation's shared idle/total deadline.
             self.auth.next_deadline(),
+            // A pending launch's startup sequence timing out (#1193).
+            self.state.startup.next_deadline(),
         ]
         .into_iter()
         .flatten()
@@ -5603,6 +5625,11 @@ impl Runtime {
             .flush_clients()
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         self.manager.reconcile(&mut self.state);
+        // mutter's startup_sequence_timeout: the busy cursor ends with
+        // the last pending launch, and that frame is drawn.
+        if self.state.startup.expire(Instant::now()) {
+            self.active_at = Instant::now();
+        }
         self.state.window_sessions_mut().save_if_due(Instant::now());
         self.focus_policy_tick();
         self.client_dnd_tick();
@@ -5704,6 +5731,13 @@ impl Runtime {
         // gnome-shell's close dialog answers (#1035): Wait or Force Quit.
         for (window, response) in outcome.close_dialog_responses {
             self.manager.close_dialog_response(window, response);
+        }
+        // The shell's app launches: busy cursor until the window maps.
+        for (app_id, wm_class) in outcome.startup_sequences {
+            self.state
+                .startup
+                .add_launch(app_id, wm_class, Instant::now());
+            self.active_at = Instant::now();
         }
         self.queue_close_dialogs();
         if let Some(request) = self.state.take_shortcut_consent_update() {
@@ -6639,7 +6673,10 @@ impl Runtime {
             now,
             self.input_settings.motion,
             allowed,
-            self.input_settings.right_to_left,
+            crate::minimize::TargetContext {
+                right_to_left: self.input_settings.right_to_left,
+                dash_visible: self.control.overview_open(),
+            },
         );
         self.menu_close.step(
             renderer,
@@ -6710,6 +6747,8 @@ impl Runtime {
         // The pointer is the compositor's to draw (#342): hidden while
         // locked or blanked, as the software pointer always was.
         let cursor_shown = !locked && blank_alpha < 1.0;
+        // A pending app launch shows the busy cursor (#1193).
+        let busy = self.state.startup.pending(Instant::now());
         // A tablet tool in proximity draws its own cursor where it is, and
         // the pointer's is hidden meanwhile (Mutter's tool sprite).
         let tablet_cursor = self
@@ -6724,7 +6763,10 @@ impl Runtime {
                     .get(tool)
                     .cloned()
                     .unwrap_or_else(smithay::input::pointer::CursorImageStatus::default_named);
-                (crate::cursor::Pointer::resolve(&image, None, true), *pos)
+                (
+                    crate::cursor::Pointer::resolve(&image, None, true).busy(busy),
+                    *pos,
+                )
             });
         let cursor_pos_override = tablet_cursor.as_ref().map(|(_, pos)| *pos);
         let cursor_what = if let Some((what, _)) = tablet_cursor {
@@ -6735,6 +6777,7 @@ impl Runtime {
                 self.manager.grab_cursor(),
                 self.state.pointer_focused(),
             )
+            .busy(busy)
         } else {
             crate::cursor::Pointer::Hidden
         };
@@ -8391,7 +8434,7 @@ fn scene_elements(
                 split_from = Some(elements.len());
             }
             let buffer_size =
-                crate::windows::committed_size(surface.as_ref()).unwrap_or(geometry.size);
+                crate::windows::buffer_size(surface.as_ref()).unwrap_or(geometry.size);
             let buffer_geometry = Rectangle::new(
                 crate::popup::surface_origin(&surface, geometry.loc),
                 buffer_size,
@@ -8448,7 +8491,7 @@ fn scene_elements(
                 continue;
             }
             let buffer_size =
-                crate::windows::committed_size(surface.as_ref()).unwrap_or(geometry.size);
+                crate::windows::buffer_size(surface.as_ref()).unwrap_or(geometry.size);
             let buffer_geometry = Rectangle::new(
                 crate::popup::surface_origin(&surface, geometry.loc),
                 buffer_size,
@@ -8467,12 +8510,10 @@ fn scene_elements(
                 continue;
             }
             if let Some(frame) = manager.window_lifecycle().opening_frame(id) {
-                let r = crate::window_lifecycle::rect(geometry, frame);
-                let geo = crate::popup::window_geometry_loc(&surface);
-                let origin = view.physical(
-                    r.loc.x - f64::from(geo.x) * frame.scale.0,
-                    r.loc.y - f64::from(geo.y) * frame.scale.1,
-                );
+                // GNOME scales the whole actor, client shadows included, so
+                // the pivot sits on the buffer rect (windowManager.js:1514).
+                let r = crate::window_lifecycle::rect(buffer_geometry, frame);
+                let origin = view.physical(r.loc.x, r.loc.y);
                 let alpha = frame.alpha * manager.render_alpha(&window);
                 elements.extend(surface_tree_bottom_to_top(renderer,&surface,origin,view.scale,alpha).into_iter().map(|e|smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(e,origin,frame.scale)));
                 owners.resize(elements.len(), Some(id));
