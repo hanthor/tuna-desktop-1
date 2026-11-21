@@ -97,6 +97,12 @@ OWNED = [
     ("scripts/tuna-greeter-proof", ["gtk-shell"]),
     ("scripts/lib/tuna-gdm-mock.py", ["gtk-shell"]),
     ("scripts/lib/org.gnome.login-screen.gschema.xml", ["gtk-shell"]),
+    # Lock-screen verification through GDM's reauthentication channel and
+    # the GDM client it shares with the greeter: check runs them against a
+    # GDM fixture, only marlin-vm's V-LOCK-FAILLOCK against GDM itself; the
+    # nested lock and greeter proofs run in gtk-shell.
+    ("crates/compositor/src/gdm_reauth.rs", [*CORE, "marlin-vm"]),
+    ("crates/gdm/*", [*CORE, "marlin-vm"]),
     ("scripts/tuna-walkthrough", ["gtk-shell"]),
     # scripts/tests/* run by a lane job (#1108): a test edit must run the lane
     # that executes it, or it first runs after merge.

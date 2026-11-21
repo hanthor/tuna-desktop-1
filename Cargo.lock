@@ -4167,6 +4167,7 @@ dependencies = [
  "signal-hook",
  "smithay",
  "tempfile",
+ "tuna-gdm",
  "tuna-magnifier",
  "tuna-output",
  "tuna-shell-control",
@@ -4185,6 +4186,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tuna-gdm"
+version = "0.1.0"
+dependencies = [
+ "gio",
+ "glib",
+ "tempfile",
+]
+
+[[package]]
 name = "tuna-greeter"
 version = "0.1.0"
 dependencies = [
@@ -4195,6 +4205,7 @@ dependencies = [
  "libadwaita",
  "tempfile",
  "tuna-auth-prompt",
+ "tuna-gdm",
  "tuna-shell-control",
 ]
 

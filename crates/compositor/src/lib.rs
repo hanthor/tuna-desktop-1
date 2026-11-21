@@ -107,6 +107,7 @@ pub(crate) mod focus_caret;
 pub mod focus_policy;
 pub mod fprintd;
 pub mod frame_timing;
+pub mod gdm_reauth;
 pub mod icc;
 pub mod idle_monitor;
 mod idle_notify;

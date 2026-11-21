@@ -69,6 +69,19 @@ class Selection(unittest.TestCase):
         self.assertEqual(pr("scripts/tuna-orca-speech-proof"), ["orca-speech"])
         self.assertEqual(pr("scripts/lib/tuna-orca-speech.py"), ["orca-speech"])
 
+    def test_gdm_reauthentication_always_runs_the_vm_lifecycle(self):
+        # V-LOCK-FAILLOCK is the only gate that runs it against GDM itself;
+        # a change never waits for the round-robin to pick marlin-vm.
+        for path in ("crates/compositor/src/gdm_reauth.rs", "crates/gdm/src/lib.rs",
+                     "crates/gdm/Cargo.toml"):
+            for run in range(len(m.ROTATION)):
+                with self.subTest(path=path, run=run):
+                    self.assertEqual(pr(path, run=run),
+                                     ["grid-cancel-comparison", "gtk-shell",
+                                      "arch-package", "marlin-vm"])
+        self.assertIn("marlin-vm", pr("crates/compositor/src/gdm_reauth.rs",
+                                      "crates/compositor/src/lib.rs", run=0))
+
 
     def test_transition_policy_and_suite_always_run_journey(self):
         for path in ('scripts/lib/transition-package-policy.py',
