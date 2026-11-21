@@ -93,6 +93,9 @@ OWNED = [
     ("scripts/tuna-slow-portal-proof", ["gtk-shell"]),
     ("scripts/tuna-session-restore-proof", ["gtk-shell"]),
     ("scripts/tuna-walkthrough", ["gtk-shell"]),
+    # Example clients only a lane's proof runs (the check job builds every
+    # example): G-SUBSURFACE-STACKING's client.
+    ("crates/compositor/examples/tuna-subsurface-client.rs", ["gtk-shell"]),
     # scripts/tests/* run by a lane job (#1108): a test edit must run the lane
     # that executes it, or it first runs after merge.
     ("scripts/tests/test_minimize_brightness_controls.py", ["gtk-shell"]),
