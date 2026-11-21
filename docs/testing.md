@@ -660,7 +660,10 @@ old behaviour produces:
   Super+Page_Down hides A's window (throttled frame callbacks) while B's
   stays on the active workspace and keeps drawing; with the key false
   both hide; a window Alt-dragged from B onto A stays on the workspace
-  it was carried on;
+  it was carried on. Client frame rates (a shown window at least 10/s,
+  a hidden one at most 3/s against the compositor's 995 ms hidden-frame
+  interval) are counted from the clients' heartbeats over 3 s starting
+  1.5 s after each switch ends, past the callbacks owed from the slide;
 - `D-WORKSPACE-SLIDE-MULTI` (P-AN-05): with the pointer on B,
   Super+Page_Down slides A alone. `drm_kms_readback.py --sample` reads
   each CRTC's scanned-out framebuffer every 4 ms, so page flips are the

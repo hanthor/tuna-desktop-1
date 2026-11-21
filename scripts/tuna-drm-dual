@@ -67,6 +67,10 @@ STATE_SIG = "(ua((ssss)a(siiddada{sv})a{sv})a(iiduba(ssss)a{sv})a{sv})"
 # and a hidden one at most (HIDDEN_FRAME_INTERVAL, 995 ms).
 SHOWN_FPS = 10
 HIDDEN_FPS = 3
+# Seconds after a workspace switch before frame rates are counted: more
+# than one HIDDEN_FRAME_INTERVAL, so callbacks owed from the slide (when
+# the window was still shown) are not counted as the hidden rate.
+RATE_SETTLE = 1.5
 # tuna_shell_control::MOD_ALT, the focus policy's modifier bit for the
 # `<Alt>` mouse-button-modifier the leg drags windows with.
 MOD_ALT = 8
@@ -622,15 +626,24 @@ def run(args):
                      and s.get("workspace_slide", {}).get("in_flight") is None, 10)
 
         def rates(names, seconds=3):
-            marks = {n: last_beat(n).get("frames", 0) for n in names}
-            time.sleep(seconds)
-            return {n: last_beat(n).get("frames", 0) - marks[n] for n in names}
+            """Frames each client drew in `seconds`, counted from its own
+            heartbeats once the switch has settled: a window hidden by
+            the switch was shown through the slide, and the frames it
+            was owed then arrive over the next frame interval
+            (HIDDEN_FRAME_INTERVAL is 995 ms), so the window opens
+            RATE_SETTLE after the switch ended."""
+            start = time.monotonic() + RATE_SETTLE
+            time.sleep(RATE_SETTLE + seconds + 0.3)
+            return {n: dual.frames_between(beats(n), start, start + seconds) for n in names}
 
         def check_rates(label, shown=(), hidden=()):
             seconds = 3
             counted = rates([*shown, *hidden], seconds)
             problems = []
             for n in [*shown, *hidden]:
+                if counted[n] is None:
+                    problems.append(f"client {n}'s heartbeats do not cover the {seconds} s window")
+                    continue
                 problems += dual.check_frame_rate(n, counted[n], seconds, n in shown, SHOWN_FPS, HIDDEN_FPS)
             if problems:
                 raise GateFailure(f"{label}: {'; '.join(problems)}")
