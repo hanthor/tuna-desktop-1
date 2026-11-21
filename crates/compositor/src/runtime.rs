@@ -986,6 +986,12 @@ impl Drop for Runtime {
         // Every exit path drops the runtime, including SIGTERM from logind's
         // session stop or the supervisor.
         self.orca.shutdown();
+        // Likewise the IBus bridge's group and that of an ibus-daemon the
+        // bridge started itself: left running the daemon keeps logind's
+        // session scope, and the session, from ending (#1014).
+        if let Some(ime) = &mut self.ime {
+            ime.shutdown();
+        }
         // Window sessions (P-SY-08): record every window still in one and
         // write the store before the clients lose their windows, as
         // Mutter does when its display closes at logout.
@@ -4027,13 +4033,12 @@ impl Runtime {
             |renderer: &mut GlesRenderer,
              surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
              at: Point<i32, Logical>| {
-                elements.extend(render_elements_from_surface_tree(
+                elements.extend(surface_tree_bottom_to_top(
                     renderer,
                     surface,
                     view.physical(f64::from(at.x), f64::from(at.y)),
                     view.scale,
                     1.0,
-                    Kind::Unspecified,
                 ));
             };
         tree(renderer, &surface, origin);
@@ -7537,14 +7542,9 @@ fn previews_to_elements(
             f64::from(preview.rect.loc.x) - f64::from(geo.x) * preview.scale,
             f64::from(preview.rect.loc.y) - f64::from(geo.y) * preview.scale,
         );
-        for element in render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
-            renderer,
-            &surface,
-            origin,
-            view.scale,
-            preview.alpha,
-            Kind::Unspecified,
-        ) {
+        for element in
+            surface_tree_bottom_to_top(renderer, &surface, origin, view.scale, preview.alpha)
+        {
             out.push(
                 smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
                     element,
@@ -7558,12 +7558,20 @@ fn previews_to_elements(
 }
 
 /// A drag's icon at the pointer, centred on it (front to back).
-fn dnd_icon_elements(
-    renderer: &mut GlesRenderer,
+fn dnd_icon_elements<R>(
+    renderer: &mut R,
     state: &State,
     view: View,
     pointer: Point<f64, Logical>,
-) -> Vec<PreviewElement> {
+) -> Vec<
+    smithay::backend::renderer::element::utils::RescaleRenderElement<
+        WaylandSurfaceRenderElement<R>,
+    >,
+>
+where
+    R: smithay::backend::renderer::Renderer + smithay::backend::renderer::ImportAll,
+    R::TextureId: Clone + 'static,
+{
     let Some(icon) = state.dnd_icon() else {
         return Vec::new();
     };
@@ -7578,24 +7586,49 @@ fn dnd_icon_elements(
         pointer.x - f64::from(size.w) / 2.0,
         pointer.y - f64::from(size.h) / 2.0,
     );
-    let elements = render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
+    // Smithay returns a surface tree front to back already.
+    render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
         renderer,
         &icon,
         origin,
         view.scale,
         1.0,
         Kind::Unspecified,
-    );
-    crate::layer::front_to_back(
-        elements
-            .into_iter()
-            .map(|e| {
-                smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
-                    e, origin, 1.0,
-                )
-            })
-            .collect(),
     )
+    .into_iter()
+    .map(|e| {
+        smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
+            e, origin, 1.0,
+        )
+    })
+    .collect()
+}
+
+/// A surface tree's elements bottom to top, for the scenes here that
+/// accumulate bottom to top before [`crate::layer::front_to_back`]:
+/// Smithay returns a tree front to back, subsurfaces above their parent
+/// first, so appended as is a parent would cover its subsurfaces.
+fn surface_tree_bottom_to_top<R>(
+    renderer: &mut R,
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    location: Point<i32, smithay::utils::Physical>,
+    scale: f64,
+    alpha: f32,
+) -> Vec<WaylandSurfaceRenderElement<R>>
+where
+    R: smithay::backend::renderer::Renderer + smithay::backend::renderer::ImportAll,
+    R::TextureId: Clone + 'static,
+{
+    let mut elements = render_elements_from_surface_tree(
+        renderer,
+        surface,
+        location,
+        scale,
+        alpha,
+        Kind::Unspecified,
+    );
+    elements.reverse();
+    elements
 }
 
 /// GNOME's switcher thumbnails (altTab.js `_createWindowClone`): each
@@ -7971,22 +8004,20 @@ fn scene_elements(
         // layers (and their popovers) go on top.
         let mut elements = Vec::new();
         for (surface, (x, y), _) in crate::layer::layer_layout(state) {
-            elements.extend(render_elements_from_surface_tree(
+            elements.extend(surface_tree_bottom_to_top(
                 renderer,
                 &surface,
                 view.physical(f64::from(x), f64::from(y)),
                 view.scale,
                 1.0,
-                Kind::Unspecified,
             ));
             for popup in crate::popup::placed_popups(&surface, (x, y).into(), false) {
-                elements.extend(render_elements_from_surface_tree(
+                elements.extend(surface_tree_bottom_to_top(
                     renderer,
                     &popup.surface,
                     view.physical(f64::from(popup.origin.x), f64::from(popup.origin.y)),
                     view.scale,
                     1.0,
-                    Kind::Unspecified,
                 ));
             }
         }
@@ -8004,22 +8035,15 @@ fn scene_elements(
                 alpha: f32| {
         let origin = view.physical(f64::from(at.x), f64::from(at.y));
         elements.extend(
-            render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
-                renderer,
-                surface,
-                origin,
-                view.scale,
-                alpha,
-                Kind::Unspecified,
-            )
-            .into_iter()
-            .map(|element| {
-                smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
-                    element,
-                    origin,
-                    (sx, 1.0),
-                )
-            }),
+            surface_tree_bottom_to_top(renderer, surface, origin, view.scale, alpha)
+                .into_iter()
+                .map(|element| {
+                    smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
+                        element,
+                        origin,
+                        (sx, 1.0),
+                    )
+                }),
         );
     };
     // Size-change snapshots with the bottom-to-top index they sit at.
@@ -8058,7 +8082,7 @@ fn scene_elements(
                     r.size.h / f64::from(buffer_size.h),
                 );
                 let origin = view.physical(r.loc.x, r.loc.y);
-                elements.extend(render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(renderer, &surface, origin, view.scale, fade, Kind::Unspecified).into_iter().map(|e| smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(e, origin, scale)));
+                elements.extend(surface_tree_bottom_to_top(renderer, &surface, origin, view.scale, fade).into_iter().map(|e| smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(e, origin, scale)));
                 owners.resize(elements.len(), Some(id));
                 continue;
             }
@@ -8081,14 +8105,7 @@ fn scene_elements(
                         frame.live.loc.y - f64::from(geo.y) * sy,
                     );
                     elements.extend(
-                        render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
-                            renderer,
-                            &surface,
-                            origin,
-                            view.scale,
-                            alpha,
-                            Kind::Unspecified,
-                        )
+                        surface_tree_bottom_to_top(renderer, &surface, origin, view.scale, alpha)
                         .into_iter()
                         .map(|element| {
                             smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
@@ -8122,7 +8139,7 @@ fn scene_elements(
                     r.size.h / f64::from(buffer_size.h),
                 );
                 let origin = view.physical(r.loc.x, r.loc.y);
-                elements.extend(render_elements_from_surface_tree::<_,WaylandSurfaceRenderElement<_>>(renderer,&surface,origin,view.scale,fade*manager.render_alpha(&window),Kind::Unspecified).into_iter().map(|e|smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(e,origin,scale)));
+                elements.extend(surface_tree_bottom_to_top(renderer,&surface,origin,view.scale,fade*manager.render_alpha(&window)).into_iter().map(|e|smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(e,origin,scale)));
                 owners.resize(elements.len(), Some(id));
                 continue;
             }
@@ -8134,7 +8151,7 @@ fn scene_elements(
                     r.loc.y - f64::from(geo.y) * frame.scale.1,
                 );
                 let alpha = frame.alpha * manager.render_alpha(&window);
-                elements.extend(render_elements_from_surface_tree::<_,WaylandSurfaceRenderElement<_>>(renderer,&surface,origin,view.scale,alpha,Kind::Unspecified).into_iter().map(|e|smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(e,origin,frame.scale)));
+                elements.extend(surface_tree_bottom_to_top(renderer,&surface,origin,view.scale,alpha).into_iter().map(|e|smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(e,origin,frame.scale)));
                 owners.resize(elements.len(), Some(id));
                 continue;
             }
@@ -9531,3 +9548,7 @@ mod power_save_frame_tests {
         assert_eq!(app.frames_done, 2);
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_surface_order_tests.rs"]
+mod surface_order_tests;
