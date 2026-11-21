@@ -48,7 +48,7 @@ tested on virtual KMS in CI; physical GPU qualification is still open.
 ## Try it
 
 - **In a virtual machine**, without installing anything but Corral, on Linux
-  or macOS with QEMU, Podman and cosign
+  or macOS with QEMU, Podman and cosign v3
   ([prerequisites](docs/install.md#test-drive-in-a-vm-one-command)):
 
   ```sh
