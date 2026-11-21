@@ -153,7 +153,7 @@ pub enum Handled {
     /// locked session (0.51). Read it back through
     /// [`ControlClient::lock_screen_shown`].
     LockScreenShown(bool),
-    /// Every active remote access grant, whole (0.53, #1162 F2): GNOME's
+    /// Every active remote access grant, whole (0.54, #1162 F2): GNOME's
     /// screen sharing and recording indicators follow it.
     RemoteAccess(Vec<tuna_shell_control::RemoteAccessHandle>),
     /// The keyboard switched Sticky or Slow Keys: save and confirm.
@@ -872,7 +872,7 @@ impl ControlClient {
     }
 
     /// The user stopped a remote access grant from the screen sharing
-    /// indicator (0.53): the compositor revokes it for good.
+    /// indicator (0.54): the compositor revokes it for good.
     pub fn stop_remote_access(
         &mut self,
         kind: tuna_shell_control::RemoteAccessKind,

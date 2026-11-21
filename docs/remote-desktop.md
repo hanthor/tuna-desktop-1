@@ -103,7 +103,7 @@ button; grd's own Stop after its EIS client left succeeds and does nothing.
 
 Indicator: a started RemoteDesktop session and its linked ScreenCast
 session are remote access grants the compositor publishes to the shell
-(wire 0.53 `RemoteAccess`), which shows GNOME 51's orange "Stop Screen
+(wire 0.54 `RemoteAccess`), which shows GNOME 51's orange "Stop Screen
 Sharing" panel button while any is active; pressing it revokes them for
 good (see [Capture admission](capture-security.md)).
 

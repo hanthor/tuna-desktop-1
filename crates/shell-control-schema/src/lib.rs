@@ -244,13 +244,13 @@ impl ProtocolVersion {
     /// InputSettings and the shell-to-compositor `BeginStartupSequence`
     /// (an app launch's startup sequence: the busy cursor until its window
     /// maps). Positional postcard peers must ship together.
-    /// `0.53` appends the active remote access grants (GNOME 51
+    /// `0.54` appends the active remote access grants (GNOME 51
     /// `status/remoteAccess.js` over mutter's `MetaRemoteAccessHandle`s):
     /// compositor-to-shell `RemoteAccess` and the shell-to-compositor
     /// `StopRemoteAccess` (#1162 F2). Positional postcard peers must ship together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 53,
+        minor: 54,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -558,7 +558,7 @@ pub enum CommandKind {
         app_id: String,
         wm_class: Option<String>,
     },
-    /// Since 0.53: the user stopped this remote access grant
+    /// Since 0.54: the user stopped this remote access grant
     /// (`meta_remote_access_handle_stop`, from GNOME 51
     /// `ScreenSharingIndicator._stopSharing`). The compositor revokes the
     /// grant permanently: its owner can use it no further and must ask
@@ -567,7 +567,7 @@ pub enum CommandKind {
     StopRemoteAccess { kind: RemoteAccessKind, id: u64 },
 }
 
-/// Since 0.53: what a remote access grant is: the subclass of mutter 51's
+/// Since 0.54: what a remote access grant is: the subclass of mutter 51's
 /// `MetaRemoteAccessHandle` its session announces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RemoteAccessKind {
@@ -582,7 +582,7 @@ pub enum RemoteAccessKind {
     InputCapture,
 }
 
-/// Since 0.53: the authenticated desktop service holding a grant.
+/// Since 0.54: the authenticated desktop service holding a grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RemoteAccessOwner {
     /// The supervised shell (GNOME Shell's in-process screen recorder).
@@ -594,7 +594,7 @@ pub enum RemoteAccessOwner {
     RemoteDesktopDaemon,
 }
 
-/// Since 0.53: what a grant reaches.
+/// Since 0.54: what a grant reaches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RemoteAccessTarget {
     /// A whole monitor's stream.
@@ -613,7 +613,7 @@ pub enum RemoteAccessTarget {
     Input,
 }
 
-/// Since 0.53: one active remote access grant (mutter 51's
+/// Since 0.54: one active remote access grant (mutter 51's
 /// `MetaRemoteAccessHandle`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteAccessHandle {
@@ -1308,11 +1308,11 @@ pub enum Message {
     /// each handshake snapshot while shown, only to peers advertising
     /// minor >= 51.
     LockScreenShown { shown: bool },
-    /// Since 0.53: every active remote access grant, whole, whenever the
+    /// Since 0.54: every active remote access grant, whole, whenever the
     /// set changes (mutter 51's remote access controller `new-handle` and
     /// each handle's `stopped`); an empty list says none is left. Sent in
     /// each handshake while any is active, only to peers advertising
-    /// minor >= 53. At most [`MAX_REMOTE_ACCESS_HANDLES`].
+    /// minor >= 54. At most [`MAX_REMOTE_ACCESS_HANDLES`].
     RemoteAccess { handles: Vec<RemoteAccessHandle> },
 }
 
@@ -2796,11 +2796,11 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_53() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 53));
-        // A 0.50 shell still negotiates; a newer minor does not.
-        assert!(ProtocolVersion::new(0, 50).is_compatible_with(&CURRENT_VERSION));
-        assert!(!ProtocolVersion::new(0, 54).is_compatible_with(&CURRENT_VERSION));
+    fn current_version_is_0_54() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 54));
+        // A 0.53 shell still negotiates; a newer minor does not.
+        assert!(ProtocolVersion::new(0, 53).is_compatible_with(&CURRENT_VERSION));
+        assert!(!ProtocolVersion::new(0, 55).is_compatible_with(&CURRENT_VERSION));
     }
 
     fn remote_access_handle(targets: Vec<RemoteAccessTarget>) -> RemoteAccessHandle {
@@ -2889,7 +2889,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_remote_access_follows_declare_bus_name() {
+    fn stop_remote_access_follows_begin_startup_sequence() {
         let tag = |bytes: &[u8]| bytes[0];
         let mut buffer = [0_u8; 64];
         let respond = tag(postcard::to_slice(
@@ -2908,6 +2908,15 @@ mod tests {
         )
         .unwrap());
         assert_eq!(declare, respond + 1);
+        let startup = tag(postcard::to_slice(
+            &CommandKind::BeginStartupSequence {
+                app_id: "org.gnome.TextEditor".into(),
+                wm_class: None,
+            },
+            &mut buffer,
+        )
+        .unwrap());
+        assert_eq!(startup, declare + 1);
         for kind in [
             RemoteAccessKind::ScreenCast,
             RemoteAccessKind::RemoteDesktop,
@@ -2916,7 +2925,7 @@ mod tests {
             let stop = CommandKind::StopRemoteAccess { kind, id: 12 };
             assert_eq!(
                 tag(postcard::to_slice(&stop, &mut buffer).unwrap()),
-                declare + 1
+                startup + 1
             );
             let command = Message::Command { id: 5, kind: stop };
             assert_eq!(decode_frame(&encode_frame(&command)).unwrap(), command);

@@ -729,12 +729,12 @@ impl<'a> Session<'a> {
     }
 
     /// Send every active remote access grant (#1162 F2). Peers older than
-    /// 0.53 cannot decode it and receive nothing.
+    /// 0.54 cannot decode it and receive nothing.
     pub fn send_remote_access(
         &mut self,
         handles: &[tuna_shell_control::RemoteAccessHandle],
     ) -> Result<(), ControlError> {
-        if self.peer_minor < 53 {
+        if self.peer_minor < 54 {
             return Ok(());
         }
         self.conn.write_frame(&Message::RemoteAccess {
@@ -1297,10 +1297,10 @@ impl<'a> Session<'a> {
                 id,
                 kind: CommandKind::StopRemoteAccess { kind, id: grant },
             } => {
-                if self.peer_minor < 53 {
+                if self.peer_minor < 54 {
                     self.conn.write_frame(&Message::Error {
                         kind: ErrorKind::UnknownCommand,
-                        message: "remote access stops require negotiated minor 53".into(),
+                        message: "remote access stops require negotiated minor 54".into(),
                     })?;
                     return Ok(Handled::ErrorSent {
                         kind: ErrorKind::UnknownCommand,

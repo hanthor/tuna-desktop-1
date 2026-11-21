@@ -75,7 +75,7 @@ before decoding.
   `CommandKind::BeginStartupSequence { app_id, wm_class }` (peers >=53
   only): an app launch's startup sequence, the busy cursor until a window
   of the app maps or 15 s pass. Strings are bounded by `MAX_TITLE_LEN`.
-- Remote access (0.53): `Message::RemoteAccess { handles }` (peers >=53
+- Remote access (0.54): `Message::RemoteAccess { handles }` (peers >=54
   only) carries every active grant whole whenever the set changes, as
   `RemoteAccessHandle { kind, id, owner, owner_name, recording, targets }`
   (mutter's `MetaRemoteAccessHandle`: `RemoteAccessKind::ScreenCast`,

@@ -1,6 +1,6 @@
 //! GNOME 51's remote access indicators (`js/ui/status/remoteAccess.js`,
 //! #1162 F2) over the compositor's active grants (mutter's
-//! `MetaRemoteAccessHandle`s, wire 0.53 `RemoteAccess`):
+//! `MetaRemoteAccessHandle`s, wire 0.54 `RemoteAccess`):
 //!
 //! - `ScreenSharingIndicator`: an orange panel button ("Stop Screen
 //!   Sharing", `screen-shared-symbolic` and `screencast-stop-symbolic`)

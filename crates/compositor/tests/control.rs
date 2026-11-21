@@ -1056,7 +1056,7 @@ fn portal_share(id: u64) -> tuna_shell_control::RemoteAccessHandle {
 
 /// #1162 F2: the active remote access grants reach every live shell whole
 /// whenever they change (an empty list once the last ends), a shell that
-/// (re)connects gets them with its handshake, and a peer older than 0.53
+/// (re)connects gets them with its handshake, and a peer older than 0.54
 /// gets nothing.
 #[test]
 fn hub_publishes_remote_access_grants_and_hands_newcomers_the_list() {
@@ -1110,7 +1110,7 @@ fn hub_publishes_remote_access_grants_and_hands_newcomers_the_list() {
     client_write(
         &mut old,
         &Message::Hello {
-            version: ProtocolVersion::new(CURRENT_VERSION.major, 50),
+            version: ProtocolVersion::new(CURRENT_VERSION.major, 53),
         },
     );
     let mut session = Session::handshake(conn, &StateModel::new()).unwrap();
@@ -1122,7 +1122,7 @@ fn hub_publishes_remote_access_grants_and_hands_newcomers_the_list() {
 }
 
 /// #1162 F2: the indicator's Stop reaches the runtime for a published
-/// grant only, and needs a 0.53 peer.
+/// grant only, and needs a 0.54 peer.
 #[test]
 fn remote_access_stops_reach_the_hub_outcome_for_published_grants() {
     use tuna_shell_control::RemoteAccessKind;
@@ -1170,7 +1170,7 @@ fn remote_access_stops_reach_the_hub_outcome_for_published_grants() {
     client_write(
         &mut old,
         &Message::Hello {
-            version: ProtocolVersion::new(CURRENT_VERSION.major, 50),
+            version: ProtocolVersion::new(CURRENT_VERSION.major, 53),
         },
     );
     let mut session = Session::handshake(conn, &model).unwrap();
