@@ -43,6 +43,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -226,8 +227,9 @@ def run(args):
         raise SystemExit("tuna-drm-dual: the artifacts directory must be fresh and empty")
     out.mkdir(parents=True, exist_ok=True)
     assertions = Path(args.assertions).resolve() if args.assertions else out / "assertions.txt"
-    private = out / "private"
-    private.mkdir(mode=0o700)
+    # The runtime directory holds sockets, which an artifact upload cannot
+    # store: keep it out of the artifacts, as tuna-drm-smoke does.
+    private = Path(tempfile.mkdtemp(prefix="tuna-drm-dual-"))
     os.chmod(private, 0o700)
     config = out / "config"
     config.mkdir()
@@ -249,7 +251,7 @@ def run(args):
 
     env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET")}
     env.update(XDG_RUNTIME_DIR=str(private), XDG_CONFIG_HOME=str(config),
-               XDG_STATE_HOME=str(private / "state"), XDG_DATA_HOME=str(private / "data"),
+               XDG_STATE_HOME=str(out / "state"), XDG_DATA_HOME=str(out / "data"),
                GSK_RENDERER="cairo", ADW_DISABLE_PORTAL="1", LIBSEAT_BACKEND="seatd")
     # Ubuntu's gsettings-desktop-schemas has no mutter schema (dynamic and
     # primary-only workspaces, edge tiling): GNOME 51's, as drm-smoke does.
@@ -346,9 +348,21 @@ def run(args):
                  lambda: any(layer.get("namespace") == "tuna-panel" for layer in state().get("layers", [])), 60)
         wait_for(f"{name}: DisplayConfig on the session bus",
                  lambda: "serving org.gnome.Mutter.DisplayConfig" in current["log"].read_text(), 30)
-        wait_for(f"{name}: libinput adds the uinput mouse and keyboard",
-                 lambda: all(any(n in json.dumps(d) for d in state().get("input_devices", []))
-                             for n in (MOUSE, KEYBOARD)), 15)
+        # libinput queues the devices present at startup in
+        # udev_assign_seat, but the compositor only drains libinput when its
+        # fd turns readable: until some device produces an event (or one is
+        # hotplugged) no device is added, the host's included (drm-smoke's
+        # own sessions show input_devices [] throughout). Mouse motion that
+        # nets to zero wakes it, as a user touching the mouse does.
+        def devices_added():
+            if all(any(n in json.dumps(d) for d in state().get("input_devices", []))
+                   for n in (MOUSE, KEYBOARD)):
+                return True
+            send("move 1 0")
+            send("move -1 0")
+            time.sleep(0.4)
+            return False
+        wait_for(f"{name}: libinput adds the uinput mouse and keyboard", devices_added, 15)
 
     def stop_session():
         nonlocal compositor
@@ -748,6 +762,7 @@ def run(args):
             vkms.destroy()
         except subprocess.CalledProcessError as error:
             print(f"tuna-drm-dual: vkms teardown: {error}", file=sys.stderr)
+        shutil.rmtree(private, ignore_errors=True)
     if not recorded or any(" fail " in line for line in recorded):
         raise SystemExit(f"tuna-drm-dual: failed; evidence in {out}")
     print(f"tuna-drm-dual: OK, artifacts in {out}")
