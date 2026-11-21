@@ -328,7 +328,8 @@ pods never mount it and cannot reach the API to read it.
 `/home/runner/work` (including Cargo targets and rust-cache restore),
 `/var/lib/containers`, and `/home/runner/.local/share/containers` are three
 fresh generic ephemeral volumes per runner, requesting 40 / 10 / 10 GiB.
-`/dev/shm` remains a 2 GiB memory emptyDir. All 14 runners request 840 GiB
+`/dev/shm` remains a 2 GiB memory emptyDir. At `maxRunners` (6 + 2) the
+8 runners request 480 GiB
 on the 900 GiB ext4 LV `vg1/tuna_ci_scratch`, mounted at
 `/var/lib/tuna-ci-scratch` on nvme1n1; nvme0n1 still holds the unchanged
 kubelet/containerd roots and unrelated workloads.
@@ -581,8 +582,9 @@ page), then run `.github/runners/deploy`: it upgrades the controller first.
 ## Scale
 
 `minRunners` (idle, pre-registered pods) and `maxRunners` live in the values
-files: 24.04 is 1–10, 26.04 is 0–4. Keep `maxRunners` of both sets within the
-quota's 14 pods; the scheduler can still withhold slots for VM reservations.
+files: 24.04 is 1–6, 26.04 is 0–2. Keep `maxRunners` of both sets within the
+quota's 14 pods and the limit quota's 276 GiB (each runner at its 24 GiB
+limit); the scheduler can still withhold slots for VM reservations.
 Change the quota in `cluster.yaml` only after checking punjab and KubeVirt
 (`kubectl describe node karnataka`). Apply guard rails with
 `kubectl --context karnataka-k3s apply -f .github/runners/cluster.yaml`, then
