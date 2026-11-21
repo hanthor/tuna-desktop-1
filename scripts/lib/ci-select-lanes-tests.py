@@ -75,6 +75,9 @@ class Selection(unittest.TestCase):
         self.assertEqual(pr("scripts/lib/vm_desktop_gates.py"), ["arch-package", "marlin-vm"])
         self.assertEqual(pr("scripts/lib/tuna-tray-item-stub.py"),
                          ["journey", "gtk-shell", "arch-package", "marlin-vm"])
+        # The guest's /usr/libexec/tuna-datetime-proof (G-DATETIME-*).
+        self.assertEqual(pr("scripts/lib/tuna-datetime-proof.py"),
+                         ["arch-package", "marlin-image", "marlin-vm"])
 
 
     def test_transition_policy_and_suite_always_run_journey(self):
