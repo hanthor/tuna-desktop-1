@@ -12,6 +12,8 @@
 #   keyboard and X11 tray gates only.
 #   --x11-iconic-only runs panel readiness and G-X11-ICONIC (a minimized
 #   X11 window is IconicState with _NET_WM_STATE_HIDDEN, #1078) only.
+#   --subsurface-only runs panel readiness and G-SUBSURFACE-STACKING (a
+#   window's subsurfaces stack where the client placed them) only.
 #   --grid-hover-only runs panel readiness, G-GRID-HOVER, G-GRID-REORDER,
 #   G-GRID-ON-DEMAND and G-SHELL-STABLE only.
 #   --keyboard-routes-only runs panel readiness and the P-A11Y-02 keyboard
@@ -27,6 +29,10 @@
 #   --window-leak-only runs panel readiness, G-WINDOW-LEAK (100 libadwaita
 #   windows opened and closed leave the compositor's memory within a fixed
 #   bound of its warm state, #1088) and G-SHELL-STABLE only.
+#   --dnd-overview-only runs panel readiness, G-DND-OVERVIEW (real GTK drags
+#   open the overview from the hot corner and the Activities button, activate
+#   a window preview after 750 ms, and return to the starting workspace on
+#   cancel and drop, #1189) and G-SHELL-STABLE only.
 #   --lock-menu-only runs panel readiness, G-LOCK-WITH-MENU-OPEN and
 #   G-SHELL-STABLE only (needs pam_wrapper).
 #   --grid-cancel-only --grid-cancel-admission FILE is an exact CI comparison slice.
@@ -121,6 +127,8 @@
 #                    silenced by enable-sound-alerts or event-sounds off
 #   G-NOTIFY-RESTORE re-enabling a disabled app brings what it sent while
 #                    disabled back to the list, with no banner
+#   G-NOTIFY-EXPANDED banners open collapsed unless critical or
+#                    force-expanded; the pointer expands and holds them
 #   G-QS-SERVICES    quick settings shows the tiles of the services on
 #                    the bus (stub daemons on a private system bus, #55)
 #   G-QS-WIFI-MENU   the Wi-Fi menu scans, lists NetworkManager's networks
@@ -172,6 +180,9 @@
 #   G-X11-INPUT-FOCUS the X server's input focus is the focused X11 window
 #   G-X11-ICONIC a minimized X11 window is WM_STATE IconicState with
 #                  _NET_WM_STATE_HIDDEN, and NormalState without once restored
+#   G-SUBSURFACE-STACKING a subsurface placed above its window shows over
+#                  it and one placed below shows under it, on the desktop,
+#                  in the overview's preview and in the window's screenshot
 #   G-SETTINGS-CLOCK GNOME's clock-show-seconds key changes the panel clock
 #   G-SETTINGS-INPUT GNOME's input sources set the keymap (Super+Space
 #                  switches), repeat-interval the repeat rate, and
@@ -415,6 +426,18 @@
 #                  overview, and a thumbnail click switches workspace
 #   G-OV-DND       dragging a window's preview onto the next workspace's
 #                  card moves the window there, the overview staying open
+#   G-DND-HOT-CORNER a real GTK drag (--dnd-overview-only, #1189) held over
+#                  the hot corner opens the overview and keeps the drag
+#   G-DND-WINDOW-SWITCH the drag resting 750 ms (GNOME's
+#                  DND_WINDOW_SWITCH_TIMEOUT) on a window preview activates
+#                  and raises that window, where the drop lands
+#   G-DND-ACTIVITIES the drag resting 250 ms on the Activities button
+#                  opens the overview
+#   G-DND-CANCEL-RETURNS / G-DND-DROP-RETURNS a workspace switched by
+#                  hovering a thumbnail returns to the starting workspace,
+#                  the overview closing, when the drag is cancelled
+#                  (Escape) or dropped
+#   G-DND-OVERVIEW all of the above
 #   G-SUSPEND-LOCK Suspend asks logind, and its PrepareForSleep locks
 #                  the session before sleep
 #   G-UNLOCK       GNOME's lock screen: a wrong password is refused and
@@ -537,11 +560,13 @@ A11Y_FOCUS_ONLY=0
 NOTIFY_LOCK_ONLY=0
 TRAY_ONLY=0
 X11_ICONIC_ONLY=0
+SUBSURFACE_ONLY=0
 GRID_HOVER_ONLY=0
 KEYBOARD_ROUTES_ONLY=0
 DATEMENU_ONLY=0
 SEARCH_LEAK_ONLY=0
 WINDOW_LEAK_ONLY=0
+DND_OVERVIEW_ONLY=0
 LOCK_MENU_ONLY=0
 GRID_CANCEL_ONLY=0
 GRID_CANCEL_OLD_NEGATIVE=0
@@ -588,7 +613,9 @@ while [ $# -gt 0 ]; do
         --search-leak-only) SEARCH_LEAK_ONLY=1; only_mode "$1" no-media-source no-examples; shift ;;
         --window-leak-only) WINDOW_LEAK_ONLY=1; only_mode "$1" no-media-source no-examples; shift ;;
         --lock-menu-only) LOCK_MENU_ONLY=1; only_mode "$1" no-media-source no-examples; shift ;;
+        --dnd-overview-only) DND_OVERVIEW_ONLY=1; only_mode "$1" no-media-source no-examples; shift ;;
         --x11-iconic-only) X11_ICONIC_ONLY=1; only_mode "$1"; shift ;;
+        --subsurface-only) SUBSURFACE_ONLY=1; only_mode "$1" source-build no-media-source no-examples no-camera-policy; shift ;;
         --display) DISPLAY_ARG="$2"; shift 2 ;;
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
         --help|-h) sed -n '2,/^# end of --help$/{/^# end of --help$/!p;}' "$0"; exit 0 ;;
@@ -1074,6 +1101,7 @@ pass G-GRID-ON-DEMAND "no grid tiles on the window picker or after close; a held
 . "$ROOT/scripts/lib/tuna-datemenu-proof.sh"
 . "$ROOT/scripts/lib/tuna-search-leak-proof.sh"
 . "$ROOT/scripts/lib/tuna-window-leak-proof.sh"
+. "$ROOT/scripts/lib/tuna-dnd-overview-proof.sh"
 
 # Compositor-side state (overview, focus, previews) for app stages.
 CSTATE="$ARTIFACTS/compositor-state.json"
@@ -1526,6 +1554,9 @@ if [ "$INSTALLED_PACKAGE" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ]; then
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example icon-probe
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example shortcut-inhibit-client
     fi
+    if [ "$SUBSURFACE_ONLY" = 1 ]; then
+        cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example tuna-subsurface-client
+    fi
 fi
 # The compositor and the shell share this log from one file description.
 # Truncate first (a fresh log each run, as before), then append: O_APPEND
@@ -1885,6 +1916,96 @@ x11_iconic_gate() {
     pass G-X11-ICONIC "Super+H, Hide and the client's own iconify make an X11 window IconicState with _NET_WM_STATE_HIDDEN; the overview and Alt+Tab make it NormalState without"
 }
 
+# G-SUBSURFACE-STACKING: a window's subsurfaces stack where the client
+# placed them (wl_subsurface.place_above / place_below), as Mutter draws
+# them. tuna-subsurface-client's red 400x300 window has a green
+# subsurface above it at (50, 100) and a blue one below it at (300, 100),
+# half past its right edge: the parent never covers the green one and
+# always covers the blue one, which shows only past the parent's edge.
+# Checked in the three scenes that draw a window's surface tree: the
+# desktop, the overview's preview and the window's own screenshot
+# (Alt+Print, ScreenshotWindow). Each sampled pixel is kept in
+# subsurface-pixels.txt; every scene is sampled before the gate judges.
+SUBSURFACE_RED="200 40 40"
+SUBSURFACE_GREEN="40 200 40"
+SUBSURFACE_BLUE="40 40 200"
+# subsurface_sample SCENE PNG X Y WANT NAME: the pixel at (X, Y) of PNG is
+# within 30 of WANT ("r g b") in every channel.
+subsurface_sample() {
+    sub_got="$(px "$2" "$3" "$4")"
+    echo "$1 $6 ($3,$4) want $5 got $sub_got" >>"$ARTIFACTS/subsurface-pixels.txt"
+    if ! echo "$sub_got" | awk -v want="$5" '
+        BEGIN { split(want, w, " ") }
+        { for (i = 1; i <= 3; i++) { d = $i - w[i]; if (d < 0) d = -d; if (d > 30) exit 1 }; ok = 1 }
+        END { exit !ok }'; then
+        SUBSURFACE_BAD="${SUBSURFACE_BAD:+$SUBSURFACE_BAD; }$1: $6 shows $sub_got, not $5"
+    fi
+}
+# subsurface_scene SCENE PNG X Y W H: the window's geometry (400x300 in
+# the client) drawn at (X, Y) at W x H in PNG.
+subsurface_scene() {
+    sub_at() { echo "$(($3 + $1 * $5 / 400)) $(($4 + $2 * $6 / 300))"; }
+    # shellcheck disable=SC2046
+    subsurface_sample "$1" "$2" $(sub_at 200 50 "$3" "$4" "$5" "$6") "$SUBSURFACE_RED" "the parent"
+    # shellcheck disable=SC2046
+    subsurface_sample "$1" "$2" $(sub_at 100 150 "$3" "$4" "$5" "$6") "$SUBSURFACE_GREEN" "the subsurface placed above"
+    # shellcheck disable=SC2046
+    subsurface_sample "$1" "$2" $(sub_at 350 150 "$3" "$4" "$5" "$6") "$SUBSURFACE_RED" "the parent over the subsurface placed below"
+}
+subsurface_stacking_gate() {
+    SUBSURFACE_BAD=""
+    : >"$ARTIFACTS/subsurface-pixels.txt"
+    WAYLAND_DISPLAY="$SOCKET_NAME" "$COMPANIONS/tuna-subsurface-client" >"$ARTIFACTS/subsurface-client.log" 2>&1 &
+    SUBSURFACE_PID=$!
+    cstate 'any(.windows[]; .app_id == "tuna-subsurface-proof")' "subsurface window" ||
+        fail G-SUBSURFACE-STACKING "the subsurface client's window never mapped"
+    sub_id="$(jq -r '.windows[] | select(.app_id == "tuna-subsurface-proof") | .id' "$CSTATE")"
+    cstate ".focused == $sub_id" "subsurface window focused" ||
+        fail G-SUBSURFACE-STACKING "the subsurface client's window never took focus"
+    # The open animation ends; the pointer leaves the window, away from
+    # the hot corner.
+    xdotool mousemove --window "$WID" $((WIDTH - 20)) $((HEIGHT - 20))
+    sleep 1
+    read -r sx sy sw sh <<EOF
+$(jq -r '.windows[] | select(.app_id == "tuna-subsurface-proof") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE")
+EOF
+    [ "$sw,$sh" = "400,300" ] || fail G-SUBSURFACE-STACKING "the window is ${sw}x$sh, not the client's 400x300"
+    scrot -o "$ARTIFACTS/subsurface-desktop.png" >/dev/null
+    subsurface_scene desktop "$ARTIFACTS/subsurface-desktop.png" "$sx" "$sy" 400 300
+    # The subsurface below is drawn: past the parent's right edge it shows.
+    subsurface_sample desktop "$ARTIFACTS/subsurface-desktop.png" $((sx + 425)) $((sy + 150)) \
+        "$SUBSURFACE_BLUE" "the subsurface placed below, past the parent's edge"
+
+    xdotool key Super_L
+    cstate ".overview_open and .overview_progress == 1 and any(.previews[]; .id == $sub_id)" "subsurface preview" ||
+        fail G-SUBSURFACE-STACKING "the overview shows no preview of the window"
+    sleep 1
+    read -r ox oy ow oh <<EOF
+$(jq -r ".previews[] | select(.id == $sub_id) | .rect | map(floor) | \"\(.[0]) \(.[1]) \(.[2]) \(.[3])\"" "$CSTATE")
+EOF
+    scrot -o "$ARTIFACTS/subsurface-overview.png" >/dev/null
+    subsurface_scene overview "$ARTIFACTS/subsurface-overview.png" "$ox" "$oy" "$ow" "$oh"
+    xdotool key Escape
+    cstate "(.overview_open | not) and .overview_progress == 0 and .focused == $sub_id" "subsurface overview closed" ||
+        fail G-SUBSURFACE-STACKING "Escape did not close the overview back to the window"
+
+    touch "$ARTIFACTS/subsurface-before-capture"
+    xdotool key alt+Print
+    end=$(($(date +%s) + 15))
+    until [ -n "$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' -newer "$ARTIFACTS/subsurface-before-capture" 2>/dev/null)" ] ||
+        [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+    sub_shot="$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' -newer "$ARTIFACTS/subsurface-before-capture" 2>/dev/null | head -1)"
+    [ -n "$sub_shot" ] || fail G-SUBSURFACE-STACKING "Alt+Print saved no window screenshot"
+    cp "$sub_shot" "$ARTIFACTS/subsurface-window-capture.png"
+    sub_dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$sub_shot")"
+    [ "$sub_dims" = "400,300" ] || fail G-SUBSURFACE-STACKING "the window screenshot is $sub_dims, not 400,300"
+    subsurface_scene window-capture "$ARTIFACTS/subsurface-window-capture.png" 0 0 400 300
+
+    kill "$SUBSURFACE_PID" 2>/dev/null || true
+    [ -z "$SUBSURFACE_BAD" ] || fail G-SUBSURFACE-STACKING "$SUBSURFACE_BAD"
+    pass G-SUBSURFACE-STACKING "a subsurface placed above its window shows over it and one placed below shows under it (past its edge only) on the desktop, in the overview preview and in the window screenshot"
+}
+
 # G-LOCK-WITH-MENU-OPEN: GNOME's lock dismisses the open shell menu and
 # its grab, and the lock screen has the keyboard at once. Each menu is
 # opened from its keybinding, Super+L locks over it, and the password
@@ -1992,6 +2113,15 @@ if [ "$X11_ICONIC_ONLY" = 1 ]; then
     grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
     exit 0
 fi
+if [ "$SUBSURFACE_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "subsurface desktop ready" ||
+        fail G-SUBSURFACE-STACKING "desktop never became ready"
+    # Let the startup cover settle before the first window.
+    sleep 3
+    subsurface_stacking_gate
+    grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
+    exit 0
+fi
 if [ "$KEYBOARD_ROUTES_ONLY" = 1 ]; then
     cstate '.active_workspace != null and .locked == false' "keyboard routes desktop ready" ||
         fail G-PANEL-MENU-KEYS "desktop never became ready"
@@ -2007,6 +2137,16 @@ if [ "$SEARCH_LEAK_ONLY" = 1 ]; then
     # Let the startup cover settle before the first overview.
     sleep 3
     search_leak_proof
+    grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
+    shell_stable_gate
+    exit 0
+fi
+if [ "$DND_OVERVIEW_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "dnd overview desktop ready" ||
+        fail G-DND-OVERVIEW "desktop never became ready"
+    # Let the startup cover settle before the first window.
+    sleep 3
+    dnd_overview_proof
     grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
     shell_stable_gate
     exit 0
@@ -3041,7 +3181,8 @@ scrot "$ARTIFACTS/10-search.png" >/dev/null
 # waits for that turn's frame to be drawn, and within 1 s after one it
 # starts once the turn is 1 s old.
 if [ "$GRID_CANCEL_OLD_NEGATIVE" != 1 ]; then
-    minute_ms() { echo $(($(date +%s%3N) % 60000)); }
+    # Not %3N: uutils date (Ubuntu 26.04's) ignores its width.
+    minute_ms() { echo $(($(date +%s%N) / 1000000 % 60000)); }
     sleep_ms() { sleep "$(printf '%d.%03d' $(($1 / 1000)) $(($1 % 1000)))"; }
     search_still_ms="$(minute_ms)"
     if [ "$search_still_ms" -ge 57000 ]; then
@@ -7507,6 +7648,9 @@ wb_a11y_dump() {
 # press a banner that had already expired, so one keep-alive move per short
 # step keeps the user active and the press within about a second of the
 # banner showing. Waits 1.5 s after the press, like --press alone.
+# Normal/high notices open collapsed, with their action row hidden. Once
+# the owned title is showing, use GNOME's Super+N to expand the current
+# banner before the same-pass title/action press below.
 wb_press_banner() {
     wbpb_gate="$1" wbpb_out="$2" wbpb_title="$3" wbpb_button="$4"
     wbpb_until=$(($(date +%s) + $5)) wbpb_step=0
@@ -7515,6 +7659,11 @@ wb_press_banner() {
             fail "$wbpb_gate" "keep-alive failed"
         wbpb_step=$((wbpb_step + 1))
         sleep 0.5
+        if wb_a11y_dump "$wbpb_out" 20 >/dev/null 2>&1 &&
+            jq -e --arg title "$wbpb_title" 'any(.[]; .showing and .name == $title)' "$wbpb_out" >/dev/null; then
+            xdotool key super+n || fail "$wbpb_gate" "could not expand the due banner"
+            sleep 0.3
+        fi
         if wb_a11y_dump "$wbpb_out" 20 --when-showing "$wbpb_title" --press "$wbpb_button" >/dev/null 2>&1; then
             WB_PRESS_EPOCH="$(date +%s)"
             sleep 1.5
@@ -10875,6 +11024,12 @@ window_menu
 xdotool key super+Page_Up
 cstate ".active_workspace == $home_ws and .focused == $moved" "home" ||
     fail G-OV-DND "could not return the window home"
+sleep 1
+
+# GNOME's XDND handling of the overview (#1189): real GTK drags open it from
+# the hot corner and the Activities button, activate a window preview after
+# 750 ms, and return to the starting workspace on cancel and drop.
+dnd_overview_proof
 sleep 1
 
 # Direct callers may not bypass capture consent by calling Shell interfaces.
