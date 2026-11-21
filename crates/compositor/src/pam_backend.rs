@@ -707,7 +707,8 @@ fn run_job(mut job: Job, factory: &Factory, shutdown: &AtomicBool, state: &Atomi
 /// [`run_job`] does. Only `VerificationComplete` for this service, timely
 /// and uncancelled, authenticates. Once this thread stops reading the
 /// service (result, cancel, deadline, channel loss) nothing GDM sends can
-/// grant: the attempt is retired after GDM's `Cancel`, bounded.
+/// grant: an abandoned attempt retires as soon as GDM's `Cancel` returned
+/// (bounded), so it has no quarantined `Pending` phase like a helper's.
 fn run_gdm_job(
     mut job: Job,
     mut conversation: crate::gdm_reauth::Conversation,
@@ -778,7 +779,7 @@ fn run_gdm_job(
     };
     drop(secret);
     let Some(finish) = finish else {
-        let _ = job.reply.send(Reply::Pending);
+        // Nothing outlives this: no helper process waits for retirement.
         conversation.cancel();
         drop(conversation);
         state.store(FREE, Ordering::Release);
