@@ -200,6 +200,9 @@ jobs:
       - run: python3 scripts/tests/test_core_apps_autotz.py
       - run: python3 scripts/tests/test_core_apps_legs.py
       - run: python3 scripts/tests/test_geoclue_agent_policy.py
+      # The native-desktop driver's readiness verdict and late child
+      # retirement under a fake guest and clock (#1013).
+      - run: python3 scripts/tests/test_vm_native_desktop.py
       - run: python3 scripts/tests/test_vm_reference_login.py
       - run: python3 scripts/tests/test_gnome_reference_guest.py
       - run: python3 scripts/tests/test_native_switcher_reference.py

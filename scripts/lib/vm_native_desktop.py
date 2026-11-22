@@ -97,12 +97,20 @@ class NativeDesktop:
         if previous is not None:
             deadline = min(deadline, previous)
         self._deadline = deadline
-        observed = None
+        observed = late = None
         last_error = None
         try:
             while time.monotonic() < deadline:
                 try:
                     observed = read()
+                except TimeoutError as error:
+                    # A read the readiness deadline cut short is that deadline's
+                    # verdict, once its guest child is retired. Timeouts with
+                    # budget left, or with an unretired child, stay loud (#1013).
+                    if time.monotonic() < deadline or self._uncertain is not None:
+                        raise
+                    late = error
+                    break
                 except Exception as error:
                     # One observation can fail while its subject churns
                     # (an a11y re-render mid-walk, a bus re-registration):
@@ -120,9 +128,14 @@ class NativeDesktop:
                     self.retain(label, {'observed': observed, 'readiness_timeout_sec': timeout})
                     return observed
                 time.sleep(min(0.15, max(0, deadline - time.monotonic())))
-            self.retain('failed-' + label, {'last_observation': observed,
-                                           'last_read_error': None if last_error is None else repr(last_error),
-                                           'readiness_timeout_sec': timeout})
+            failure = {'last_observation': observed, 'readiness_timeout_sec': timeout}
+            if late is not None:
+                failure['late_observation_error'] = str(late)[:2000]
+            if last_error is not None:
+                failure['last_read_error'] = repr(last_error)
+            self.retain('failed-' + label, failure)
+            if late is not None:
+                raise TimeoutError('actual readiness absolute deadline expired: ' + label) from late
             if last_error is None:
                 raise TimeoutError('actual readiness absolute deadline expired: ' + label)
             raise TimeoutError('actual readiness absolute deadline expired: ' + label
