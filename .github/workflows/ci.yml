@@ -182,6 +182,7 @@ jobs:
       # retirement under a fake guest and clock (#1013).
       - run: python3 scripts/tests/test_vm_native_desktop.py
       - run: python3 scripts/tests/test_vm_reference_login.py
+      - run: python3 scripts/tests/test_vm_unlock_wake.py
       - run: python3 scripts/tests/test_gnome_reference_guest.py
       - run: python3 scripts/tests/test_native_switcher_reference.py
       - run: python3 scripts/tests/test_overview_recording.py
