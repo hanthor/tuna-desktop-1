@@ -136,9 +136,12 @@ am_overview_close() {
     sleep 0.5
 }
 
-# Right-click the point "$@" (output coordinates).
+# Right-click the point in $1 ("x y" output coordinates).
 am_right_click() {
-    xdotool mousemove --window "$WID" "$1" "$2"
+    read -r am_click_x am_click_y <<EOF
+$1
+EOF
+    xdotool mousemove --window "$WID" "$am_click_x" "$am_click_y"
     sleep 0.4
     xdotool click 3
 }
@@ -211,8 +214,7 @@ app_menu_proof() {
     am_dump am-dash-closed
     am_point="$(am_dash_pt "$ARTIFACTS/am-dash-closed.json" "AAA Menu Probe")" ||
         fail G-APP-MENU "the running app has no dash icon"
-    # shellcheck disable=SC2086
-    am_right_click $am_point
+    am_right_click "$am_point"
     am_wait_item am-menu-dash Quit ||
         fail G-APP-MENU "a right click on the dash icon opened no menu"
     scrot "$ARTIFACTS/am-menu-dash.png" >/dev/null
@@ -230,8 +232,7 @@ app_menu_proof() {
         fail G-APP-MENU "Escape closed the overview with the menu instead of the menu alone"
 
     # --- New Window ---
-    # shellcheck disable=SC2086
-    am_right_click $am_point
+    am_right_click "$am_point"
     am_wait_item am-menu-new "New Window" || fail G-APP-MENU "the menu did not open again"
     am_press am-pressed-new "New Window"
     cstate "([.windows[] | select(.app_id == \"$AM_APP\")] | length) == 2 and (.overview_open | not)" "second window" 20 ||
@@ -243,8 +244,7 @@ app_menu_proof() {
     am_dump am-dash-two
     am_point="$(am_dash_pt "$ARTIFACTS/am-dash-two.json" "AAA Menu Probe")" ||
         fail G-APP-MENU "the running app lost its dash icon"
-    # shellcheck disable=SC2086
-    am_right_click $am_point
+    am_right_click "$am_point"
     am_wait_item am-menu-two Quit || fail G-APP-MENU "the menu did not open (two windows)"
     am_windows_listed="$(jq -r '[.[] | select(.role == "menu item" and .showing and (.name | startswith("Menu ")))] | length' "$ARTIFACTS/am-menu-two.json")"
     [ "$am_windows_listed" = 2 ] ||
@@ -256,8 +256,7 @@ app_menu_proof() {
     # --- the app's own desktop action ---
     rm -f "$ARTIFACTS/am-private"
     am_overview_open
-    # shellcheck disable=SC2086
-    am_right_click $am_point
+    am_right_click "$am_point"
     am_wait_item am-menu-action "New Private Window" || fail G-APP-MENU "the menu did not open (desktop action)"
     am_press am-pressed-action "New Private Window"
     am_try=0
@@ -266,8 +265,7 @@ app_menu_proof() {
 
     # --- Pin to Dash, then Unpin, each written to favorite-apps ---
     am_overview_open
-    # shellcheck disable=SC2086
-    am_right_click $am_point
+    am_right_click "$am_point"
     am_wait_item am-menu-pin "Pin to Dash" || fail G-APP-MENU "the menu did not open (pin)"
     am_press am-pressed-pin "Pin to Dash"
     am_wait_favorites "['$AM_APP.desktop']" ||
@@ -280,8 +278,7 @@ app_menu_proof() {
     am_dump am-dash-pinned
     am_point="$(am_dash_pt "$ARTIFACTS/am-dash-pinned.json" "AAA Menu Probe")" ||
         fail G-APP-MENU "the pinned app has no dash icon"
-    # shellcheck disable=SC2086
-    am_right_click $am_point
+    am_right_click "$am_point"
     am_wait_item am-menu-unpin "Unpin" || fail G-APP-MENU "a pinned app's menu offers no Unpin"
     am_has_item "$ARTIFACTS/am-menu-unpin.json" "Pin to Dash" &&
         fail G-APP-MENU "a pinned app's menu still offers Pin to Dash"
@@ -304,8 +301,7 @@ EOF
     until grep -q ready "$ARTIFACTS/am-software-stub.log" 2>/dev/null || [ "$am_try" -gt 25 ]; do am_try=$((am_try + 1)); sleep 0.4; done
     grep -q ready "$ARTIFACTS/am-software-stub.log" || fail G-APP-MENU "the GNOME Software stub did not start"
     sleep 1.5
-    # shellcheck disable=SC2086
-    am_right_click $am_point
+    am_right_click "$am_point"
     am_wait_item am-menu-details "App Details" || fail G-APP-MENU "installing GNOME Software added no App Details row"
     am_second="$(am_items "$ARTIFACTS/am-menu-details.json" | cut -d, -f2)"
     [ "$(am_items "$ARTIFACTS/am-menu-details.json")" = "Menu 1,$am_second,New Window,New Private Window,Pin to Dash,App Details,Quit" ] ||
@@ -320,8 +316,7 @@ EOF
 
     # --- Quit closes every window of the app ---
     am_overview_open
-    # shellcheck disable=SC2086
-    am_right_click $am_point
+    am_right_click "$am_point"
     am_wait_item am-menu-quit Quit || fail G-APP-MENU "the menu did not open (quit)"
     am_press am-pressed-quit Quit
     cstate "[.windows[] | select(.app_id == \"$AM_APP\")] | length == 0" "app closed" 20 ||
@@ -337,8 +332,7 @@ EOF
     am_dump am-dash-solo
     am_point="$(am_dash_pt "$ARTIFACTS/am-dash-solo.json" "AAA Menu Solo")" ||
         fail G-APP-MENU "the single-window app has no dash icon"
-    # shellcheck disable=SC2086
-    am_right_click $am_point
+    am_right_click "$am_point"
     am_wait_item am-menu-solo Quit || fail G-APP-MENU "the menu did not open (single window)"
     [ "$(am_items "$ARTIFACTS/am-menu-solo.json")" = "Solo 1,Pin to Dash,App Details,Quit" ] ||
         fail G-APP-MENU "a running single-window app's rows are '$(am_items "$ARTIFACTS/am-menu-solo.json")', not its window, Pin to Dash, App Details and Quit"
@@ -354,8 +348,7 @@ EOF
     am_dump am-grid
     am_point="$(am_grid_pt "$ARTIFACTS/am-grid.json" "AAA Menu Gpu")" ||
         fail G-APP-MENU "the grid has no tile for the stopped probe app"
-    # shellcheck disable=SC2086
-    am_right_click $am_point
+    am_right_click "$am_point"
     am_wait_item am-menu-grid "New Window" || fail G-APP-MENU "a right click on a grid tile opened no menu"
     scrot "$ARTIFACTS/am-menu-grid.png" >/dev/null
     [ "$(am_items "$ARTIFACTS/am-menu-grid.json")" = "New Window,Pin to Dash,App Details" ] ||
@@ -370,8 +363,7 @@ EOF
     until grep -q ready "$ARTIFACTS/am-switcheroo-stub.log" 2>/dev/null || [ "$am_try" -gt 25 ]; do am_try=$((am_try + 1)); sleep 0.4; done
     grep -q ready "$ARTIFACTS/am-switcheroo-stub.log" || fail G-APP-MENU "the switcheroo-control stub did not start"
     sleep 1.5
-    # shellcheck disable=SC2086
-    am_right_click $am_point
+    am_right_click "$am_point"
     am_wait_item am-menu-gpu "Launch Using Discrete Graphics Card" ||
         fail G-APP-MENU "a second GPU added no Launch Using Discrete Graphics Card row"
     [ "$(am_items "$ARTIFACTS/am-menu-gpu.json")" = "New Window,Launch Using Discrete Graphics Card,Pin to Dash,App Details" ] ||
@@ -389,8 +381,7 @@ EOF
     am_dump am-grid-nogpu
     am_point="$(am_grid_pt "$ARTIFACTS/am-grid-nogpu.json" "AAA Menu Gpu")" ||
         fail G-APP-MENU "the grid lost the probe tile"
-    # shellcheck disable=SC2086
-    am_right_click $am_point
+    am_right_click "$am_point"
     am_wait_item am-menu-nogpu "New Window" || fail G-APP-MENU "the menu did not open (service gone)"
     am_has_item "$ARTIFACTS/am-menu-nogpu.json" "Launch Using Discrete Graphics Card" &&
         fail G-APP-MENU "the discrete GPU row stayed after switcheroo-control left"
@@ -399,7 +390,10 @@ EOF
 
     # Long press: the menu opens and the press launches nothing.
     rm -f "$ARTIFACTS/am-gpu"
-    xdotool mousemove --window "$WID" $am_point
+    read -r am_hold_x am_hold_y <<EOF
+$am_point
+EOF
+    xdotool mousemove --window "$WID" "$am_hold_x" "$am_hold_y"
     sleep 0.4
     xdotool mousedown 1
     sleep 1.6
@@ -453,7 +447,7 @@ EOF
     am_grid_open
     xdotool key Down
     am_dash_focus=""
-    for am_step in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
         xdotool key Down
         sleep 0.5
         am_dump am-kbd-dash
@@ -512,19 +506,26 @@ favorites_import_proof() {
     pass G-FAVORITES-IMPORT "the pins an older Tuna Desktop kept in tuna-shell/favorites.json reach favorite-apps once (desktop ids, in order, each once) and the dash when the shell starts with the key unset; the file stays for the legacy shell"
 }
 
-# Press at $1,$2, drag to $3,$4, and hold with the button down.
+# Press at the point in $1 ("x y"), drag to the point in $2, and hold
+# with the button down.
 am_drag_hold() {
-    xdotool mousemove --window "$WID" "$1" "$2"
+    read -r am_from_x am_from_y <<EOF
+$1
+EOF
+    read -r am_to_x am_to_y <<EOF
+$2
+EOF
+    xdotool mousemove --window "$WID" "$am_from_x" "$am_from_y"
     sleep 0.4
     xdotool mousedown 1
     sleep 0.3
-    am_dx=$((($3 - $1) / 10))
-    am_dy=$((($4 - $2) / 10))
+    am_dx=$(((am_to_x - am_from_x) / 10))
+    am_dy=$(((am_to_y - am_from_y) / 10))
     for am_s in 1 2 3 4 5 6 7 8 9 10; do
-        xdotool mousemove --window "$WID" $(($1 + am_dx * am_s)) $(($2 + am_dy * am_s))
+        xdotool mousemove --window "$WID" "$((am_from_x + am_dx * am_s))" "$((am_from_y + am_dy * am_s))"
         sleep 0.08
     done
-    xdotool mousemove --window "$WID" "$3" "$4"
+    xdotool mousemove --window "$WID" "$am_to_x" "$am_to_y"
     sleep 0.7
 }
 
@@ -549,8 +550,7 @@ dash_pin_dnd_proof() {
     # between the two.
     am_dst="$(am_dash_pt "$ARTIFACTS/am-dnd-start.json" "AAA Pin Three" 0.3)"
     am_mark="$(wc -c <"$LOG")"
-    # shellcheck disable=SC2086
-    am_drag_hold $am_src $am_dst
+    am_drag_hold "$am_src" "$am_dst"
     tail -c +"$((am_mark + 1))" "$LOG" | grep -q "dash dnd placeholder slot=1" ||
         fail G-DASH-PIN-DND "dragging over the second favorite showed no placeholder in slot 1"
     scrot "$ARTIFACTS/am-dnd-placeholder.png" >/dev/null
@@ -570,8 +570,7 @@ dash_pin_dnd_proof() {
     am_src="$(am_dash_pt "$ARTIFACTS/am-dnd-pinned.json" "AAA Pin Three")"
     am_dst="$(am_dash_pt "$ARTIFACTS/am-dnd-pinned.json" "AAA Pin One" 0.25)"
     am_mark="$(wc -c <"$LOG")"
-    # shellcheck disable=SC2086
-    am_drag_hold $am_src $am_dst
+    am_drag_hold "$am_src" "$am_dst"
     tail -c +"$((am_mark + 1))" "$LOG" | grep -q "dash dnd placeholder slot=0" ||
         fail G-DASH-PIN-DND "dragging a favorite over the first showed no placeholder in slot 0"
     am_drag_drop
@@ -585,8 +584,7 @@ dash_pin_dnd_proof() {
     # A favorite dropped on its own place changes nothing.
     am_src="$(am_dash_pt "$ARTIFACTS/am-dnd-reordered.json" "AAA Pin One" 0.4)"
     am_dst="$(am_dash_pt "$ARTIFACTS/am-dnd-reordered.json" "AAA Pin One" 0.6)"
-    # shellcheck disable=SC2086
-    am_drag_hold $am_src $am_dst
+    am_drag_hold "$am_src" "$am_dst"
     am_drag_drop
     [ "$(am_favorites)" = "['tuna-pin-Three.desktop', 'tuna-pin-One.desktop', 'tuna-pin-Two.desktop']" ] ||
         fail G-DASH-PIN-DND "a drop on the favorite's own place changed favorite-apps to $(am_favorites)"
@@ -594,8 +592,7 @@ dash_pin_dnd_proof() {
     # Dropped away from the dash: nothing (GNOME unpins only on Show Apps).
     am_dump am-dnd-away-before
     am_src="$(am_dash_pt "$ARTIFACTS/am-dnd-away-before.json" "AAA Pin Two")"
-    # shellcheck disable=SC2086
-    am_drag_hold $am_src 640 300
+    am_drag_hold "$am_src" "640 300"
     am_drag_drop
     [ "$(am_favorites)" = "['tuna-pin-Three.desktop', 'tuna-pin-One.desktop', 'tuna-pin-Two.desktop']" ] ||
         fail G-DASH-PIN-DND "a drop away from the dash changed favorite-apps to $(am_favorites)"
@@ -607,8 +604,7 @@ dash_pin_dnd_proof() {
     am_src="$(am_dash_pt "$ARTIFACTS/am-dnd-away.json" "AAA Pin Two")"
     am_dst="$(am_dash_pt "$ARTIFACTS/am-dnd-away.json" "Show Apps")"
     am_mark="$(wc -c <"$LOG")"
-    # shellcheck disable=SC2086
-    am_drag_hold $am_src $am_dst
+    am_drag_hold "$am_src" "$am_dst"
     am_dump am-dnd-unpin-hover
     jq -e 'any(.[]; .role == "toggle button" and .name == "Unpin" and .showing)' "$ARTIFACTS/am-dnd-unpin-hover.json" >/dev/null ||
         fail G-DASH-PIN-DND "Show Apps did not read \"Unpin\" under a dragged favorite"

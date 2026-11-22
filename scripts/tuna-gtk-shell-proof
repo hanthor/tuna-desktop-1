@@ -845,8 +845,9 @@ cleanup() {
     if [ -n "$INHIBITOR_PID" ]; then kill "$INHIBITOR_PID" 2>/dev/null || true; fi
     if [ -n "$PERMISSIONS_PID" ]; then kill "$PERMISSIONS_PID" 2>/dev/null || true; fi
     if [ -n "$DATEMENU_STUB_PID" ]; then kill "$DATEMENU_STUB_PID" 2>/dev/null || true; fi
-    # shellcheck disable=SC2086
-    if [ -n "${AM_PIDS:-}" ]; then kill $AM_PIDS 2>/dev/null || true; fi
+    if [ -n "${AM_PIDS:-}" ]; then
+        for am_pid in $AM_PIDS; do kill "$am_pid" 2>/dev/null || true; done
+    fi
     if [ -n "$SCROLL_PROBE_PID" ]; then kill "$SCROLL_PROBE_PID" 2>/dev/null || true; fi
     if [ -n "$SET_FONTS_PID" ]; then kill "$SET_FONTS_PID" 2>/dev/null || true; fi
     if [ -n "$HOT_CORNER_PID" ]; then kill "$HOT_CORNER_PID" 2>/dev/null || true; fi
