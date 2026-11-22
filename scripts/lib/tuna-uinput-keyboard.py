@@ -17,6 +17,7 @@ KEY_ prefix, case-insensitive (esc, leftmeta, l):
 """
 
 import os
+import sys
 import time
 
 from evdev import UInput, ecodes as e
