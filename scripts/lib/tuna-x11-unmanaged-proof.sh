@@ -59,10 +59,11 @@ x11u_rect() {
 # "X Y" of a point of widget $1 clear of its label: $2 px in from its
 # right edge, at mid height.
 x11u_point() {
-    # shellcheck disable=SC2046 # "X Y W H"
-    set -- "$2" $(x11u_rect "$1")
-    [ "$#" = 5 ] || return 1
-    echo "$(($2 + $4 - $1)) $(($3 + $5 / 2))"
+    read -r x11u_in x11u_x x11u_y x11u_w x11u_h x11u_rest <<EOF
+$2 $(x11u_rect "$1")
+EOF
+    [ -n "$x11u_x" ] && [ -n "$x11u_y" ] && [ -n "$x11u_w" ] && [ -n "$x11u_h" ] && [ -z "$x11u_rest" ] || return 1
+    echo "$((x11u_x + x11u_w - x11u_in)) $(($x11u_y + x11u_h / 2))"
 }
 
 # Whether the client has recorded line $1 at least $2 times.
@@ -76,11 +77,12 @@ x11u_times() { grep -cx "$1" "$X11U_EVENTS" || true; }
 x11u_drawn() {
     x11u_want="[]"
     for x11u_xid in $x11u_found; do
-        # shellcheck disable=SC2046 # "X Y W H"
-        set -- "$1" $(x11f_geometry "$x11u_xid")
-        [ "$#" = 5 ] || return 1
-        x11u_want="$(jq -c --argjson xid "$(printf '%d' "$x11u_xid")" --argjson owner "$1" \
-            --argjson r "[$2, $3, $4, $5]" '. + [{x11_window_id: $xid, rect: $r, owner: $owner, shown: true}]' <<EOF
+        read -r x11u_own x11u_x x11u_y x11u_w x11u_h x11u_rest <<EOF
+$1 $(x11f_geometry "$x11u_xid")
+EOF
+        [ -n "$x11u_x" ] && [ -n "$x11u_y" ] && [ -n "$x11u_w" ] && [ -n "$x11u_h" ] && [ -z "$x11u_rest" ] || return 1
+        x11u_want="$(jq -c --argjson xid "$(printf '%d' "$x11u_xid")" --argjson owner "$x11u_own" \
+            --argjson r "[$x11u_x, $x11u_y, $x11u_w, $x11u_h]" '. + [{x11_window_id: $xid, rect: $r, owner: $owner, shown: true}]' <<EOF
 $x11u_want
 EOF
 )"
@@ -94,12 +96,13 @@ EOF
 # the hovered item's yellow (#e5a50a) or the tooltip's red (#a51d2d).
 x11u_is() {
     x11u_colour="$4"
-    # shellcheck disable=SC2046 # three RGB channels
-    set -- $(px "$1" "$2" "$3")
+    read -r x11u_r x11u_g x11u_b <<EOF
+$(px "$1" "$2" "$3")
+EOF
     case "$x11u_colour" in
-        green) [ "${1:-255}" -le 80 ] && [ "${2:-0}" -ge 130 ] && [ "${3:-255}" -le 150 ] && [ "${3:-0}" -ge 60 ] ;;
-        yellow) [ "${1:-0}" -ge 190 ] && [ "${2:-0}" -ge 130 ] && [ "${3:-255}" -le 60 ] ;;
-        red) [ "${1:-0}" -ge 130 ] && [ "${2:-255}" -le 70 ] && [ "${3:-255}" -le 90 ] ;;
+        green) [ "${x11u_r:-255}" -le 80 ] && [ "${x11u_g:-0}" -ge 130 ] && [ "${x11u_b:-255}" -le 150 ] && [ "${x11u_b:-0}" -ge 60 ] ;;
+        yellow) [ "${x11u_r:-0}" -ge 190 ] && [ "${x11u_g:-0}" -ge 130 ] && [ "${x11u_b:-255}" -le 60 ] ;;
+        red) [ "${x11u_r:-0}" -ge 130 ] && [ "${x11u_g:-255}" -le 70 ] && [ "${x11u_b:-255}" -le 90 ] ;;
         *) return 1 ;;
     esac
 }
@@ -130,8 +133,10 @@ x11u_shot_without() {
 # the client to show it. $1 is the gate that fails otherwise.
 x11u_open_menu() {
     x11u_shown="$(x11u_times 'shown menu')"
-    # shellcheck disable=SC2046 # "X Y" of the menu bar item
-    xdotool mousemove --window "$WID" $(x11u_point probe 10)
+    read -r x11u_mx x11u_my <<EOF
+$(x11u_point probe 10)
+EOF
+    xdotool mousemove --window "$WID" "$x11u_mx" "$x11u_my"
     sleep 0.3
     xdotool click 1
     x11f_until 10 x11u_recorded 'shown menu' $((x11u_shown + 1)) ||
@@ -213,12 +218,12 @@ $(x11f_geometry "$x11u_menu")
 EOF
 # The points whose pixels are read: clear of the items' labels and of
 # the pointer's own image when it rests further right on an item.
-# shellcheck disable=SC2046 # "X Y" of a point of the item
-set -- $(x11u_point alpha 90)
-x11u_ax="$1" x11u_ay="$2"
-# shellcheck disable=SC2046 # "X Y" of a point of the item
-set -- $(x11u_point bravo 90)
-x11u_bx="$1" x11u_by="$2"
+read -r x11u_ax x11u_ay <<EOF
+$(x11u_point alpha 90)
+EOF
+read -r x11u_bx x11u_by <<EOF
+$(x11u_point bravo 90)
+EOF
 if [ "$x11u_bx" -lt "$x11u_mx" ] || [ "$x11u_bx" -ge $((x11u_mx + x11u_mw)) ] ||
     [ "$x11u_by" -lt "$x11u_my" ] || [ "$x11u_by" -ge $((x11u_my + x11u_mh)) ]; then
     fail G-X11-MENU "the client's item at $x11u_bx,$x11u_by is outside its menu window $x11u_mx,$x11u_my ${x11u_mw}x$x11u_mh"
@@ -238,8 +243,10 @@ jq -e --argjson xid "$(printf '%d' "$x11u_menu")" --argjson ids "$x11u_windows_b
 [ -z "$(x11f_cardinals "$x11u_menu" _MUTTER_NEEDS_FRAME)" ] ||
     fail G-X11-MENU "the menu was offered to the frames client"
 # Hovering an item highlights it: pointer motion reaches the menu.
-# shellcheck disable=SC2046 # "X Y" of a point of the item
-xdotool mousemove --window "$WID" $(x11u_point alpha 20)
+read -r x11u_mx x11u_my <<EOF
+$(x11u_point alpha 20)
+EOF
+xdotool mousemove --window "$WID" "$x11u_mx" "$x11u_my"
 x11u_shot "$ARTIFACTS/21-x11-menu-hover.png" "$x11u_ax" "$x11u_ay" yellow ||
     fail G-X11-MENU "hovering the first item did not highlight it: pixel $x11u_ax,$x11u_ay is '$(px "$ARTIFACTS/21-x11-menu-hover.png" "$x11u_ax" "$x11u_ay")'"
 x11u_is "$ARTIFACTS/21-x11-menu-hover.png" "$x11u_bx" "$x11u_by" green ||
@@ -258,8 +265,10 @@ x11u_shot_without "$ARTIFACTS/21-x11-menu-activated.png" "$x11u_bx" "$x11u_by" g
 # A submenu is a second override-redirect window: hovering the item it
 # hangs off opens it beside the first, and its own item can be clicked.
 x11u_open_menu G-X11-MENU
-# shellcheck disable=SC2046 # "X Y" of a point of the item
-xdotool mousemove --window "$WID" $(x11u_point more 30)
+read -r x11u_mx x11u_my <<EOF
+$(x11u_point more 30)
+EOF
+xdotool mousemove --window "$WID" "$x11u_mx" "$x11u_my"
 x11f_until 10 x11u_recorded 'shown submenu' ||
     fail G-X11-MENU "hovering the submenu's item never opened the submenu"
 x11f_until 10 x11u_count 2 ||
@@ -272,16 +281,18 @@ sleep 0.3
 # there the submenu's surface is the only one of the X server's under it,
 # so the highlight and the click prove the pointer is given to the
 # override-redirect window itself.
-# shellcheck disable=SC2046 # "X Y" of a point of the item
-set -- $(x11u_point charlie 20)
-jq -e --argjson x "$1" --argjson y "$2" \
+read -r x11u_cx x11u_cy <<EOF
+$(x11u_point charlie 20)
+EOF
+jq -e --argjson x "$x11u_cx" --argjson y "$x11u_cy" \
     ".windows[] | select(.id == $x11u_win) | .x11_buffer_rect | \$x < .[0] or \$x >= .[0] + .[2] or \$y < .[1] or \$y >= .[1] + .[3]" "$CSTATE" >/dev/null ||
-    fail G-X11-MENU "the submenu's item at $1,$2 does not reach past the client's window"
-xdotool mousemove --window "$WID" "$1" "$2"
-# shellcheck disable=SC2046 # "X Y" of a point of the item
-set -- $(x11u_point charlie 90)
-x11u_shot "$ARTIFACTS/21-x11-submenu-hover.png" "$1" "$2" yellow ||
-    fail G-X11-MENU "hovering the submenu's item did not highlight it: pixel $1,$2 is '$(px "$ARTIFACTS/21-x11-submenu-hover.png" "$1" "$2")'"
+    fail G-X11-MENU "the submenu's item at $x11u_cx,$x11u_cy does not reach past the client's window"
+xdotool mousemove --window "$WID" "$x11u_cx" "$x11u_cy"
+read -r x11u_cx x11u_cy <<EOF
+$(x11u_point charlie 90)
+EOF
+x11u_shot "$ARTIFACTS/21-x11-submenu-hover.png" "$x11u_cx" "$x11u_cy" yellow ||
+    fail G-X11-MENU "hovering the submenu's item did not highlight it: pixel $x11u_cx,$x11u_cy is '$(px "$ARTIFACTS/21-x11-submenu-hover.png" "$x11u_cx" "$x11u_cy")'"
 x11u_hidden="$(x11u_times 'hidden menu')"
 xdotool click 1
 x11f_until 10 x11u_recorded 'activate charlie' ||
@@ -316,8 +327,10 @@ x11u_desktop="$(jq -r --argjson w "$WIDTH" --argjson h "$HEIGHT" '
 if [ -n "$x11u_desktop" ]; then
     x11u_open_menu G-X11-MENU
     x11u_hidden="$(x11u_times 'hidden menu')"
-    # shellcheck disable=SC2086 # "X Y"
-    xdotool mousemove --window "$WID" $x11u_desktop
+    read -r x11u_dx x11u_dy <<EOF
+$x11u_desktop
+EOF
+    xdotool mousemove --window "$WID" "$x11u_dx" "$x11u_dy"
     sleep 0.3
     xdotool click 1
     x11f_until 10 x11u_closed $((x11u_hidden + 1)) ||
@@ -336,8 +349,10 @@ x11u_native_point="$(jq -r --argjson native "$x11u_native" --argjson probe "$x11
 [ -n "$x11u_native_point" ] || fail G-X11-MENU "the native window has no point clear of the probe"
 x11u_open_menu G-X11-MENU
 x11u_hidden="$(x11u_times 'hidden menu')"
-# shellcheck disable=SC2086 # "X Y"
-xdotool mousemove --window "$WID" $x11u_native_point
+read -r x11u_nx x11u_ny <<EOF
+$x11u_native_point
+EOF
+xdotool mousemove --window "$WID" "$x11u_nx" "$x11u_ny"
 sleep 0.3
 xdotool click 1
 x11f_until 10 x11u_closed $((x11u_hidden + 1)) ||

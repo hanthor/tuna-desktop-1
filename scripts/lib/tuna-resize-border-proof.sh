@@ -99,8 +99,9 @@ rb_point="$(jq -r --argjson high "$rb_high" --argjson low "$rb_low" '
     | map(tostring) | join(" ")' "$CSTATE")"
 [ -n "$rb_point" ] ||
     fail G-RESIZE-BORDER "the upper window's far shadow is not over the lower window: $(jq -c "[.windows[] | select(.id == $rb_high or .id == $rb_low) | {id, rect, input_rect, surface_rect}]" "$CSTATE")"
-# shellcheck disable=SC2086 # "X Y"
-xdotool mousemove --window "$WID" $rb_point
+# The point stays one word for messages; the pointer takes its halves.
+rb_point_x=${rb_point%% *}; rb_point_y=${rb_point#* }
+xdotool mousemove --window "$WID" "$rb_point_x" "$rb_point_y"
 sleep 0.3
 xdotool click 1
 cstate ".focused == $rb_low and (.stacking | last) == $rb_low" "lower window focused" 10 ||

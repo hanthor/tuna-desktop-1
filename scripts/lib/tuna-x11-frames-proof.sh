@@ -15,13 +15,16 @@
 X11F_DISPLAY=""
 
 # jq: the nodes of the frames client's frame titled $t (its header bar's
-# label and buttons), from a tuna-a11y-dump of tuna-x11-frames.
-# shellcheck disable=SC2016 # a jq program, not shell
-X11F_JQ='def frame($t): . as $all
+# label and buttons), from a tuna-a11y-dump of tuna-x11-frames. A quoted
+# heredoc holds the program literally, so no shellcheck directive is needed.
+X11F_JQ=$(cat <<'JQEOF'
+def frame($t): . as $all
     | ([range(0; length) | select($all[.].role == "frame" and $all[.].name == $t and $all[.].showing)][0]) as $i
     | if $i == null then null
       else [label $out | $all[$i + 1:][] | if .depth <= $all[$i].depth then break $out else . end] end;
-  def buttons: map(select(.showing and (.role == "push button" or .role == "button")));'
+  def buttons: map(select(.showing and (.role == "push button" or .role == "button")));
+JQEOF
+)
 
 # Run a command as a client of the session's own X server. Clients kept
 # running take DISPLAY themselves: `$!` must be the client, not a shell.
@@ -126,9 +129,10 @@ x11f_block() {
 # Whether the pixel at $2,$3 of PNG $1 is the probe's own background
 # (xclock -bg '#c061cb').
 x11f_magenta() {
-    # shellcheck disable=SC2046 # three RGB channels
-    set -- $(px "$1" "$2" "$3")
-    [ "${1:-0}" -ge 150 ] && [ "${2:-255}" -le 130 ] && [ "${3:-0}" -ge 150 ]
+    read -r x11f_r x11f_g x11f_b <<EOF
+$(px "$1" "$2" "$3")
+EOF
+    [ "${x11f_r:-0}" -ge 150 ] && [ "${x11f_g:-255}" -le 130 ] && [ "${x11f_b:-0}" -ge 150 ]
 }
 
 # Press button 1 at $1,$2, move to $3,$4 in steps and release: enough
@@ -295,9 +299,11 @@ fi
 cstate ".focused == $x11f_probe" "probe focused" 5 || fail G-X11-FRAME "the mapped probe is not focused"
 x11f_until 5 x11f_state_has "$x11f_frame" _NET_WM_STATE_FOCUSED ||
     fail G-X11-FRAME "the focused window's frame is not marked _NET_WM_STATE_FOCUSED"
-# shellcheck disable=SC2046 # "X Y" of the button's centre
-set -- $(x11f_button "$ARTIFACTS/a11y-x11-frame-renamed.json" "Tuna Frame Renamed" Close "$x11f_x" "$x11f_y")
-x11f_close_x=$(($1 - 12)) x11f_close_y=$(($2 - 12))
+# The button's centre takes two words; read them as two variables.
+read -r x11f_btn_x x11f_btn_y <<EOF
+$(x11f_button "$ARTIFACTS/a11y-x11-frame-renamed.json" "Tuna Frame Renamed" Close "$x11f_x" "$x11f_y")
+EOF
+x11f_close_x=$((x11f_btn_x - 12)) x11f_close_y=$((x11f_btn_y - 12))
 x11f_before="$(jq -c '[.windows[] | .id]' "$CSTATE")"
 DISPLAY="$X11F_DISPLAY" xeyes >/dev/null 2>&1 &
 x11f_other_pid=$!
@@ -411,9 +417,10 @@ x11f_state_lacks "$x11f_client" _NET_WM_STATE_HIDDEN ||
 gsettings set org.gnome.desktop.wm.preferences button-layout 'appmenu:minimize,close'
 x11f_a11y "$ARTIFACTS/a11y-x11-frame-minimize.json" 'frame("Tuna Frame Renamed") | buttons | map(.name) | sort == ["Close", "Minimize"]' ||
     fail G-X11-FRAME-ACTIONS "button-layout 'appmenu:minimize,close' gave the header bar no Minimize button"
-# shellcheck disable=SC2046 # "X Y" of the button's centre
-set -- $(x11f_button "$ARTIFACTS/a11y-x11-frame-minimize.json" "Tuna Frame Renamed" Minimize "$x11f_x" "$x11f_y")
-xdotool mousemove --window "$WID" "$1" "$2"
+read -r x11f_btn_x x11f_btn_y <<EOF
+$(x11f_button "$ARTIFACTS/a11y-x11-frame-minimize.json" "Tuna Frame Renamed" Minimize "$x11f_x" "$x11f_y")
+EOF
+xdotool mousemove --window "$WID" "$x11f_btn_x" "$x11f_btn_y"
 sleep 0.3
 xdotool click 1
 cstate "(.minimized | index($x11f_probe) != null) and .focused != $x11f_probe" "probe minimized" 10 ||
@@ -449,9 +456,10 @@ sleep 1
 # Close: the button the header bar draws, found where GTK reports it.
 x11f_a11y "$ARTIFACTS/a11y-x11-frame-close.json" 'frame("Tuna Frame Renamed") | buttons | map(.name) == ["Close"]' ||
     fail G-X11-FRAME-ACTIONS "the frame lost its Close button"
-# shellcheck disable=SC2046 # "X Y" of the button's centre
-set -- $(x11f_button "$ARTIFACTS/a11y-x11-frame-close.json" "Tuna Frame Renamed" Close "$x11f_x" "$x11f_y")
-xdotool mousemove --window "$WID" "$1" "$2"
+read -r x11f_btn_x x11f_btn_y <<EOF
+$(x11f_button "$ARTIFACTS/a11y-x11-frame-close.json" "Tuna Frame Renamed" Close "$x11f_x" "$x11f_y")
+EOF
+xdotool mousemove --window "$WID" "$x11f_btn_x" "$x11f_btn_y"
 sleep 0.3
 xdotool click 1
 cstate "all(.windows[]; .id != $x11f_probe)" "probe closed" 10 ||

@@ -58,8 +58,17 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER};
 use smithay::xwayland::{xwm::WmWindowType, X11Surface};
 
-use super::WindowManager;
 use crate::State;
+
+/// One unmanaged window as the state file lists it: X11 window id,
+/// rectangle, owner, shown flag and type name.
+type X11UnmanagedEntry = (
+    u32,
+    Rectangle<i32, Logical>,
+    Option<u64>,
+    bool,
+    &'static str,
+);
 
 /// How many `WM_TRANSIENT_FOR` links are followed to find an owner: a
 /// submenu of a submenu of a menu of a window, with room to spare. A
@@ -373,16 +382,7 @@ impl WindowManager {
 
     /// The unmanaged windows as the state file lists them, bottom to
     /// top: `(X11 window id, rectangle, owner, shown, type)`.
-    #[allow(clippy::type_complexity)]
-    pub fn x11_unmanaged_state(
-        &self,
-    ) -> Vec<(
-        u32,
-        Rectangle<i32, Logical>,
-        Option<u64>,
-        bool,
-        &'static str,
-    )> {
+    pub fn x11_unmanaged_state(&self) -> Vec<X11UnmanagedEntry> {
         let visible: Vec<u64> = self
             .visible_entries()
             .into_iter()
