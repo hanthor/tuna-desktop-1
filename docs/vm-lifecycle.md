@@ -75,6 +75,14 @@ bounds the retries. In marlin-vm run 44656894802, uupd's fourth start hit
 its start limit. Its `OnFailure` banner arrived 7 s into the edge hold, and
 the capture refused to send keys while the button was held.
 
+Those uupd runs were the lane's own doing. The G-DATETIME-MANUAL probe that
+runs just before the strip used to set the guest clock 2 h 7 min ahead, and
+a jump forward fires every calendar timer it skips: uupd.timer
+(`OnCalendar=*-*-* 04:00:00`) started uupd whenever the probe ran between
+about 01:53 and 04:15 UTC. The probe now sets the clock back, and its gate
+fails if any timer fires ahead of the real time (docs/datetime-proof.md).
+The banner handling stays for banners the image raises on its own.
+
 The column-height capture also submits a real critical notification through
 the session's public notification service. It cannot pass until the original
 shell shows the fixed public fixture title, its sensitive Close button receives
@@ -121,8 +129,15 @@ The root `autotz DOMAIN OPERATION JSON` route delegates to the installed
 standalone observer. QGA acquisition and nested commands share finite
 absolute deadlines; reconnecting cannot renew them. Failure diagnostics
 contain only bounded domain/operation/type/sites and optional numeric codes,
-never raw arguments or exception text. Unconfirmed guest-child retirement
-remains fatal. `V-AUTOTZ` requires the consumer's explicit complete qualified
+never raw arguments or exception text. An operation that misses its deadline
+still fails; afterwards the agent polls only the timed-out child's
+`guest-exec-status` for a bounded 10 s grace (on a fresh connection if the
+old one was cut mid-reply) and clears it once the child is seen exiting.
+Unconfirmed guest-child retirement remains fatal. A readiness wait whose
+poll the readiness deadline cut short, with the child retired, fails with its
+own `actual readiness absolute deadline expired` verdict and last
+observation; a timeout with budget left propagates unchanged (#1013).
+`V-AUTOTZ` requires the consumer's explicit complete qualified
 result; an exception, missing native session or missing result fails the
 row and therefore the existing aggregate CI gate. The consumer retains its
 actual original-shell AddAgent, source/provider, daemon location/timezone

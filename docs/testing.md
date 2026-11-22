@@ -298,7 +298,7 @@ Nothing waits forever. These defaults bound every recipe:
 | What | Default | Knob |
 |---|---|---|
 | `just build`, `test`, `clippy` | stopped after 60 min: TERM to cargo's process group (every `rustc` and test binary), KILL 30 s later, slot freed, exit 124 with `TIMED OUT` | `TUNA_BUILD_TIMEOUT` (minutes) |
-| `just proof <name>` | stopped the same way after its CI job's `timeout-minutes` (gtk-shell-proof: 60), at least 45 min; leftovers it started are reaped | `TUNA_PROOF_TIMEOUT` (minutes) |
+| `just proof <name>` | stopped the same way after its CI job's `timeout-minutes` (gtk-shell-proof: 80), at least 45 min; leftovers it started are reaped | `TUNA_PROOF_TIMEOUT` (minutes) |
 | waiting for a build or proof slot | gives up after 120 min with exit 75 | `TUNA_SLOT_WAIT` (minutes) |
 | a slot held past its timeout + 15 min | `scripts/tuna-reaper` reports it and kills the holder, the processes below it with the process groups they lead, and everything carrying its `TUNA_PROOF_RUN` marker | run by `scripts/tuna-disk-guard` on every pass |
 
@@ -546,6 +546,22 @@ can invalidate a traversal while GTK processes cancellation; that snapshot
 is rejected, and the existing five-second polling budget must still obtain
 a valid tree. Persistent transport errors, wrong owners and incomplete trees
 cannot satisfy the gate.
+
+G-TRAY's absence check works the same way. After the probe item is killed,
+an AT-SPI child of that item that is already unexported while the walk
+reaches it (`No such interface`) means the item is still being torn down,
+so the check observes again. The deadline is unchanged: 30 fresh
+owner-bound observations, 0.5 s apart. An error anywhere else, or of another
+kind, is still refused, and an item still showing or still being torn down
+at the deadline fails.
+
+`tuna-gtk-shell-proof` runs the whole session (the script, its private
+buses and the nested session) in a fixed-offset `TZ` where it is about
+15:00 local time when the proof starts (`scripts/lib/proof-session-tz.py`).
+The screen-time day starts at 03:00 local time, as in GNOME. A proof that
+crossed that boundary would reset the day's usage in the middle of a
+wellbeing gate: a reached daily limit would turn Active and grayscale would
+drop mid-bracket. The bracket checks themselves are unchanged.
 
 | CI job | Command | Extra packages | What it asserts |
 |---|---|---|---|
@@ -1231,6 +1247,14 @@ Read `nested.log` in the artifacts directory first (`compositor.log` for
 [nested session troubleshooting](nested-session.md#troubleshooting). Do not
 retry a deterministic test until it passes: the timing rule in the
 [development guide](development.md#writing-a-test) applies.
+
+If the compositor cannot start the shell at all, for example because
+`--shell-bin` or `TUNA_PROOF_BIN_DIR` names a missing binary, `nested.log`
+says `shell supervision: SpawnFailed { kind: NotFound }` and has no
+`tuna-shell-gtk:` lines. Every gate that waits for the shell then times out,
+usually first as A11Y-PANEL. In CI, the `gtk-shell` slices that use
+`TUNA_PROOF_BIN_DIR` run only after the `proof-binaries` build step
+succeeds.
 
 ## Nested stress and torture suite
 
