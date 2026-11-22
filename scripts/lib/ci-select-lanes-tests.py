@@ -69,6 +69,9 @@ class Selection(unittest.TestCase):
                           "arch-package", "marlin-vm", "parity-ledger"])
         self.assertEqual(pr("scripts/tuna-orca-speech-proof"), ["orca-speech"])
         self.assertEqual(pr("scripts/lib/tuna-orca-speech.py"), ["orca-speech"])
+        # The guest's /usr/libexec/tuna-datetime-proof (G-DATETIME-*).
+        self.assertEqual(pr("scripts/lib/tuna-datetime-proof.py"),
+                         ["arch-package", "marlin-image", "marlin-vm"])
 
     def test_core_source_and_transport_always_select_vm_with_original_producer(self):
         for path in ('scripts/lib/core_apps.py', 'scripts/lib/core_apps_system.py',
