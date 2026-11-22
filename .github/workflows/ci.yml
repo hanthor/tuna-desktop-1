@@ -1004,7 +1004,7 @@ jobs:
           for name, admit, test, marker, scope in proofs:
               artifacts = pathlib.Path('gtk-shell-artifacts') / name
               artifacts.mkdir(parents=True, exist_ok=False)
-              argv = ['env', '-u', 'WAYLAND_DISPLAY', '-u', 'WAYLAND_SOCKET', 'dbus-run-session', '--', 'xvfb-run', '-a', 'env', 'GDK_BACKEND=x11', admit, str(binary), test, '--exact', '--ignored', '--test-threads=1', '--nocapture']
+              argv = ['env', '-u', 'WAYLAND_DISPLAY', '-u', 'WAYLAND_SOCKET', 'dbus-run-session', '--', 'xvfb-run', '-a', 'env', 'GDK_BACKEND=x11', admit, str(binary), test, '--exact', '--include-ignored', '--test-threads=1', '--nocapture']
               with (artifacts / 'output.txt').open('w') as output:
                   child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
                   try:
