@@ -547,6 +547,22 @@ is rejected, and the existing five-second polling budget must still obtain
 a valid tree. Persistent transport errors, wrong owners and incomplete trees
 cannot satisfy the gate.
 
+G-TRAY's absence check works the same way. After the probe item is killed,
+an AT-SPI child of that item that is already unexported while the walk
+reaches it (`No such interface`) means the item is still being torn down,
+so the check observes again. The deadline is unchanged: 30 fresh
+owner-bound observations, 0.5 s apart. An error anywhere else, or of another
+kind, is still refused, and an item still showing or still being torn down
+at the deadline fails.
+
+`tuna-gtk-shell-proof` runs the whole session (the script, its private
+buses and the nested session) in a fixed-offset `TZ` where it is about
+15:00 local time when the proof starts (`scripts/lib/proof-session-tz.py`).
+The screen-time day starts at 03:00 local time, as in GNOME. A proof that
+crossed that boundary would reset the day's usage in the middle of a
+wellbeing gate: a reached daily limit would turn Active and grayscale would
+drop mid-bracket. The bracket checks themselves are unchanged.
+
 | CI job | Command | Extra packages | What it asserts |
 |---|---|---|---|
 | `journey` | `scripts/tuna-journey --artifacts journey-artifacts` | `xvfb xdotool x11-apps scrot jq dbus`, Mesa EGL (`libegl1 libgl1-mesa-dri`) | Overview, search, launch from search, Escape, workspace switch, Alt+Tab; writes `assertions.txt` |
@@ -1265,6 +1281,14 @@ Read `nested.log` in the artifacts directory first (`compositor.log` for
 [nested session troubleshooting](nested-session.md#troubleshooting). Do not
 retry a deterministic test until it passes: the timing rule in the
 [development guide](development.md#writing-a-test) applies.
+
+If the compositor cannot start the shell at all, for example because
+`--shell-bin` or `TUNA_PROOF_BIN_DIR` names a missing binary, `nested.log`
+says `shell supervision: SpawnFailed { kind: NotFound }` and has no
+`tuna-shell-gtk:` lines. Every gate that waits for the shell then times out,
+usually first as A11Y-PANEL. In CI, the `gtk-shell` slices that use
+`TUNA_PROOF_BIN_DIR` run only after the `proof-binaries` build step
+succeeds.
 
 ## Nested stress and torture suite
 
