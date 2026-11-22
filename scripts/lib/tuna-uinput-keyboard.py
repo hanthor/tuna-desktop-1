@@ -5,7 +5,9 @@ Creates, through uinput, a plain USB keyboard (every key code below 256),
 so udev marks it ID_INPUT_KEYBOARD and libinput hands its keys to the
 compositor as a real keyboard's.
 
-Run as root (uinput): reads one command per line on stdin and replies
+Run as root (uinput): takes the command fifo and the reply log as
+arguments and opens both itself, so the caller needs no shell redirects
+(which sudo would not apply). Reads one command per line and replies
 "ok" or "error ..." per line, so a shell driver stays in lockstep (the
 protocol of tuna-uinput-touchpad.py). Keys are evdev names without the
 KEY_ prefix, case-insensitive (esc, leftmeta, l):
@@ -14,7 +16,7 @@ KEY_ prefix, case-insensitive (esc, leftmeta, l):
     quit
 """
 
-import sys
+import os
 import time
 
 from evdev import UInput, ecodes as e
@@ -32,32 +34,40 @@ def code(name):
 
 
 def main():
+    # The command fifo and the reply log as arguments, opened here, so the
+    # caller needs no shell redirects (which sudo would not apply): the
+    # driver passes two paths and keeps no file descriptors itself.
+    _program, fifo_path, log_path = sys.argv
+    log = open(log_path, "w", opener=lambda path, flags: os.open(path, flags, 0o644))
+    def say(text):
+        print(text, file=log, flush=True)
     keys = sorted({v for k, v in vars(e).items() if k.startswith("KEY_") and isinstance(v, int) and v < 256})
     keyboard = UInput({e.EV_KEY: keys}, name=NAME, vendor=0x1, product=0x1, bustype=e.BUS_USB)
     # libinput opens the node once udev announces it.
     time.sleep(0.5)
-    print("ready", flush=True)
-    for line in sys.stdin:
-        words = line.split()
-        if not words:
-            continue
-        if words[0] == "quit":
-            break
-        try:
-            if words[0] != "tap" or len(words) < 2:
-                raise ValueError(f"unknown command {line.strip()}")
-            codes = [code(word) for word in words[1:]]
-            for value in codes:
-                keyboard.write(e.EV_KEY, value, 1)
-                keyboard.syn()
-                time.sleep(HOLD)
-            for value in reversed(codes):
-                keyboard.write(e.EV_KEY, value, 0)
-                keyboard.syn()
-                time.sleep(HOLD)
-            print("ok", flush=True)
-        except Exception as error:  # reported to the driver, never fatal
-            print(f"error {error}", flush=True)
+    say("ready")
+    with open(fifo_path) as commands:
+        for line in commands:
+            words = line.split()
+            if not words:
+                continue
+            if words[0] == "quit":
+                break
+            try:
+                if words[0] != "tap" or len(words) < 2:
+                    raise ValueError(f"unknown command {line.strip()}")
+                codes = [code(word) for word in words[1:]]
+                for value in codes:
+                    keyboard.write(e.EV_KEY, value, 1)
+                    keyboard.syn()
+                    time.sleep(HOLD)
+                for value in reversed(codes):
+                    keyboard.write(e.EV_KEY, value, 0)
+                    keyboard.syn()
+                    time.sleep(HOLD)
+                say("ok")
+            except Exception as error:  # reported to the driver, never fatal
+                say(f"error {error}")
     keyboard.close()
 
 

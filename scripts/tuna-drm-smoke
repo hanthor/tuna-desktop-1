@@ -1456,8 +1456,7 @@ EXIT_OUTPUT="$(sed -n 's/.*drm: output [^ ]* \([0-9]*x[0-9]*\) .*/\1/p' "$EXIT_L
 [ -n "$EXIT_OUTPUT" ] || fail D-OVERVIEW-EXIT "no output mode in the log"
 
 mkfifo "$ARTIFACTS/keyboard-emulator.fifo"
-# shellcheck disable=SC2024
-sudo python3 "$ROOT/scripts/lib/tuna-uinput-keyboard.py" <"$ARTIFACTS/keyboard-emulator.fifo" >"$KB_OUT" 2>&1 &
+sudo python3 "$ROOT/scripts/lib/tuna-uinput-keyboard.py" "$ARTIFACTS/keyboard-emulator.fifo" "$KB_OUT" &
 KEYBOARD_EMU_PID=$!
 exec 7>"$ARTIFACTS/keyboard-emulator.fifo"
 state '.input_devices | any(.name == "Tuna Smoke Keyboard")' 15 ||
