@@ -68,6 +68,9 @@ class Selection(unittest.TestCase):
                           "arch-package", "marlin-vm", "parity-ledger"])
         self.assertEqual(pr("scripts/tuna-orca-speech-proof"), ["orca-speech"])
         self.assertEqual(pr("scripts/lib/tuna-orca-speech.py"), ["orca-speech"])
+        # The guest's /usr/libexec/tuna-datetime-proof (G-DATETIME-*).
+        self.assertEqual(pr("scripts/lib/tuna-datetime-proof.py"),
+                         ["arch-package", "marlin-image", "marlin-vm"])
 
 
     def test_transition_policy_and_suite_always_run_journey(self):
@@ -134,6 +137,13 @@ class Selection(unittest.TestCase):
             for run in range(len(m.ROTATION)):
                 self.assertEqual(pr(f"scripts/lib/tuna-uinput-{name}.py", run=run),
                                  ["drm-smoke"], name)
+    def test_native_desktop_driver_runs_the_vm_lane_that_drives_it(self):
+        # #1013: a shared-driver change runs the VM lane whose autotz profile
+        # drives it, not whatever slice the rotation picks.
+        for run in range(len(m.ROTATION)):
+            with self.subTest(run=run):
+                self.assertEqual(pr("scripts/lib/vm_native_desktop.py", run=run),
+                                 ["arch-package", "marlin-vm"])
 
     def test_proof_example_clients_run_the_lane_that_runs_them(self):
         # G-SUBSURFACE-STACKING's client runs only in the gtk-shell job's
