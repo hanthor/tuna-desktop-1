@@ -57,7 +57,7 @@ use smithay::input::pointer::{ButtonEvent, MotionEvent};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER};
 use smithay::xwayland::{xwm::WmWindowType, X11Surface};
-
+use super::WindowManager;
 use crate::State;
 
 /// One unmanaged window as the state file lists it: X11 window id,
