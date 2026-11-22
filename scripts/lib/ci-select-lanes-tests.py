@@ -68,6 +68,9 @@ class Selection(unittest.TestCase):
                           "arch-package", "marlin-vm", "parity-ledger"])
         self.assertEqual(pr("scripts/tuna-orca-speech-proof"), ["orca-speech"])
         self.assertEqual(pr("scripts/lib/tuna-orca-speech.py"), ["orca-speech"])
+        # The guest's /usr/libexec/tuna-datetime-proof (G-DATETIME-*).
+        self.assertEqual(pr("scripts/lib/tuna-datetime-proof.py"),
+                         ["arch-package", "marlin-image", "marlin-vm"])
 
     def test_protocol_gate_inputs_run_the_gtk_shell_proof(self):
         # The Mutter 51 protocol gates (--protocols-only) and G-WAYLAND-INFO
@@ -136,6 +139,14 @@ class Selection(unittest.TestCase):
         self.assertEqual(pr("scripts/tests/test_colord_startup.py"), ["drm-smoke"])
         # Control: a test only the always-on check job runs adds no lane.
         self.assertEqual(pr("scripts/tests/test_disk_guard.py"), [])
+
+    def test_native_desktop_driver_runs_the_vm_lane_that_drives_it(self):
+        # #1013: a shared-driver change runs the VM lane whose autotz profile
+        # drives it, not whatever slice the rotation picks.
+        for run in range(len(m.ROTATION)):
+            with self.subTest(run=run):
+                self.assertEqual(pr("scripts/lib/vm_native_desktop.py", run=run),
+                                 ["arch-package", "marlin-vm"])
 
     def test_proof_example_clients_run_the_lane_that_runs_them(self):
         # G-SUBSURFACE-STACKING's client runs only in the gtk-shell job's
