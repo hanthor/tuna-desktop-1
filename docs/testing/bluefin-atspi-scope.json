@@ -36,7 +36,7 @@
         "sla_15s"
       ],
       "disposition": "portable",
-      "reason": "Real Nautilus window reached over AT-SPI in the Roost session; retry removed."
+      "reason": "Real Nautilus window reached over AT-SPI in the Tuna Desktop session; retry removed."
     },
     {
       "feature": "gnome_files.feature",
@@ -66,7 +66,7 @@
         "navigation"
       ],
       "disposition": "portable",
-      "reason": "Needs physical input reaching the original client; transport replaced by Roost VM input."
+      "reason": "Needs physical input reaching the original client; transport replaced by Tuna Desktop VM input."
     },
     {
       "feature": "gnome_files.feature",
@@ -108,7 +108,7 @@
         "bluefin"
       ],
       "disposition": "adapt",
-      "reason": "Host coredump query; must run against the Roost VM journal/coredumpctl, not the runner."
+      "reason": "Host coredump query; must run against the Tuna Desktop VM journal/coredumpctl, not the runner."
     },
     {
       "feature": "gnome_settings.feature",
@@ -160,7 +160,7 @@
         "displays"
       ],
       "disposition": "insufficient-alone",
-      "reason": "Navigating a panel is not proof of behaviour; each control must be mapped to observed Roost behaviour before this counts."
+      "reason": "Navigating a panel is not proof of behaviour; each control must be mapped to observed Tuna Desktop behaviour before this counts."
     },
     {
       "feature": "gnome_settings.feature",
@@ -170,7 +170,7 @@
         "wifi"
       ],
       "disposition": "insufficient-alone",
-      "reason": "Navigating a panel is not proof of behaviour; each control must be mapped to observed Roost behaviour before this counts."
+      "reason": "Navigating a panel is not proof of behaviour; each control must be mapped to observed Tuna Desktop behaviour before this counts."
     },
     {
       "feature": "gnome_settings.feature",
@@ -180,7 +180,7 @@
         "privacy"
       ],
       "disposition": "insufficient-alone",
-      "reason": "Navigating a panel is not proof of behaviour; each control must be mapped to observed Roost behaviour before this counts."
+      "reason": "Navigating a panel is not proof of behaviour; each control must be mapped to observed Tuna Desktop behaviour before this counts."
     },
     {
       "feature": "gnome_settings.feature",
@@ -190,7 +190,7 @@
         "notifications"
       ],
       "disposition": "insufficient-alone",
-      "reason": "Navigating a panel is not proof of behaviour; each control must be mapped to observed Roost behaviour before this counts."
+      "reason": "Navigating a panel is not proof of behaviour; each control must be mapped to observed Tuna Desktop behaviour before this counts."
     },
     {
       "feature": "gnome_settings.feature",
@@ -200,7 +200,7 @@
         "keyboard"
       ],
       "disposition": "insufficient-alone",
-      "reason": "Navigating a panel is not proof of behaviour; each control must be mapped to observed Roost behaviour before this counts."
+      "reason": "Navigating a panel is not proof of behaviour; each control must be mapped to observed Tuna Desktop behaviour before this counts."
     },
     {
       "feature": "gnome_settings.feature",
@@ -210,7 +210,7 @@
         "power"
       ],
       "disposition": "insufficient-alone",
-      "reason": "Navigating a panel is not proof of behaviour; each control must be mapped to observed Roost behaviour before this counts."
+      "reason": "Navigating a panel is not proof of behaviour; each control must be mapped to observed Tuna Desktop behaviour before this counts."
     },
     {
       "feature": "gnome_settings.feature",
@@ -220,7 +220,7 @@
         "accessibility"
       ],
       "disposition": "insufficient-alone",
-      "reason": "Navigating a panel is not proof of behaviour; each control must be mapped to observed Roost behaviour before this counts."
+      "reason": "Navigating a panel is not proof of behaviour; each control must be mapped to observed Tuna Desktop behaviour before this counts."
     },
     {
       "feature": "gnome_settings.feature",
@@ -242,7 +242,7 @@
         "sla_15s"
       ],
       "disposition": "portable",
-      "reason": "Background step 'GNOME Shell is accessible via AT-SPI' must be replaced by Roost compositor/GTK identity proof. Upstream @retry re-runs the whole scenario; disabled here (first failure is retained)."
+      "reason": "Background step 'GNOME Shell is accessible via AT-SPI' must be replaced by Tuna Desktop compositor/GTK identity proof. Upstream @retry re-runs the whole scenario; disabled here (first failure is retained)."
     },
     {
       "feature": "gnome_accessibility.feature",
@@ -272,7 +272,7 @@
         "atspi"
       ],
       "disposition": "adapt",
-      "reason": "Must prove the bus and the real application owner in the Roost session, not a GNOME session."
+      "reason": "Must prove the bus and the real application owner in the Tuna Desktop session, not a GNOME session."
     },
     {
       "feature": "gnome_accessibility.feature",
@@ -282,7 +282,7 @@
         "regression"
       ],
       "disposition": "adapt",
-      "reason": "Journal query must be bounded to the Roost VM boot; count 0 required, empty output is a failure."
+      "reason": "Journal query must be bounded to the Tuna Desktop VM boot; count 0 required, empty output is a failure."
     },
     {
       "feature": "orca.feature",

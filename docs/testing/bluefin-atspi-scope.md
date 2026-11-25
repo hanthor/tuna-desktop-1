@@ -2,7 +2,7 @@
 
 Tracks [#475](https://github.com/tuna-os/tuna-desktop/issues/475). This is an
 **inventory**, not a result: no upstream scenario has been run against the
-Roost session, and nothing here counts as desktop compatibility. #397, #432
+Tuna Desktop session, and nothing here counts as desktop compatibility. #397, #432
 and #352 stay open until their full GNOME app, Settings and AT-SPI acceptance
 is met.
 
@@ -15,11 +15,11 @@ features with one disposition and reason each:
 
 | Disposition | Meaning |
 | --- | --- |
-| `portable` | Real app interaction over AT-SPI; reusable once bootstrap and input transport are adapted to the Roost VM. |
-| `adapt` | Needs a Roost/Marlin-specific replacement for a GNOME or Fedora assumption. |
+| `portable` | Real app interaction over AT-SPI; reusable once bootstrap and input transport are adapted to the Tuna Desktop VM. |
+| `adapt` | Needs a Tuna Desktop/Marlin-specific replacement for a GNOME or Fedora assumption. |
 | `insufficient-alone` | Panel navigation or a gsettings round trip; not evidence of behaviour. |
 | `unsupported` | Depends on a distribution mechanism Marlin lacks (for example `rpm -q`). |
-| `inapplicable` | Superseded by a stronger existing Roost test. |
+| `inapplicable` | Superseded by a stronger existing Tuna Desktop test. |
 
 The manifest's `policy` block must keep whole-scenario retry, CLI-only
 fallback, starting GNOME Shell, a fake `Shell.Eval` provider and "counts as
@@ -28,7 +28,7 @@ desktop compatibility" all `false`. Check it with
 
 ## Not done yet
 
-- Running the selected scenarios on the installed Roost session of a qualified
+- Running the selected scenarios on the installed Tuna Desktop session of a qualified
   Marlin candidate, with process-identity and AT-SPI owner receipts.
-- The Roost VM bootstrap and physical-input transport.
+- The Tuna Desktop VM bootstrap and physical-input transport.
 - A CI lane and release gate for exact candidate heads.
