@@ -1,3 +1,4 @@
 /target
 /.spektacular/repos/
 *.swp
+__pycache__/
