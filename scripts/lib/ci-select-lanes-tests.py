@@ -68,6 +68,11 @@ class Selection(unittest.TestCase):
                 with self.subTest(path=path, run=run):
                     self.assertEqual(pr(path, run=run), ["drm-smoke"])
         self.assertEqual(pr("docs/walkthrough.tsv"), ["gtk-shell"])
+        self.assertEqual(pr("scripts/tuna-greeter-proof"), ["gtk-shell"])
+        self.assertEqual(pr("scripts/lib/tuna-gdm-mock.py"), ["gtk-shell"])
+        self.assertEqual(pr("scripts/lib/org.gnome.login-screen.gschema.xml"), ["gtk-shell"])
+        # The greeter's unit tests run in check; its proof in gtk-shell.
+        self.assertIn("gtk-shell", pr("crates/greeter/src/main.rs"))
         self.assertEqual(pr("packaging/marlin/vm-lane/Containerfile"),
                          ["arch-package", "marlin-image", "marlin-vm"])
         # The nested GTK gates (G-*) live in the GTK shell proof; journey
