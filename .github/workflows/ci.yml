@@ -182,6 +182,8 @@ jobs:
       # retirement under a fake guest and clock (#1013).
       - run: python3 scripts/tests/test_vm_native_desktop.py
       - run: python3 scripts/tests/test_vm_reference_login.py
+      # The gdm51 overlay may update only gdm.service in the shipped-payload receipt.
+      - run: python3 scripts/tests/test_gdm51_payload_reconcile.py
       - run: python3 scripts/tests/test_vm_unlock_wake.py
       - run: python3 scripts/tests/test_gnome_reference_guest.py
       - run: python3 scripts/tests/test_native_switcher_reference.py
@@ -659,6 +661,7 @@ jobs:
       - run: python3 scripts/tests/test_colord_startup.py
       - run: python3 -m py_compile scripts/tuna-drm-dual scripts/lib/drm_dual.py scripts/lib/drm_kms_readback.py
       - run: python3 scripts/tests/test_drm_dual.py
+      - run: python3 scripts/tests/test_drm_input_startup.py
       - run: scripts/ci-install-vkms
       - run: scripts/tuna-drm-smoke --artifacts drm-smoke-artifacts
       # D-MIRROR-DISABLE, D-LAYOUT-KEEP, D-WORKSPACES-PRIMARY, D-SCALE-MIXED:

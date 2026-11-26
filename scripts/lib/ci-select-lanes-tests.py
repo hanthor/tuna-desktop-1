@@ -56,6 +56,11 @@ class Selection(unittest.TestCase):
         self.assertEqual(pr("scripts/tuna-scroll-proof"), ["scroll-proof"])
         # The vkms gates (D-*) live in the DRM smoke.
         self.assertEqual(pr("scripts/tuna-drm-smoke"), ["drm-smoke"])
+        # D-INPUT-AT-STARTUP's helper and its tests run in the DRM smoke.
+        for path in ("scripts/lib/drm_input_startup.py", "scripts/tests/test_drm_input_startup.py"):
+            for run in (0, 4, 19):
+                with self.subTest(path=path, run=run):
+                    self.assertEqual(pr(path, run=run), ["drm-smoke"])
         # The two-output vkms leg (scripts/tuna-drm-dual) runs in drm-smoke.
         for path in ("scripts/tuna-drm-dual", "scripts/lib/drm_dual.py",
                      "scripts/lib/drm_kms_readback.py", "scripts/tests/test_drm_dual.py"):
