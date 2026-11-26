@@ -242,9 +242,9 @@ run, x0, x1, y = best
 print(x0 - ox, x1 - ox, y - oy)
 TROUGH
 )" || fail G-QS-VOLUME-FEEDBACK "no accent slider fill in quick settings"
-    # shellcheck disable=SC2086 # three numbers
-    set -- $volume_trough
-    trough_x0=$1 trough_x1=$2 trough_y=$3
+    read -r trough_x0 trough_x1 trough_y <<TROUGH_XY
+$volume_trough
+TROUGH_XY
     [ $((trough_x1 - trough_x0)) -gt 100 ] ||
         fail G-QS-VOLUME-FEEDBACK "the volume trough found is only $((trough_x1 - trough_x0)) px wide"
     volume_drag() {
