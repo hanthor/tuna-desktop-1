@@ -1093,7 +1093,7 @@ pub fn event_overlaps(e0: i64, e1: i64, i0: i64, i1: i64) -> bool {
 pub fn day_bounds(day: jiff::civil::Date, tz: &jiff::tz::TimeZone) -> (i64, i64) {
     let at = |d: jiff::civil::Date| {
         d.at(0, 0, 0, 0)
-            .to_zoned(tz.clone())
+            .to_zoned_datetime(tz.clone())
             .map(|z| z.timestamp().as_second())
             .unwrap_or(0)
     };
@@ -1188,7 +1188,7 @@ pub fn event_time_text(
     let local = |t: i64| {
         jiff::Timestamp::from_second(t)
             .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
-            .to_zoned(tz.clone())
+            .to_zoned_datetime(tz.clone())
             .datetime()
     };
     let time_only = |t: i64| {
