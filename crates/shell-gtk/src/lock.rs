@@ -886,37 +886,58 @@ impl LockUi {
         // y 275 and the prompt at y 205. The notifications take the
         // bottom; taller than the room below the stack, they raise the
         // stack up to a tenth of the height from the top, and only the
-        // rest of them scrolls.
+        // rest of them scrolls. Followed on every surface layout, never
+        // on a tick callback: one that never ends keeps the frame clock
+        // (and the session's frame callbacks) running at the refresh
+        // rate for as long as the lock screen is up, blanked or not
+        // (#1122). GTK's own layout handler, connected while the window
+        // realizes, runs first, so the window is already allocated; a
+        // widget queueing a resize (the clock's text) lays the surface
+        // out again.
         {
             let (clock_box, prompt) = (clock_box.clone(), prompt.clone());
             let scroller = notifications.widget().clone();
-            let notes_height = notifications.natural_height();
-            let last = Cell::new((-1, -1));
-            window.add_tick_callback(move |w, _| {
-                let height = w.height();
-                let (clock_top, prompt_top) = logic::lock_offsets(height);
-                let stack_top = clock_top - logic::LOCK_CLOCK_MARGIN;
-                // GNOME's stack is as tall as the taller of the clock
-                // (with its top margin) and the prompt. Measures include
-                // margins, and may still hold the old ones for a frame:
-                // take each one's own height.
-                let own = |w: &gtk::Box| {
-                    let (_, natural, _, _) = w.measure(gtk::Orientation::Vertical, -1);
-                    natural - w.margin_top() - w.margin_bottom()
+            let notes_height = Rc::new(notifications.natural_height());
+            let last = Rc::new(Cell::new((-1, -1)));
+            window.connect_realize(move |w| {
+                let Some(surface) = w.surface() else {
+                    return;
                 };
-                let stack = (logic::LOCK_CLOCK_MARGIN + own(&clock_box))
-                    .max(prompt_top - stack_top + own(&prompt));
-                let (rise, shown) =
-                    logic::lock_notifications_layout(height, stack_top, stack, notes_height());
-                if (height, rise) != last.get() {
-                    last.set((height, rise));
-                    clock_box.set_margin_top(clock_top - rise);
-                    prompt.set_margin_top(prompt_top - rise);
-                }
-                if scroller.max_content_height() != shown {
-                    scroller.set_max_content_height(shown);
-                }
-                glib::ControlFlow::Continue
+                let (window, clock_box, prompt, scroller, last) = (
+                    w.downgrade(),
+                    clock_box.clone(),
+                    prompt.clone(),
+                    scroller.clone(),
+                    last.clone(),
+                );
+                let notes_height = notes_height.clone();
+                surface.connect_layout(move |_, _, _| {
+                    let Some(height) = window.upgrade().map(|w| w.height()) else {
+                        return;
+                    };
+                    let (clock_top, prompt_top) = logic::lock_offsets(height);
+                    let stack_top = clock_top - logic::LOCK_CLOCK_MARGIN;
+                    // GNOME's stack is as tall as the taller of the clock
+                    // (with its top margin) and the prompt. Measures
+                    // include margins, and may still hold the old ones
+                    // for a layout: take each one's own height.
+                    let own = |w: &gtk::Box| {
+                        let (_, natural, _, _) = w.measure(gtk::Orientation::Vertical, -1);
+                        natural - w.margin_top() - w.margin_bottom()
+                    };
+                    let stack = (logic::LOCK_CLOCK_MARGIN + own(&clock_box))
+                        .max(prompt_top - stack_top + own(&prompt));
+                    let (rise, shown) =
+                        logic::lock_notifications_layout(height, stack_top, stack, notes_height());
+                    if (height, rise) != last.get() {
+                        last.set((height, rise));
+                        clock_box.set_margin_top(clock_top - rise);
+                        prompt.set_margin_top(prompt_top - rise);
+                    }
+                    if scroller.max_content_height() != shown {
+                        scroller.set_max_content_height(shown);
+                    }
+                });
             });
         }
 
@@ -1694,6 +1715,78 @@ mod auth_transport_ui_tests {
             "the lock window is destroyed"
         );
         assert_eq!(entry.text.text(), "", "nothing typed survives");
+    }
+
+    fn by_class(root: &gtk::Widget, class: &str) -> Option<gtk::Widget> {
+        if root.has_css_class(class) {
+            return Some(root.clone());
+        }
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            if let Some(found) = by_class(&widget, class) {
+                return Some(found);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+
+    /// #1122: a settled lock screen asks its frame clock for nothing, so
+    /// the session owes it no frame callbacks while it sits (blanked or
+    /// not), and the clock and prompt still sit a third of the way down.
+    #[test]
+    #[ignore = "requires owned Xvfb/private D-Bus and explicit lock idle-frames admission"]
+    fn actual_gtk_settled_lock_screen_requests_no_frames() {
+        assert_eq!(
+            std::env::var("TUNA_REQUIRE_LOCK_IDLE_FRAMES").as_deref(),
+            Ok("1")
+        );
+        assert!(std::env::var_os("WAYLAND_DISPLAY").is_none());
+        gtk::init().expect("actual GTK display required");
+        let calls = Rc::new(Calls::default());
+        let app = gtk::Application::new(None::<&str>, gtk::gio::ApplicationFlags::NON_UNIQUE);
+        let ui = LockUi::new(
+            &app,
+            port(&calls),
+            Box::new(|| logic::ClockFormat::TwentyFourHour),
+        );
+        ui.sync_connection_generation(Some(0));
+        let window = ui.screen(None);
+        window.set_default_size(1280, 800);
+        window.present();
+        assert!(pump_until(Duration::from_secs(5), || window.is_mapped()
+            && window.height() > 0));
+        // Whatever the first frames ease settles well within this.
+        pump_until(Duration::from_secs(2), || false);
+        let (clock_top, prompt_top) = logic::lock_offsets(window.height());
+        let clock_box = by_class(window.upcast_ref(), "unlock-dialog-clock").unwrap();
+        let prompt = by_class(window.upcast_ref(), "login-dialog-prompt-layout").unwrap();
+        // Not the unallocated window's: the placement followed the layout.
+        assert_ne!(clock_top, logic::lock_offsets(0).0);
+        assert_eq!(clock_box.margin_top(), clock_top);
+        assert_eq!(prompt.margin_top(), prompt_top);
+
+        let clock = window
+            .frame_clock()
+            .expect("a realized window has a frame clock");
+        let frames = Rc::new(Cell::new(0u32));
+        let counter = {
+            let frames = frames.clone();
+            clock.connect_after_paint(move |_| frames.set(frames.get() + 1))
+        };
+        pump_until(Duration::from_millis(1500), || false);
+        assert_eq!(frames.get(), 0, "a settled lock screen runs no frames");
+        // The counter sees a frame the window does ask for.
+        window.queue_draw();
+        assert!(pump_until(Duration::from_secs(2), || frames.get() > 0));
+        pump_until(Duration::from_millis(500), || false);
+        let drawn = frames.get();
+        pump_until(Duration::from_millis(1000), || false);
+        assert_eq!(frames.get(), drawn, "and stops again after it");
+        clock.disconnect(counter);
+        println!(
+            "LOCK-IDLE-FRAMES pass a settled lock screen runs no frame clock; clock and prompt at GNOME's offsets"
+        );
     }
 }
 
