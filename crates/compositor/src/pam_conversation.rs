@@ -572,6 +572,7 @@ mod tests {
     fn distinct_fresh_answers_and_activity_use_real_owned_socket_queue() {
         let (mut relay, read, receive, mut handle) = fixture();
         let activity = handle.activity_pending.clone();
+        let taken = handle.answers_taken.clone();
         handle.note_user_input(binding(), 1).unwrap();
         handle.note_user_input(binding(), 1).unwrap(); // coalesced, reserves answer space
         handle.submit(binding(), 1, answers()).unwrap();
@@ -582,6 +583,7 @@ mod tests {
                 1,
                 &[Style::Secret, Style::Visible, Style::Info, Style::Error],
                 &activity,
+                &taken,
             )
             .unwrap();
         let encoded = serde_json::to_string(&result).unwrap();
@@ -634,9 +636,10 @@ mod tests {
         ] {
             let (mut relay, read, receive, handle) = fixture();
             let activity = handle.activity_pending.clone();
+            let taken = handle.answers_taken.clone();
             handle.submit(binding(), 1, result).unwrap();
             assert!(relay
-                .wait_answers(&read, &receive, 1, &[Style::Info], &activity)
+                .wait_answers(&read, &receive, 1, &[Style::Info], &activity, &taken)
                 .is_err());
         }
     }
@@ -645,6 +648,7 @@ mod tests {
         for total in [false, true] {
             let (mut relay, read, receive, handle) = fixture();
             let activity = handle.activity_pending.clone();
+            let taken = handle.answers_taken.clone();
             handle.submit(binding(), 1, answers()).unwrap();
             if total {
                 Arc::get_mut(&mut relay.timing).unwrap().total_deadline = Instant::now();
@@ -657,7 +661,8 @@ mod tests {
                     &receive,
                     1,
                     &[Style::Secret, Style::Visible, Style::Info, Style::Error],
-                    &activity
+                    &activity,
+                    &taken,
                 )
                 .is_err());
         }
@@ -666,6 +671,7 @@ mod tests {
     fn queued_typed_answer_resets_idle_at_input_not_later_worker_receipt() {
         let (mut relay, read, receive, mut handle) = fixture();
         let activity = handle.activity_pending.clone();
+        let taken = handle.answers_taken.clone();
         let input_at = Instant::now() - Duration::from_secs(60);
         *relay.timing.last_input.lock().unwrap() = input_at - Duration::from_secs(10);
         assert!(handle
@@ -680,6 +686,7 @@ mod tests {
                 1,
                 &[Style::Secret, Style::Visible, Style::Info, Style::Error],
                 &activity,
+                &taken,
             )
             .unwrap();
         assert_eq!(*relay.timing.last_input.lock().unwrap(), input_at);
@@ -689,6 +696,7 @@ mod tests {
     fn info_ack_never_extends_input_idle_and_phase_never_extends_total() {
         let (mut relay, read, receive, handle) = fixture();
         let activity = handle.activity_pending.clone();
+        let taken = handle.answers_taken.clone();
         let before = *relay.timing.last_input.lock().unwrap();
         handle
             .submit(
@@ -701,7 +709,7 @@ mod tests {
             )
             .unwrap();
         relay
-            .wait_answers(&read, &receive, 1, &[Style::Info], &activity)
+            .wait_answers(&read, &receive, 1, &[Style::Info], &activity, &taken)
             .unwrap();
         assert_eq!(*relay.timing.last_input.lock().unwrap(), before);
         Arc::get_mut(&mut relay.timing).unwrap().total_deadline =
@@ -736,6 +744,7 @@ mod tests {
         for shutdown in [false, true] {
             let (mut relay, read, receive, handle) = fixture();
             let activity = handle.activity_pending.clone();
+            let taken = handle.answers_taken.clone();
             let cancel = relay.cancel.clone();
             // A fresh dedicated bound wake exposes the SAME shutdown flag that
             // production Backend::shutdown sets, without a pre-ready fd.
@@ -749,7 +758,7 @@ mod tests {
                 send.send(unsafe { libc::syscall(libc::SYS_gettid) })
                     .unwrap();
                 relay
-                    .wait_answers(&read, &receive, 1, &[Style::Secret], &activity)
+                    .wait_answers(&read, &receive, 1, &[Style::Secret], &activity, &taken)
                     .is_err()
             });
             let tid = entered.recv_timeout(Duration::from_secs(2)).unwrap();
