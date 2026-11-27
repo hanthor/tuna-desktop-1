@@ -30,8 +30,10 @@ The `runs-on` of a moved job is a YAML alias (`*runner-24` / `*runner-26`)
 of the expressions anchored on `check` and `journey` in
 `.github/workflows/ci.yml`. They pick the self-hosted scale set when the
 repository variable `CI_RUNNERS` is not `hosted` **and** the event is a push,
-schedule, dispatch, merge group or a pull request whose head repository is
-`tuna-os/tuna-desktop`; otherwise the original GitHub-hosted label.
+schedule, dispatch or a pull request whose head repository is
+`tuna-os/tuna-desktop`; otherwise the original GitHub-hosted label. A merge
+group's `*runner-24` jobs use GitHub-hosted `ubuntu-24.04`
+([below](#what-a-merge-group-runs)).
 
 | Runner | Lanes |
 | --- | --- |
@@ -224,7 +226,10 @@ it can affect:
 
 The merge queue requires `ci-gate` on each merge group (ruleset 28229332).
 A group runs a fixed fast battery, not every lane: `select-lanes`, `check`
-and `gtk-shell-smoke`, which runs beside `check` on `tuna-ci-24.04`. The
+and `gtk-shell-smoke`, which runs beside `check`. Both run on GitHub-hosted
+`ubuntu-24.04`, not the self-hosted pool: pull request runs kept every
+self-hosted slot busy, and a group's `check` waited over 40 minutes for one
+(27 Nov 2026). The
 smoke is one nested GTK session, `scripts/tuna-gtk-shell-proof
 --smoke-only`: the session starts, the bar maps (`G-PANEL`, `A11Y-PANEL`),
 three app windows map (`G-WINDOWS`), the overview opens and picks one
@@ -234,7 +239,7 @@ then `G-SHELL-STABLE`. It restores the `gtk-shell` job's cargo cache and
 uses its apt steps (YAML anchors), so it builds only the workspace crates.
 
 A group therefore takes about as long as `check` (10 to 20 minutes) and
-holds two self-hosted slots instead of about twenty jobs. Every other lane
+holds no self-hosted slot instead of about twenty jobs. Every other lane
 runs on the push to `main` the group becomes, and nightly; push, schedule
 and dispatch never select `gtk-shell-smoke`, since their full `gtk-shell`
 job proves every gate it does. A pull request runs it when it runs every
