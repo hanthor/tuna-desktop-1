@@ -295,8 +295,14 @@ code as root inside its pod.
      (`ACTIONS_RUNNER_HOOK_JOB_STARTED`, baked into the image, out of reach
      of workflows). It fails the job before checkout unless the repository
      is `tuna-os/tuna-desktop` and the event is `push`,
-     `workflow_dispatch`, `schedule`, or `pull_request` whose head
-     repository is `tuna-os/tuna-desktop`.
+     `workflow_dispatch`, `schedule`, `pull_request` whose head
+     repository is `tuna-os/tuna-desktop`, or `merge_group` whose head ref
+     is a merge queue branch (`refs/heads/gh-readonly-queue/*`). GitHub
+     creates that ref in this repository only for a pull request a
+     maintainer put in the queue, so the code it runs has the trust of a
+     merge; a fork's pull request still never runs here on its own.
+     Changing the hook needs the image rebuilt and rolled out
+     (see the rollout steps below).
    - GitHub: the runner group `tuna-desktop-karnataka` has a single selected
      repository, and the repository requires maintainer approval before
      workflows run for **all** outside contributors' pull requests
