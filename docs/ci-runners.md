@@ -27,17 +27,17 @@ Both chart releases use the same chart version (0.15.1 at install).
 ## What runs where
 
 The `runs-on` of a moved job is a YAML alias (`*runner-24` / `*runner-26`)
-of the expressions anchored on `select-lanes` and `orca-speech` in
+of the expressions anchored on `check` and `journey` in
 `.github/workflows/ci.yml`. They pick the self-hosted scale set when the
 repository variable `CI_RUNNERS` is not `hosted` **and** the event is a push,
-schedule, dispatch or a pull request whose head repository is
+schedule, dispatch, merge group or a pull request whose head repository is
 `tuna-os/tuna-desktop`; otherwise the original GitHub-hosted label.
 
 | Runner | Lanes |
 | --- | --- |
-| `tuna-ci-24.04` | select-lanes, check, app-content, scroll-proof, grid-cancel-comparison, gtk-shell, native-reference-context, parity-ledger, docs-shots, ci-gate |
+| `tuna-ci-24.04` | check, app-content, scroll-proof, grid-cancel-comparison, gtk-shell |
 | `tuna-ci-26.04` | journey, orca-speech, portal-security, remote-security, niri-parity |
-| GitHub-hosted, always | arch-package, drm-smoke, hotplug (`ubuntu-26.04`), marlin-vm (pull requests: the primary lifecycle and automatic-timezone legs, plus the Orca 51 leg when parity-ledger runs; push, schedule and dispatch add the Orca 51 leg and both paired reference members), marlin-image (push, schedule and dispatch only), gdm51-native-package |
+| GitHub-hosted, always | arch-package, drm-smoke, hotplug (`ubuntu-26.04`), marlin-vm (pull requests: the primary lifecycle and automatic-timezone legs, plus the Orca 51 leg when parity-ledger runs; push, schedule and dispatch add the Orca 51 leg and both paired reference members), marlin-image (push, schedule and dispatch only), gdm51-native-package, and the short coordination jobs select-lanes, native-reference-context, parity-ledger, docs-shots and ci-gate (`ubuntu-24.04`) |
 
 Why the always-hosted lanes stay hosted:
 
@@ -58,6 +58,12 @@ Why the always-hosted lanes stay hosted:
   with a `packages: write` token. Publishing stays on GitHub's ephemeral VMs
   so a compromised long-lived node (or its shared image store) can never
   sign or push a release image.
+- **select-lanes, native-reference-context, parity-ledger, docs-shots and
+  ci-gate** run for seconds to a few minutes (git, Python, artifacts,
+  shellcheck, jq) but held a full runner slot. On 26-27 Nov 2026 they waited
+  35 to 131 minutes on average for a self-hosted slot while GitHub-hosted
+  jobs started at once; select-lanes gates every other job and ci-gate is
+  the required check, so that wait delayed every run and the merge queue.
 
 The required `gdm51-native-package` factory remains GitHub-hosted and feeds
 only the ordinary lifecycle images' final GDM overlay and fresh-account

@@ -44,11 +44,10 @@ env:
 jobs:
   select-lanes:
     timeout-minutes: 10
-    # Runner choice (docs/ci-runners.md): this repository's own pushes,
-    # schedules, dispatches and branch pull requests run on the self-hosted
-    # karnataka scale sets; fork pull requests, and every job while the
-    # CI_RUNNERS repository variable is `hosted`, use GitHub-hosted runners.
-    runs-on: &runner-24 ${{ vars.CI_RUNNERS != 'hosted' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'tuna-ci-24.04' || 'ubuntu-latest' }}
+    # Seconds of Python and git, but every other job waits on it: on the
+    # self-hosted pool it sat queued 35 min on average (26-27 Nov 2026), so
+    # it always runs on a GitHub-hosted runner (docs/ci-runners.md).
+    runs-on: ubuntu-24.04
     outputs:
       lanes: ${{ steps.lanes.outputs.lanes }}
       vm_matrix: ${{ steps.lanes.outputs.vm_matrix }}
@@ -103,7 +102,12 @@ jobs:
   check:
     # Typically 10 min, slowest seen 16; a hung test must not hold a runner 6 h.
     timeout-minutes: 45
-    runs-on: *runner-24
+    # Runner choice (docs/ci-runners.md): this repository's own pushes,
+    # schedules, dispatches, merge groups and branch pull requests run on the
+    # self-hosted karnataka scale sets; fork pull requests, and every job
+    # while the CI_RUNNERS repository variable is `hosted`, use GitHub-hosted
+    # runners.
+    runs-on: &runner-24 ${{ vars.CI_RUNNERS != 'hosted' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'tuna-ci-24.04' || 'ubuntu-latest' }}
     permissions:
       contents: read
       actions: read
@@ -406,7 +410,7 @@ jobs:
           retention-days: 14
 
   journey:
-    # Same choice as select-lanes' runs-on, on the Ubuntu 26.04 runners.
+    # Same choice as check's runs-on, on the Ubuntu 26.04 runners.
     runs-on: &runner-26 ${{ vars.CI_RUNNERS != 'hosted' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'tuna-ci-26.04' || 'ubuntu-26.04' }}
     # Runs beside check: self-hosted minutes are free, and a red check still
     # fails ci-gate. (fprint-phase-proof, grid-cancel-comparison and
@@ -2279,7 +2283,8 @@ jobs:
   native-reference-context:
     # Artifact-only consumer of the two DEV members, not another VM producer.
     timeout-minutes: 10
-    runs-on: *runner-24
+    # Artifact-only; hosted so it never waits for a self-hosted slot.
+    runs-on: ubuntu-24.04
     needs: [select-lanes, marlin-vm]
     # The two reference members it downloads are not built on pull requests
     # (select-lanes' vm_matrix).
@@ -2317,7 +2322,8 @@ jobs:
     # passed in this run. `needs: marlin-vm` waits for every leg of its
     # matrix; selecting this lane adds the Orca 51 leg to a pull request's
     # matrix (scripts/ci-select-lanes vm_matrix), so its artifact always exists.
-    runs-on: *runner-24
+    # Artifact and Python only; hosted so it never waits for a self-hosted slot.
+    runs-on: ubuntu-24.04
     needs: [select-lanes, check, journey, gtk-shell, orca-speech, drm-smoke, hotplug, marlin-vm, remote-security]
     if: contains(fromJSON(needs.select-lanes.outputs.lanes), 'parity-ledger')
     steps:
@@ -2399,7 +2405,8 @@ jobs:
 
   docs-shots:
     timeout-minutes: 20
-    runs-on: *runner-24
+    # Artifact and shellcheck only; hosted so it never waits for a self-hosted slot.
+    runs-on: ubuntu-24.04
     needs: [select-lanes, journey, app-content, scroll-proof]
     if: contains(fromJSON(needs.select-lanes.outputs.lanes), 'docs-shots')
     steps:
@@ -2436,12 +2443,12 @@ jobs:
     timeout-minutes: 10
     # One stable status for the run: lanes the selection skipped report
     # skipped, any failed or cancelled job fails the gate. A superseded run
-    # (cancel-in-progress) needs no gate: with always() its gate still queued
-    # for a self-hosted runner, and the replacing run stayed pending until it
-    # got one, often for hours.
+    # (cancel-in-progress) needs no gate. It runs on a GitHub-hosted runner:
+    # on the self-hosted pool this seconds-long job waited 80 min on average
+    # for a slot, which held the required check (and the merge queue) open.
     if: ${{ !cancelled() }}
     needs: [select-lanes, check, journey, app-content, scroll-proof, drm-smoke, hotplug, grid-cancel-comparison, gtk-shell, orca-speech, portal-security, remote-security, niri-parity, arch-package, marlin-image, gdm51-native-package, marlin-vm, native-reference-context, parity-ledger, docs-shots]
-    runs-on: *runner-24
+    runs-on: ubuntu-24.04
     steps:
       - env:
           RESULTS: ${{ toJSON(needs) }}
