@@ -24,6 +24,12 @@ class Selection(unittest.TestCase):
         for event in ("push", "schedule", "workflow_dispatch"):
             self.assertEqual(m.select(event, 7, 2, [])[0], m.LANES)
 
+    def test_a_merge_group_runs_every_lane(self):
+        # The merge queue's result is what lands on main: no path selection
+        # and no round robin, whatever the queued pull requests changed.
+        for run in range(4):
+            self.assertEqual(m.select("merge_group", run, 2, ["docs/x.md"])[0], m.LANES)
+
     def test_shared_inputs_run_every_lane(self):
         for path in (".github/workflows/ci.yml", "Cargo.lock", "Cargo.toml",
                      "third-party/smithay/src/lib.rs", "scripts/ci-select-lanes",
@@ -421,6 +427,25 @@ class WorkflowSync(unittest.TestCase):
         # reference members that native-reference-context downloads are
         # produced on the other events.
         self.assertIn("pull_request", self.jobs["native-reference-context"]["if"])
+
+    def test_the_merge_queue_gets_its_required_check(self):
+        # A repository rule requiring ci-gate from the merge queue holds
+        # every queued pull request until this workflow reports on the
+        # merge group; a workflow that does not trigger on it never does.
+        # PyYAML reads the key `on` as True.
+        workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+        triggers = workflow.get("on", workflow.get(True))
+        self.assertIn("merge_group", triggers)
+        # The gate must not be skipped for the event, and the runner choice
+        # must not send the merge group to the fork (hosted) path.
+        self.assertEqual(self.jobs["ci-gate"]["if"], "${{ !cancelled() }}")
+        self.assertIn("github.event_name != 'pull_request'", self.jobs["select-lanes"]["runs-on"])
+        # Canonical media is compared with the group's base, not with a
+        # pull request base or a push's previous head, neither of which a
+        # merge group has.
+        media = next(s for s in self.jobs["check"]["steps"]
+                     if "MEDIA_BASE_SHA" in (s.get("env") or {}))
+        self.assertIn("github.event.merge_group.base_sha", media["env"]["MEDIA_BASE_SHA"])
 
     def test_gtk_shell_slices_run_on_binaries_this_job_built(self):
         # The slices run when an unrelated earlier step failed and skipped

@@ -69,6 +69,31 @@ wait for their producing proof jobs.
 selected job fails or is cancelled. Only unselected proof lanes may be
 skipped. To run every lane on a branch, dispatch `ci` on it.
 
+### Merge queue
+
+`ci` also runs on `merge_group`, the event GitHub raises for each merge
+queue entry: a temporary branch holding `main` plus the queued pull
+requests ahead of that entry. A merge group is not a `pull_request`, so
+`scripts/ci-select-lanes` selects every lane, the Marlin VM matrix adds the
+main-only legs, and the jobs run on the repository's own runners. Its
+`ci-gate` is the status a merge queue rule should require.
+
+The trigger does nothing until a repository rule turns the queue on. Two
+things to settle when it does:
+
+- A full run takes far longer than a pull request's selected lanes. Set
+  the rule's merge-group size above one so one run lands several pull
+  requests, and check runner capacity first
+  ([ci-runners.md](ci-runners.md)): each group adds a full run to the
+  pull-request runs already queued.
+- Only `ci` reports on a merge group. `Ratchet`, `actions-security` and
+  `Measured test coverage` still run on pull requests and on `main` only;
+  requiring one of them from the queue without adding `merge_group` to its
+  workflow holds every queued pull request forever.
+
+`WorkflowSync.test_the_merge_queue_gets_its_required_check` in
+`scripts/lib/ci-select-lanes-tests.py` fails if the trigger is removed.
+
 ## Native Orca speech proof
 
 The `orca-speech` CI job builds Ubuntu Orca with Tuna's package-owned password
