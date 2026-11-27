@@ -74,6 +74,10 @@ class RunsOnExpression(unittest.TestCase):
         for name, expression in expressions().items():
             hosted = 'ubuntu-latest' if name == 'runner-24' else 'ubuntu-26.04'
             own = 'tuna-ci-24.04' if name == 'runner-24' else 'tuna-ci-26.04'
+            # A merge group's runner-24 jobs (check, gtk-shell-smoke) never
+            # wait for a self-hosted slot; runner-26 jobs do not run in one.
+            group = 'ubuntu-24.04' if name == 'runner-24' else own
+            group_hosted = 'ubuntu-24.04' if name == 'runner-24' else hosted
             cases = [
                 # (CI_RUNNERS, event, head repository) -> label
                 ('', 'pull_request', REPO, own),
@@ -81,10 +85,10 @@ class RunsOnExpression(unittest.TestCase):
                 ('self-hosted', 'pull_request', FORK, hosted),
                 ('', 'push', None, own),
                 ('', 'schedule', None, own),
-                ('', 'merge_group', None, own),
+                ('', 'merge_group', None, group),
                 ('hosted', 'pull_request', REPO, hosted),
                 ('hosted', 'push', None, hosted),
-                ('hosted', 'merge_group', None, hosted),
+                ('hosted', 'merge_group', None, group_hosted),
             ]
             for ci_runners, event, head, label in cases:
                 with self.subTest(alias=name, ci_runners=ci_runners, event=event, head=head):
