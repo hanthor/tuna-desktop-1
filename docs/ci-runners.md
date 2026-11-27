@@ -35,7 +35,7 @@ schedule, dispatch, merge group or a pull request whose head repository is
 
 | Runner | Lanes |
 | --- | --- |
-| `tuna-ci-24.04` | check, app-content, scroll-proof, grid-cancel-comparison, gtk-shell |
+| `tuna-ci-24.04` | check, desktop-proofs, gtk-shell, gtk-shell-smoke |
 | `tuna-ci-26.04` | journey, orca-speech, portal-security, remote-security, niri-parity |
 | GitHub-hosted, always | arch-package, drm-smoke, hotplug (`ubuntu-26.04`), marlin-vm (pull requests: the primary lifecycle and automatic-timezone legs, plus the Orca 51 leg when parity-ledger runs; push, schedule and dispatch add the Orca 51 leg and both paired reference members), marlin-image (push, schedule and dispatch only), gdm51-native-package, and the short coordination jobs select-lanes, native-reference-context, parity-ledger, docs-shots and ci-gate (`ubuntu-24.04`) |
 
@@ -82,8 +82,9 @@ runners; the same aliases can move them.
 
 ## Private GTK AT-SPI comparison dependency
 
-`grid-cancel-comparison` stages Ubuntu GTK `4.14.5+ds-0ubuntu0.10` with
-upstream commit `21d3eb76b68d6758122eddaf00b5823f9b2d7f34` using the existing
+The grid-cancel comparison in `desktop-proofs` stages Ubuntu GTK
+`4.14.5+ds-0ubuntu0.10` with upstream commit
+`21d3eb76b68d6758122eddaf00b5823f9b2d7f34` using the existing
 workflow-owned `ci-tool` action. The installer checks both Ubuntu source
 archive hashes and the patch hash; it retains the license, Ubuntu patch
 series, build options, compiler identity and runtime ELF hash/build ID.
@@ -195,23 +196,49 @@ it can affect:
   the `arch-package` consumers) wait for `check`, so a red `check` does not
   also burn hosted minutes. `check` takes about 10 minutes (run
   42332450103: `cargo test` 194 s, `maintained-media-tests` 69 s, apt 52 s).
-  The self-hosted `journey`, `app-content`, `scroll-proof` and `orca-speech`
-  run beside it; `ci-gate` still fails when `check` does.
-  `fprint-phase-proof`, `grid-cancel-comparison` and `gtk-shell` also wait
-  for `check`: they check out its `tested_sha` output.
+  The self-hosted `journey` and `orca-speech` run beside it; `ci-gate` still
+  fails when `check` does. `fprint-phase-proof`, `desktop-proofs` and
+  `gtk-shell` wait for `check`: they check out its `tested_sha` output.
+  `desktop-proofs` is one job for three short nested-session proofs that
+  share a build: the grid-cancel comparison, then `tuna-app-content` and
+  `tuna-scroll-proof` on the comparison's fixed build. Each keeps its own
+  step and artifact (`grid-cancel-comparison`, `app-content-shots`,
+  `scroll-proof-shots`), and the last two run even when an earlier proof
+  failed.
 - `scripts/ci-select-lanes` picks the lanes: docs, other non-runtime files and
   the tooling of other workflows (its `NO_LANE` list) pick none, a lane's own
   proof script picks that lane, an edit confined to some jobs of `ci.yml`
   picks those jobs' lanes plus every job that downloads their artifacts
   (derived from `needs:` and `download-artifact` in `ci.yml`: an
   `arch-package` edit also picks its package consumers, a `check` edit picks
-  `parity-ledger`), and any other code picks `gtk-shell` plus a rotating
-  slice. Shared CI inputs still pick every lane.
+  `parity-ledger`), and any other code picks `gtk-shell` and
+  `desktop-proofs` plus a rotating slice. Shared CI inputs still pick every
+  lane, `gtk-shell-smoke` included.
 - A newer push supersedes the older run (`concurrency` with
   `cancel-in-progress`, except for `main`). The superseded run queues no
   `ci-gate` ([below](#queue-supersession-and-closed-pull-requests)).
 - `marlin-tuna-nightly` qualifies the published image on schedule and
   dispatch only; dispatch it on a branch to test a change to it.
+
+## What a merge group runs
+
+The merge queue requires `ci-gate` on each merge group (ruleset 28229332).
+A group runs a fixed fast battery, not every lane: `select-lanes`, `check`
+and `gtk-shell-smoke`, which runs beside `check` on `tuna-ci-24.04`. The
+smoke is one nested GTK session, `scripts/tuna-gtk-shell-proof
+--smoke-only`: the session starts, the bar maps (`G-PANEL`, `A11Y-PANEL`),
+three app windows map (`G-WINDOWS`), the overview opens and picks one
+(`G-OV-OPEN`, `G-OV-PICK`), and the session locks over the open date menu
+and quick settings and unlocks through PAM (`G-LOCK-WITH-MENU-OPEN`),
+then `G-SHELL-STABLE`. It restores the `gtk-shell` job's cargo cache and
+uses its apt steps (YAML anchors), so it builds only the workspace crates.
+
+A group therefore takes about as long as `check` (10 to 20 minutes) and
+holds two self-hosted slots instead of about twenty jobs. Every other lane
+runs on the push to `main` the group becomes, and nightly; push, schedule
+and dispatch never select `gtk-shell-smoke`, since their full `gtk-shell`
+job proves every gate it does. A pull request runs it when it runs every
+lane (a shared CI input) or edits its job.
 
 ## Queue supersession and closed pull requests
 
