@@ -931,6 +931,20 @@ commands (`down N`, `move DX DY MS`, `hold MS`, `up`, `swipe N DX DY MS
 [PAUSE]`, `scroll`, `tap`, `click`) on stdin, in millimetres and
 milliseconds. Other phases can import `create_touchpad()` from it.
 
+`D-OVERVIEW-EXIT` starts a session in the overview, as a GDM login does,
+and presses Escape once on an emulated USB keyboard
+(`scripts/lib/tuna-uinput-keyboard.py`, `tap KEY...` on stdin). After
+that it sends no input. `GNOME_SHELL_SLOWDOWN_FACTOR=4` stretches the
+250 ms exit to one second, past the 500 ms that display-rate ticks
+outlive an input event. The exit must therefore draw its own frames until
+it settles. The frame counter must then hold still, and the kernel's
+scanout, read with ffmpeg `kmsgrab`, must be the settled desktop: one
+colour below the top bar, with no workspace card and no overview
+backdrop. This rules out a DRM-side stall behind the part-way card in the
+VM journeys' frame 06. Those frames come from the QEMU VNC console, which
+can keep stale pixels for page-flipping virtio-gpu guests (QEMU's
+"ui/vnc: recover a job dropped by vnc_abort_display_jobs()").
+
 `scripts/tuna-drm-dual` is the two-output leg the `drm-smoke` job runs
 after the smoke test. It creates a vkms configfs device (`tuna-dual`,
 Linux 6.19 or newer) with two connected CRTC/connector pipes, A and B,
