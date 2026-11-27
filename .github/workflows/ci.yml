@@ -218,6 +218,20 @@ jobs:
       - run: python3 scripts/tests/test_vm_strip_fixture_owner.py
       - run: python3 scripts/tests/test_vm_strip_image.py
       - run: python3 scripts/tests/test_vm_strip_stationary_edge.py
+      # The image policy is checked with sudo's own visudo and cvtsudoers,
+      # as on the Fedora image. Ubuntu 26.04 (hosted runners for fork pull
+      # requests) defaults to sudo-rs, which has no cvtsudoers and owns the
+      # visudo alternative; sudo's tools there are the *.ws binaries.
+      - name: Use sudo's own sudoers tools
+        run: |
+          if ! command -v cvtsudoers >/dev/null; then
+            [ -x /usr/bin/cvtsudoers.ws ] || sudo apt-get install -y sudo
+            tools="$RUNNER_TEMP/sudoers-tools"
+            mkdir -p "$tools"
+            ln -sf /usr/bin/cvtsudoers.ws "$tools/cvtsudoers"
+            ln -sf /usr/sbin/visudo.ws "$tools/visudo"
+            echo "$tools" >> "$GITHUB_PATH"
+          fi
       - run: python3 scripts/tests/test_fresh_accounts.py
       - run: python3 scripts/tests/test_try_tuna_signature_gate.py
       - run: python3 scripts/lib/keyring-owner-proof-tests.py
