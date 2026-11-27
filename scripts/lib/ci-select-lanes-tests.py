@@ -99,6 +99,10 @@ class Selection(unittest.TestCase):
                           "remote-security", "arch-package", "marlin-vm", "parity-ledger"])
         self.assertEqual(pr("scripts/tuna-orca-speech-proof"), ["orca-speech"])
         self.assertEqual(pr("scripts/lib/tuna-orca-speech.py"), ["orca-speech"])
+        # The GTK proof sources the top bar and dash slice; only gtk-shell
+        # runs its checker (#1198, #1199).
+        self.assertEqual(pr("scripts/lib/tuna-panel-dash-proof.sh"), ["journey", "gtk-shell"])
+        self.assertEqual(pr("scripts/lib/tuna-panel-dash-check.py"), ["gtk-shell"])
         # The guest's /usr/libexec/tuna-datetime-proof (G-DATETIME-*).
         self.assertEqual(pr("scripts/lib/tuna-datetime-proof.py"),
                          ["arch-package", "marlin-image", "marlin-vm"])
