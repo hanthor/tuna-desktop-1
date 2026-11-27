@@ -16,7 +16,9 @@ import github_api  # noqa: E402
 
 REPO = "tuna-os/tuna-desktop"
 WORKFLOW = ".github/workflows/ci.yml"
-JOB = "grid-cancel-comparison"
+# The ci.yml job that runs the comparison (beside the app content and
+# scroll-mode strip proofs).
+JOB = "desktop-proofs"
 OLD_SHA = "da1b7c40c7cc69f5800970e61cffa3d4e95c3f65"
 OLD_PARENT = "416ce950cb4dabc7701f8c66ab1cdb680d493287"
 OLD_PATCH = "0050999ead67c1fcc56a81402c6d2377ed39a2e234900eb35a6525654d4761ef"
