@@ -303,6 +303,27 @@ menu's gates alone, the same functions the full GTK proof calls
 wall clock's next minute to see the world clocks tick. The Weather card is
 fed from `TUNA_WEATHER_FIXTURE`, so the slice needs no network.
 
+`scripts/tuna-gtk-shell-proof --panel-dash-only --artifacts DIR` runs
+GNOME 51's top bar and dash checks (`scripts/lib/tuna-panel-dash-proof.sh`,
+measured by `scripts/lib/tuna-panel-dash-check.py`). G-PANEL-LAYOUT (#1199)
+reads Activities, Date and Time and System from the bar's accessible tree,
+in the reading direction, with the clock's centre within one physical pixel
+of the output's; then it hovers each control and measures its drawn pill:
+Activities starts and the system menu ends within GNOME's 3px panel-button
+border of the output's edges, and the clock's pill is centred to a physical
+pixel. GTK reports a padded button's accessible origin at its content box, so
+the edges come from pixels. G-DASH-FAVORITES-RUNNING (#1198) sets
+`org.gnome.shell favorite-apps` (two apps and a missing one between them)
+before the shell starts, with no Tuna pins, runs one favourite and one other
+app, and opens the overview: the dash's accessible tree must list the
+favourites in schema order, then the running app after a separator, then
+Show Apps, along the reading direction, with the running dot (in the tree
+and as near-white pixels under the tile) under exactly the two running apps.
+The slice runs at `TUNA_SCALE` in the proof's locale: a scale other than 1
+adds `-FRACTIONAL` and a right-to-left locale `-RTL` to both gate names. CI
+runs it at 100%, at 125% and under `he_IL.UTF-8`, mirrored as GNOME mirrors
+it; the locale must be generated, or the slice fails.
+
 `scripts/tuna-gtk-shell-proof --search-leak-only --artifacts DIR` runs
 G-SEARCH-LEAK (#1084): after five warm-up searches, 50 overview searches
 with results (`TUNA_SEARCH_LEAK_SEARCHES` sets the count), each typed with
@@ -800,13 +821,13 @@ TUNA_REQUIRE_PAM_WRAPPER=1 scripts/tuna-gtk-shell-proof --artifacts gtk-shell-ar
 
 `--notify-lock-only` stops after panel readiness and runs just the
 lock-screen notification, media player, notification sound,
-disabled-app restore and banner expansion gates (G-NOTIFY-LOCK,
-G-NOTIFY-LOCK-PIXELS, G-NOTIFY-LOCK-PUSH, G-NOTIFY-LOCK-LIVE,
-G-NOTIFY-LOCK-MEDIA, G-NOTIFY-SOUND, G-NOTIFY-RESTORE,
-G-NOTIFY-EXPANDED); it needs pam_wrapper to unlock. The proof's
-`canberra-gtk-play` stand-in records every event sound the shell asks
-for in `canberra-calls`, and `tuna-mpris-player-stub.py` is the media
-player.
+disabled-app restore, banner expansion and date-menu media gates
+(G-NOTIFY-LOCK, G-NOTIFY-LOCK-PIXELS, G-NOTIFY-LOCK-PUSH,
+G-NOTIFY-LOCK-LIVE, G-NOTIFY-LOCK-MEDIA, G-NOTIFY-SOUND,
+G-NOTIFY-RESTORE, G-NOTIFY-EXPANDED, G-NOTIFY-CALENDAR-MEDIA); it needs
+pam_wrapper to unlock. The proof's `canberra-gtk-play` stand-in records
+every event sound the shell asks for in `canberra-calls`, and
+`tuna-mpris-player-stub.py` is the media player.
 The restore gate opens the real message-tray binding after retaining the
 long-word redaction-test notifications in history. Card text must wrap at
 character boundaries when needed, and collapsed groups must measure only
@@ -909,6 +930,20 @@ also runs on its own and reads
 commands (`down N`, `move DX DY MS`, `hold MS`, `up`, `swipe N DX DY MS
 [PAUSE]`, `scroll`, `tap`, `click`) on stdin, in millimetres and
 milliseconds. Other phases can import `create_touchpad()` from it.
+
+`D-OVERVIEW-EXIT` starts a session in the overview, as a GDM login does,
+and presses Escape once on an emulated USB keyboard
+(`scripts/lib/tuna-uinput-keyboard.py`, `tap KEY...` on stdin). After
+that it sends no input. `GNOME_SHELL_SLOWDOWN_FACTOR=4` stretches the
+250 ms exit to one second, past the 500 ms that display-rate ticks
+outlive an input event. The exit must therefore draw its own frames until
+it settles. The frame counter must then hold still, and the kernel's
+scanout, read with ffmpeg `kmsgrab`, must be the settled desktop: one
+colour below the top bar, with no workspace card and no overview
+backdrop. This rules out a DRM-side stall behind the part-way card in the
+VM journeys' frame 06. Those frames come from the QEMU VNC console, which
+can keep stale pixels for page-flipping virtio-gpu guests (QEMU's
+"ui/vnc: recover a job dropped by vnc_abort_display_jobs()").
 
 `scripts/tuna-drm-dual` is the two-output leg the `drm-smoke` job runs
 after the smoke test. It creates a vkms configfs device (`tuna-dual`,

@@ -103,6 +103,10 @@ class Selection(unittest.TestCase):
                           "remote-security", "arch-package", "marlin-vm", "parity-ledger"])
         self.assertEqual(pr("scripts/tuna-orca-speech-proof"), ["orca-speech"])
         self.assertEqual(pr("scripts/lib/tuna-orca-speech.py"), ["orca-speech"])
+        # The GTK proof sources the top bar and dash slice; only gtk-shell
+        # runs its checker (#1198, #1199).
+        self.assertEqual(pr("scripts/lib/tuna-panel-dash-proof.sh"), ["journey", "gtk-shell"])
+        self.assertEqual(pr("scripts/lib/tuna-panel-dash-check.py"), ["gtk-shell"])
         # The guest's /usr/libexec/tuna-datetime-proof (G-DATETIME-*).
         self.assertEqual(pr("scripts/lib/tuna-datetime-proof.py"),
                          ["arch-package", "marlin-image", "marlin-vm"])
@@ -216,6 +220,13 @@ class Selection(unittest.TestCase):
         # Control: another portal helper still rotates.
         self.assertIn("gtk-shell", pr("scripts/lib/tuna-portal-consent.py", run=0))
 
+    def test_uinput_emulators_run_drm_smoke_without_rotation(self):
+        # Only tuna-drm-smoke drives them; as code paths they rotated lanes
+        # and could skip drm-smoke.
+        for name in ("keyboard", "touchpad", "tablet"):
+            for run in range(len(m.ROTATION)):
+                self.assertEqual(pr(f"scripts/lib/tuna-uinput-{name}.py", run=run),
+                                 ["drm-smoke"], name)
     def test_native_desktop_driver_runs_the_vm_lane_that_drives_it(self):
         # #1013: a shared-driver change runs the VM lane whose autotz profile
         # drives it, not whatever slice the rotation picks.
