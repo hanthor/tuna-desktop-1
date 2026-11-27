@@ -105,12 +105,14 @@ jobs:
     timeout-minutes: 45
     # Runner choice (docs/ci-runners.md): this repository's own pushes,
     # schedules, dispatches and branch pull requests run on the self-hosted
-    # karnataka scale sets; fork pull requests, and every job while the
-    # CI_RUNNERS repository variable is `hosted`, use GitHub-hosted runners.
-    # A merge group's two jobs (check, gtk-shell-smoke) use GitHub-hosted
-    # ubuntu-24.04, so the queue never waits behind pull request runs for a
-    # self-hosted slot.
-    runs-on: &runner-24 ${{ vars.CI_RUNNERS != 'hosted' && github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'tuna-ci-24.04' || github.event_name == 'merge_group' && 'ubuntu-24.04' || 'ubuntu-latest' }}
+    # karnataka scale sets. Everything else uses GitHub-hosted ubuntu-24.04,
+    # the OS of tuna-ci-24.04 (ubuntu-latest became 26.04, where pinned
+    # 24.04 dependencies such as the GTK AT-SPI regression build refuse to
+    # run): fork pull requests, every job while the CI_RUNNERS repository
+    # variable is `hosted`, and a merge group's two jobs (check,
+    # gtk-shell-smoke), so the queue never waits behind pull request runs
+    # for a self-hosted slot.
+    runs-on: &runner-24 ${{ vars.CI_RUNNERS != 'hosted' && github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'tuna-ci-24.04' || 'ubuntu-24.04' }}
     permissions:
       contents: read
       actions: read
@@ -339,12 +341,13 @@ jobs:
         run: |
           cargo fmt --manifest-path third-party/reis/Cargo.toml --all -- --check
           cargo test --manifest-path third-party/reis/Cargo.toml --lib roost_transport_bounds
-      - run: rustfmt --edition 2021 --check third-party/smithay/src/xwayland/xserver.rs third-party/smithay/src/backend/drm/surface/gbm.rs third-party/smithay/src/wayland/selection/data_device/dnd_grab.rs third-party/smithay/src/wayland/selection/data_device/mod.rs third-party/smithay/src/backend/renderer/gles/mod.rs third-party/smithay/src/backend/renderer/gles/texture.rs
+      - run: rustfmt --edition 2021 --check third-party/smithay/src/xwayland/xserver.rs third-party/smithay/src/backend/drm/surface/gbm.rs third-party/smithay/src/wayland/selection/data_device/dnd_grab.rs third-party/smithay/src/wayland/selection/data_device/mod.rs third-party/smithay/src/backend/renderer/gles/mod.rs third-party/smithay/src/backend/renderer/gles/texture.rs third-party/smithay/src/backend/allocator/gbm.rs
       - run: cargo test --locked --manifest-path third-party/smithay/Cargo.toml --no-default-features --features xwayland,wayland_frontend prepared_socket
       - run: cargo test --locked --manifest-path third-party/smithay/Cargo.toml --no-default-features --features xwayland,wayland_frontend --lib cancellation_tests
       # GL tests on surfaceless Mesa (llvmpipe); libegl1/libgl1-mesa-dri above.
       - run: cargo test --locked --manifest-path third-party/smithay/Cargo.toml --no-default-features --features renderer_gl --lib per_frame_read_fence
       - run: cargo test --locked --manifest-path third-party/smithay/Cargo.toml --no-default-features --features renderer_gl --lib unscaled_nearest
+      - run: cargo test --locked --manifest-path third-party/smithay/Cargo.toml --no-default-features --features renderer_gl --lib instanced_rect
       - name: Check nested compositor without default features
         run: cargo check --locked -p tuna-compositor --no-default-features
       - run: cargo clippy --workspace --all-targets -- -D warnings
